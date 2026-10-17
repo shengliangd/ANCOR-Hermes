@@ -48,7 +48,7 @@ Use native config commands after checking their help. The decomposer reads profi
 
 ## 4. Create a background leader session
 
-Create one long-lived `ancor-leader` session for Kanban coordination, separate from the user's normal conversation. Keep the leader Gateway running so it can receive runtime wake events.
+Create one long-lived `ancor-leader` API session for Kanban coordination, separate from the user's normal conversation. Create it through the running Hermes Gateway API under the `ancor-leader` profile, not with a CLI chat session. Keep the leader Gateway running so it can receive runtime wake events.
 
 ```text
 Worker blocked / completed

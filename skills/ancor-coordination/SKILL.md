@@ -42,17 +42,23 @@ When awakened after child completion or review:
 
 For long-running work, expect workers to heartbeat and inspect tasks with excessive runtime or stale progress. Correct genuine drift without producing routine noise.
 
-The leader creates one root task on the `ancor` board after the user confirms the execution brief. Immediately record the root task ID and subscribe it to the configured user-facing native home-channel route with `notify+wake`, using `ancor-leader` as `--notifier-profile`. Use the same subscription for child tasks whose terminal events must wake the leader. For example, after a task is created, use the native equivalent of:
+The leader creates one root task on the `ancor` board after the user confirms the execution brief. Immediately record the root task ID and subscribe it to the configured user-facing native home-channel route with `notify`, and subscribe it to the long-lived `api_server` leader session with `wake`, using `ancor-leader` as `--notifier-profile`. The API session ID must be the raw session ID returned by the Gateway API; do not use a CLI-created session ID. Use the same subscriptions for child tasks whose terminal events must wake the leader. For example, after a task is created, use the native equivalent of:
 
 ```bash
 hermes kanban --board ancor notify-subscribe TASK_ID \
   --platform <home-channel platform> \
   --chat-id <home-channel id> \
   --notifier-profile ancor-leader \
-  --delivery-mode notify+wake
+  --delivery-mode notify
+
+hermes kanban --board ancor notify-subscribe TASK_ID \
+  --platform api_server \
+  --chat-id <raw ancor-leader API session id> \
+  --notifier-profile ancor-leader \
+  --delivery-mode wake
 ```
 
-Use the actual configured home-channel platform and target; do not hard-code a platform. Verify the subscription is recorded before dispatching child work. This subscription both sends the native event notification to the configured user destination and wakes the leader Gateway agent. Do not route these events back to the user's originating conversation by default.
+Use the actual configured home-channel platform and target; do not hard-code a platform. Verify both subscriptions are recorded before dispatching child work. The home-channel subscription sends the native event notification to the user destination. The `api_server` subscription wakes the independent background leader session. Do not route these events back to the user's originating conversation by default.
 
 When awakened, inspect the root, affected task, dependencies, comments, handoffs, and recent events. Try safe coordination remedies first. Ask the user through the configured home-channel routing only when human input or authorization is genuinely required.
 
