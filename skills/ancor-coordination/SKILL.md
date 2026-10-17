@@ -42,7 +42,7 @@ When awakened after child completion or review:
 
 For long-running work, expect workers to heartbeat and inspect tasks with excessive runtime or stale progress. Correct genuine drift without producing routine noise.
 
-The home-channel notification subscription must target the dedicated ANCOR channel and be owned by the Profile that owns the actual platform adapter and credentials. In the standard multiplexed setup, the adapter may remain on `default`, while the dedicated channel's conversation route points to `ancor-leader`. Therefore use the platform owner for notification delivery, and use `ancor-leader` for the API wake subscription. Do not assume `notifier_profile` should always equal `ancor-leader`.
+After creating the confirmed root task, establish its runtime subscriptions; apply the same wake subscription to child tasks that require coordination. Target user notifications at the dedicated ANCOR channel. Subscription ownership must match the channel's effective runtime route, not merely the profile holding the bot credentials. With `gateway.profile_routes` routing the channel to `ancor-leader`, use `--notifier-profile ancor-leader` for both subscriptions. The transport adapter and credentials may still belong to `default`. A notification stamped `default` is rejected when the channel is routed to `ancor-leader`. Without a profile route, an unrouted default-owned channel instead uses `default`.
 
 For the standard setup:
 
@@ -50,7 +50,7 @@ For the standard setup:
 hermes kanban --board ancor notify-subscribe TASK_ID \
   --platform <dedicated-channel platform> \
   --chat-id <dedicated-channel id> \
-  --notifier-profile <profile owning the platform adapter> \
+  --notifier-profile ancor-leader \
   --delivery-mode notify
 
 hermes kanban --board ancor notify-subscribe TASK_ID \
@@ -60,7 +60,7 @@ hermes kanban --board ancor notify-subscribe TASK_ID \
   --delivery-mode wake
 ```
 
-Verify both subscriptions are recorded and send a harmless end-to-end test event before dispatching real child work. The notification adapter owner may be `default` even though replies in the dedicated channel are routed to `ancor-leader` by `gateway.profile_routes`.
+Verify both subscriptions are recorded before dispatching work. Use the raw session ID returned by the leader-scoped Gateway API for background wake. Preserve the configured channel/chat type and any thread routing metadata. Re-check existing subscriptions after changing channel routes; do not assume re-subscribing has changed ownership without reading the record back. Validate delivery once when deploying or changing routing, rather than generating a test notification for every task.
 
 When awakened, inspect the root, affected task, dependencies, comments, handoffs, and recent events. Try safe coordination remedies first. Ask the user through the configured home-channel routing only when human input or authorization is genuinely required.
 

@@ -82,6 +82,8 @@ gateway:
 
 Use the installed Hermes routing/configuration commands where available; do not hand-edit live configuration without checking their help. The exact platform and target remain deployment-specific. Do not add a platform-specific ANCOR destination or put credentials in this repository.
 
+The route's `profile` is the runtime owner; `bot_profile` is the transport owner. Once this channel is routed to `ancor-leader`, its Kanban notification subscriptions must also use `--notifier-profile ancor-leader`, even when the bot credentials remain on `default`. See the coordination skill for runtime subscription commands. Preserve unrelated routes when adding this entry, and reload the host Gateway through its supported lifecycle mechanism before verifying the route.
+
 Verify that:
 
 - an ordinary message in the dedicated channel is handled by `ancor-leader`;
