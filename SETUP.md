@@ -46,17 +46,31 @@ Configure `auxiliary.kanban_decomposer.provider` and
 
 Use native config commands after checking their help. The decomposer reads profile descriptions; the leader receives the root task after fan-out and reviews or extends the graph.
 
-## 4. Required runtime path
+## 4. Create a background leader session
+
+Create one long-lived `ancor-leader` session for Kanban coordination, separate from the user's normal conversation. Keep the leader Gateway running and configure a `wake` or `notify+wake` subscription for ANCOR task events, targeting this session.
+
+```text
+Worker blocked / completed
+  → Kanban event
+  → wake the background ancor-leader session
+  → leader inspects and coordinates
+  → leader asks the user only when necessary
+```
+
+Use the installed Hermes notification/session commands to create the session and subscription; inspect their current help first. Verify that the target is the background leader session, not the user's originating chat, and that a test event causes a real leader turn rather than only a displayed notification.
+
+Tasks created from the user's leader conversation may need an explicit subscription to this background session; do not rely on `auto_subscribe_on_create` to retarget events automatically. Keep `notify_in_gateway` enabled for the Gateway that owns the leader session.
+
+## 5. Required runtime path
 
 - Run the `ancor-leader` Gateway persistently.
-- Create ANCOR root tasks from the leader's persistent Gateway conversation.
-- Keep notification polling enabled for the Gateway that owns the leader's adapter.
+- Keep the background leader session available for wake events.
 - Ensure the worker profile has the tools required by its task class.
 - Give the leader Kanban/orchestrator tools and `clarify`; it may retain lightweight analysis tools.
+- Create the ANCOR root task from the leader workflow, then bind its task events to the background leader session.
 
-Create tasks inside the persistent leader Gateway session so `auto_subscribe_on_create` can establish the leader's originating-session subscription.
-
-## 5. Acceptance smoke test
+## 6. Acceptance smoke test
 
 1. Ask `ancor-leader` a lightweight question; it should answer without creating a task.
 2. Submit a substantial request; leader should draft an execution brief and obtain confirmation.
