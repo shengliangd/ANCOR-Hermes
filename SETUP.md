@@ -66,7 +66,7 @@ Tasks created from the user's leader conversation may need an explicit subscript
 
 Set a Hermes home channel for the platform through which the user should receive leader escalations. The home channel is the user-facing destination; it is separate from the background leader session that receives Kanban wake events.
 
-Keep the target in Hermes' native platform configuration rather than adding a platform-specific ANCOR destination. The leader's coordination skill instructs it to use the relevant native platform target/home-channel routing when user input is required, so the setup works with any messaging platform Hermes supports.
+Keep the target in Hermes' native platform configuration rather than adding a platform-specific ANCOR destination. The profile owning the platform adapter and credentials owns the notification route; in the standard multiplexed setup this is `default`, not `ancor-leader`. The leader's coordination skill instructs it to use the relevant native platform target/home-channel routing when user input is required, so the setup works with any messaging platform Hermes supports.
 
 Verify the configured home channel with the native status/configuration commands and send a harmless test message before relying on it for escalations.
 
