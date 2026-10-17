@@ -93,7 +93,7 @@ Send a harmless test message before relying on the channel for real escalations.
 
 ## 6. Required runtime path
 
-- Run the `ancor-leader` Gateway persistently.
+Keep the host Gateway persistently running with multiplexing enabled and verify that `ancor-leader` is in its served profile set. Do not start a separate `ancor-leader` Gateway when it is served by the host multiplexer.
 - Keep the background leader session available for wake events.
 - Ensure the worker profile has the tools required by its task class.
 - Give the leader Kanban/orchestrator tools and `clarify`; it may retain lightweight analysis tools.
