@@ -11,7 +11,7 @@ hermes profile create ancor-leader --description "User-facing requirement leader
 hermes profile create ancor-worker --description "Executes assigned Kanban tasks and returns inspectable artifacts, progress, or blockers."
 ```
 
-Inspect `hermes profile create --help` for the installed version. Copy the role files to the corresponding profile homes. Keep `default` unchanged.
+Inspect `hermes profile create --help` for the installed version. Copy the role files to the corresponding profile homes. Install `skills/ancor-coordination/` and its `templates/` directory into the `ancor-leader` profile's native skills directory. Keep `default` unchanged; do not install the coordination skill into `ancor-worker`.
 
 Choose models with the native profile model/configuration commands. Use a stronger model for `ancor-leader`; use a cost-effective execution model for `ancor-worker`.
 
