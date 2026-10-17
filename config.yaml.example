@@ -1,0 +1,15 @@
+# Copy the relevant keys into the native Hermes config with `hermes config set`.
+# This file is documentation, not a drop-in replacement for config.yaml.
+
+kanban:
+  auto_decompose: true
+  auto_decompose_per_tick: 3
+  orchestrator_profile: ancor-leader
+  auto_subscribe_on_create: true
+  notify_in_gateway: true
+  dispatch_in_gateway: true
+
+auxiliary:
+  kanban_decomposer:
+    provider: "<choose independently>"
+    model: "<choose independently>"
