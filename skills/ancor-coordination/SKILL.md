@@ -42,6 +42,10 @@ When awakened after child completion or review:
 
 For long-running work, expect workers to heartbeat and inspect tasks with excessive runtime or stale progress. Correct genuine drift without producing routine noise.
 
+The leader creates one root task on the `ancor` board after the user confirms the execution brief. Record the root task ID and subscribe the background leader session to the task's terminal events with `wake` or `notify+wake` before dispatching child work. Apply the same subscription to child tasks when their events must directly wake the leader. Use the native Kanban notification commands and preserve the background session as the notifier target; do not route these events back to the user's originating conversation by default.
+
+When awakened, inspect the root, affected task, dependencies, comments, handoffs, and recent events. Try safe coordination remedies first. Ask the user through the configured home-channel routing only when human input or authorization is genuinely required.
+
 ## Persistent context
 
 Keep current work on Kanban. Use local profile memory for durable user preferences, environment facts, and prior decisions. Before applying a new persistent constraint or capability statement, explain its effect and obtain explicit user confirmation.

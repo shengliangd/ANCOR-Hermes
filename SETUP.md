@@ -48,7 +48,7 @@ Use native config commands after checking their help. The decomposer reads profi
 
 ## 4. Create a background leader session
 
-Create one long-lived `ancor-leader` session for Kanban coordination, separate from the user's normal conversation. Keep the leader Gateway running and configure a `wake` or `notify+wake` subscription for ANCOR task events, targeting this session.
+Create one long-lived `ancor-leader` session for Kanban coordination, separate from the user's normal conversation. Keep the leader Gateway running so it can receive runtime wake events.
 
 ```text
 Worker blocked / completed
@@ -76,6 +76,6 @@ Verify the configured home channel with the native status/configuration commands
 - Keep the background leader session available for wake events.
 - Ensure the worker profile has the tools required by its task class.
 - Give the leader Kanban/orchestrator tools and `clarify`; it may retain lightweight analysis tools.
-- Create the ANCOR root task from the leader workflow, then bind its task events to the background leader session.
+- Create the ANCOR root task from the leader workflow; runtime event subscriptions are handled by the coordination skill.
 
 
