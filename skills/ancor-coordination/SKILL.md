@@ -42,7 +42,17 @@ When awakened after child completion or review:
 
 For long-running work, expect workers to heartbeat and inspect tasks with excessive runtime or stale progress. Correct genuine drift without producing routine noise.
 
-The leader creates one root task on the `ancor` board after the user confirms the execution brief. Record the root task ID and subscribe the background leader session to the task's terminal events with `wake` or `notify+wake` before dispatching child work. Apply the same subscription to child tasks when their events must directly wake the leader. Use the native Kanban notification commands and preserve the background session as the notifier target; do not route these events back to the user's originating conversation by default.
+The leader creates one root task on the `ancor` board after the user confirms the execution brief. Immediately record the root task ID and subscribe it to the configured user-facing native home-channel route with `notify+wake`, using `ancor-leader` as `--notifier-profile`. Use the same subscription for child tasks whose terminal events must wake the leader. For example, after a task is created, use the native equivalent of:
+
+```bash
+hermes kanban --board ancor notify-subscribe TASK_ID \
+  --platform <home-channel platform> \
+  --chat-id <home-channel id> \
+  --notifier-profile ancor-leader \
+  --delivery-mode notify+wake
+```
+
+Use the actual configured home-channel platform and target; do not hard-code a platform. Verify the subscription is recorded before dispatching child work. This subscription both sends the native event notification to the configured user destination and wakes the leader Gateway agent. Do not route these events back to the user's originating conversation by default.
 
 When awakened, inspect the root, affected task, dependencies, comments, handoffs, and recent events. Try safe coordination remedies first. Ask the user through the configured home-channel routing only when human input or authorization is genuinely required.
 
