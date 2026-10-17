@@ -34,24 +34,15 @@ Confirm the exact syntax with `hermes kanban --help` and use the `ancor` board e
 
 Set these through `hermes config set` in the profile/config scope supported by the installed Hermes version:
 
-```yaml
-kanban:
-  auto_decompose: true
-  auto_decompose_per_tick: 3
-  orchestrator_profile: ancor-leader
-  auto_subscribe_on_create: true
-  notify_in_gateway: true
-  dispatch_in_gateway: true
-```
+Set `kanban.auto_decompose` to `true`, `kanban.auto_decompose_per_tick` to `3`,
+`kanban.orchestrator_profile` to `ancor-leader`, and enable
+`kanban.auto_subscribe_on_create`, `kanban.notify_in_gateway`, and
+`kanban.dispatch_in_gateway`.
 
 Configure the independent decomposition model under:
 
-```yaml
-auxiliary:
-  kanban_decomposer:
-    provider: "..."
-    model: "..."
-```
+Configure `auxiliary.kanban_decomposer.provider` and
+`auxiliary.kanban_decomposer.model` independently from the two profile models.
 
 Use native config commands after checking their help. The decomposer reads profile descriptions; the leader receives the root task after fan-out and reviews or extends the graph.
 

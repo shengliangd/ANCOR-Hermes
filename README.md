@@ -28,8 +28,8 @@ User ↔ ancor-leader
 
 ## Contents
 
-- `config.yaml.example` — relevant native Hermes settings.
 - `roles/ancor-leader/SOUL.md` — leader identity and operating rules.
+- `skills/ancor-coordination/SKILL.md` — leader's demand and Kanban coordination procedure.
 - `roles/ancor-worker/SOUL.md` — worker identity and operating rules.
 - `SETUP.md` — installation and verification procedure.
 - `templates/requirement-brief.md` — root-task body template used before confirmation.
