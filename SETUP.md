@@ -78,15 +78,4 @@ Verify the configured home channel with the native status/configuration commands
 - Give the leader Kanban/orchestrator tools and `clarify`; it may retain lightweight analysis tools.
 - Create the ANCOR root task from the leader workflow, then bind its task events to the background leader session.
 
-## 7. Acceptance smoke test
 
-1. Ask `ancor-leader` a lightweight question; it should answer without creating a task.
-2. Submit a substantial request; leader should draft an execution brief and obtain confirmation.
-3. After confirmation, leader creates one `ancor` root task in `triage`.
-4. Confirm the native decomposer creates children, dependencies, and worker assignees.
-5. Make a worker call `kanban_block` with a resolvable issue. Verify the blocked event wakes the leader rather than directly asking the user.
-6. Verify leader attempts a support task/context repair/unblock before asking the user.
-7. Make a worker or reviewer report a missing work item. Verify leader creates a new child task without duplicating existing work.
-8. Restart the Gateway and inspect that active/blocked tasks remain on the board.
-
-Record actual event delivery and task IDs.
