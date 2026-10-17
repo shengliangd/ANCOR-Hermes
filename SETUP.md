@@ -1,7 +1,6 @@
 # Native Hermes setup
 
 This procedure assumes the Hermes CLI and Gateway are already installed.
-Run configuration commands against a disposable profile first; do not change the live `default` profile until the smoke checks pass.
 
 ## 1. Create profiles
 
@@ -12,7 +11,7 @@ hermes profile create ancor-leader --description "User-facing requirement leader
 hermes profile create ancor-worker --description "Executes assigned Kanban tasks and returns inspectable artifacts, progress, or blockers."
 ```
 
-The profile-create flags are version-sensitive; inspect `hermes profile create --help` before running them. Copy `roles/ancor-leader/SOUL.md` to the leader profile's native `SOUL.md`, and do the same for the worker. Do not edit `default`.
+Inspect `hermes profile create --help` for the installed version. Copy the role files to the corresponding profile homes. Keep `default` unchanged.
 
 Choose models with the native profile model/configuration commands. Use a stronger model for `ancor-leader`; use a cost-effective execution model for `ancor-worker`.
 
@@ -29,7 +28,7 @@ hermes kanban --board ancor create "..." --triage --assignee ancor-leader
 hermes kanban --board ancor list
 ```
 
-Confirm the exact syntax with `hermes kanban --help`; do not assume the active board is `ancor`.
+Confirm the exact syntax with `hermes kanban --help` and use the `ancor` board explicitly.
 
 ## 3. Native settings
 
@@ -54,7 +53,7 @@ auxiliary:
     model: "..."
 ```
 
-Do not hand-edit a live `config.yaml`; use native config commands after checking their help. The decomposer reads the profile roster/descriptions and does not load the leader's SOUL. The leader receives the root task after fan-out and reviews or extends the graph.
+Use native config commands after checking their help. The decomposer reads profile descriptions; the leader receives the root task after fan-out and reviews or extends the graph.
 
 ## 4. Required runtime path
 
@@ -64,7 +63,7 @@ Do not hand-edit a live `config.yaml`; use native config commands after checking
 - Ensure the worker profile has the tools required by its task class.
 - Give the leader Kanban/orchestrator tools and `clarify`; it may retain lightweight analysis tools.
 
-`auto_subscribe_on_create` is only meaningful when the task is created inside a persistent Gateway/TUI session. A CLI-created or externally-created task may not have the leader's originating-session subscription.
+Create tasks inside the persistent leader Gateway session so `auto_subscribe_on_create` can establish the leader's originating-session subscription.
 
 ## 5. Acceptance smoke test
 
@@ -77,4 +76,4 @@ Do not hand-edit a live `config.yaml`; use native config commands after checking
 7. Make a worker or reviewer report a missing work item. Verify leader creates a new child task without duplicating existing work.
 8. Restart the Gateway and inspect that active/blocked tasks remain on the board.
 
-Record actual event delivery and task IDs. A successful configuration write is not proof of a delivered wake.
+Record actual event delivery and task IDs.
