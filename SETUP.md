@@ -62,13 +62,34 @@ Use the installed Hermes notification/session commands to create the session and
 
 Tasks created from the user's leader conversation may need an explicit subscription to this background session; do not rely on `auto_subscribe_on_create` to retarget events automatically. Keep `notify_in_gateway` enabled for the Gateway that owns the leader session.
 
-## 5. Configure the user escalation target
+## 5. Configure a dedicated ANCOR channel
 
-Set a Hermes home channel for the platform through which the user should receive leader escalations. The home channel is the user-facing destination; it is separate from the background leader session that receives Kanban wake events.
+Create or designate a dedicated channel/chat for ANCOR user interaction during setup. Do not reuse the user's ordinary Hermes conversation when the user must reply to a blocker, clarification, authorization request, or delivery decision. Record this channel as the native Hermes home-channel target for ANCOR.
 
-Keep the target in Hermes' native platform configuration rather than adding a platform-specific ANCOR destination. The profile owning the platform adapter and credentials owns the notification route; in the standard multiplexed setup this is `default`, not `ancor-leader`. The leader's coordination skill instructs it to use the relevant native platform target/home-channel routing when user input is required, so the setup works with any messaging platform Hermes supports.
+The dedicated channel should be reachable by the platform adapter, but its conversation should be routed to `ancor-leader` at runtime. In a multiplexed gateway, the adapter credentials may remain owned by `default` while the conversation is executed by `ancor-leader`. Configure the native `gateway.profile_routes` entry for the dedicated channel with:
 
-Verify the configured home channel with the native status/configuration commands and send a harmless test message before relying on it for escalations.
+```yaml
+gateway:
+  multiplex_profiles: true
+  profile_routes:
+    - name: ancor-dedicated-channel
+      platform: <platform>
+      chat_id: <dedicated-channel-id>
+      profile: ancor-leader
+      bot_profile: default
+      enabled: true
+```
+
+Use the installed Hermes routing/configuration commands where available; do not hand-edit live configuration without checking their help. The exact platform and target remain deployment-specific. Do not add a platform-specific ANCOR destination or put credentials in this repository.
+
+Verify that:
+
+- an ordinary message in the dedicated channel is handled by `ancor-leader`;
+- a reply to a test escalation remains in the same `ancor-leader` conversation;
+- the platform adapter still uses the Profile that owns its credentials;
+- the dedicated channel is not accidentally the user's ordinary Hermes conversation.
+
+Send a harmless test message before relying on the channel for real escalations.
 
 ## 6. Required runtime path
 

@@ -42,15 +42,15 @@ When awakened after child completion or review:
 
 For long-running work, expect workers to heartbeat and inspect tasks with excessive runtime or stale progress. Correct genuine drift without producing routine noise.
 
-The home-channel notification subscription must be owned by the Profile that owns the actual platform adapter and credentials. In the standard multiplexed setup, the Feishu/home-channel adapter remains on `default`, while `ancor-leader` owns only the `api_server` background session. Therefore use the platform owner for the user notification subscription, and use `ancor-leader` only for the API wake subscription. Do not assume `notifier_profile` should always equal `ancor-leader`.
+The home-channel notification subscription must target the dedicated ANCOR channel and be owned by the Profile that owns the actual platform adapter and credentials. In the standard multiplexed setup, the adapter may remain on `default`, while the dedicated channel's conversation route points to `ancor-leader`. Therefore use the platform owner for notification delivery, and use `ancor-leader` for the API wake subscription. Do not assume `notifier_profile` should always equal `ancor-leader`.
 
 For the standard setup:
 
 ```bash
 hermes kanban --board ancor notify-subscribe TASK_ID \
-  --platform <home-channel platform> \
-  --chat-id <home-channel id> \
-  --notifier-profile <profile owning the home-channel adapter> \
+  --platform <dedicated-channel platform> \
+  --chat-id <dedicated-channel id> \
+  --notifier-profile <profile owning the platform adapter> \
   --delivery-mode notify
 
 hermes kanban --board ancor notify-subscribe TASK_ID \
@@ -60,7 +60,7 @@ hermes kanban --board ancor notify-subscribe TASK_ID \
   --delivery-mode wake
 ```
 
-Verify both subscriptions are recorded and send a harmless end-to-end test event before dispatching real child work. The home-channel adapter owner may be `default` even when the coordination actor is `ancor-leader`.
+Verify both subscriptions are recorded and send a harmless end-to-end test event before dispatching real child work. The notification adapter owner may be `default` even though replies in the dedicated channel are routed to `ancor-leader` by `gateway.profile_routes`.
 
 When awakened, inspect the root, affected task, dependencies, comments, handoffs, and recent events. Try safe coordination remedies first. Ask the user through the configured home-channel routing only when human input or authorization is genuinely required.
 
