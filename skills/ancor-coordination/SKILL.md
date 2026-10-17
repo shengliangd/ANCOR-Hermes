@@ -6,7 +6,7 @@ Use this skill for substantial user work handled through the ANCOR Kanban board.
 
 1. Understand the goal, relevant context, constraints, non-goals, and acceptance criteria.
 2. Keep lightweight analysis, ordinary questions, status checks, and small reversible work in the current session.
-3. For substantial work, write a concise execution brief using `templates/requirement-brief.md`.
+3. For substantial work, write a concise execution brief using the linked `templates/requirement-brief.md` template.
 4. Ask the user to confirm the brief before creating executable work.
 5. After confirmation, create one root task on the `ancor` board in `triage`; the root represents the confirmed requirement.
 

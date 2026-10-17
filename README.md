@@ -32,7 +32,7 @@ User ↔ ancor-leader
 - `skills/ancor-coordination/SKILL.md` — leader's demand and Kanban coordination procedure.
 - `roles/ancor-worker/SOUL.md` — worker identity and operating rules.
 - `SETUP.md` — installation and verification procedure.
-- `templates/requirement-brief.md` — root-task body template used before confirmation.
+- `skills/ancor-coordination/templates/requirement-brief.md` — root-task body template used before confirmation.
 
 ## Configuration
 
