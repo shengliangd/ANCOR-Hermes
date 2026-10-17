@@ -62,7 +62,15 @@ Use the installed Hermes notification/session commands to create the session and
 
 Tasks created from the user's leader conversation may need an explicit subscription to this background session; do not rely on `auto_subscribe_on_create` to retarget events automatically. Keep `notify_in_gateway` enabled for the Gateway that owns the leader session.
 
-## 5. Required runtime path
+## 5. Configure the user escalation target
+
+Set a Hermes home channel for the platform through which the user should receive leader escalations. The home channel is the user-facing destination; it is separate from the background leader session that receives Kanban wake events.
+
+Keep the target in Hermes' native platform configuration rather than adding a platform-specific ANCOR destination. The leader's coordination skill instructs it to use the relevant native platform target/home-channel routing when user input is required, so the setup works with any messaging platform Hermes supports.
+
+Verify the configured home channel with the native status/configuration commands and send a harmless test message before relying on it for escalations.
+
+## 6. Required runtime path
 
 - Run the `ancor-leader` Gateway persistently.
 - Keep the background leader session available for wake events.
@@ -70,7 +78,7 @@ Tasks created from the user's leader conversation may need an explicit subscript
 - Give the leader Kanban/orchestrator tools and `clarify`; it may retain lightweight analysis tools.
 - Create the ANCOR root task from the leader workflow, then bind its task events to the background leader session.
 
-## 6. Acceptance smoke test
+## 7. Acceptance smoke test
 
 1. Ask `ancor-leader` a lightweight question; it should answer without creating a task.
 2. Submit a substantial request; leader should draft an execution brief and obtain confirmation.

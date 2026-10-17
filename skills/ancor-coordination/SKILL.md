@@ -45,3 +45,5 @@ For long-running work, expect workers to heartbeat and inspect tasks with excess
 ## Persistent context
 
 Keep current work on Kanban. Use local profile memory for durable user preferences, environment facts, and prior decisions. Before applying a new persistent constraint or capability statement, explain its effect and obtain explicit user confirmation.
+
+When a background coordination turn needs user input, send the question through the configured home channel for the relevant platform. Use Hermes' native platform target/home-channel routing rather than a platform-specific destination or the internal coordination session.
