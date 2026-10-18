@@ -1,100 +1,62 @@
-# ANCOR-Hermes Native Configuration
+# ANCOR for Hermes
 
-This repository contains a native-Hermes configuration package for the ANCOR workflow.
-
-The goal is to get the core ANCOR experience from Hermes itself:
+A thin workflow plugin: user-facing `ancor-leader`, native Kanban execution by
+`ancor-worker`, and durable requirements outside Kanban.
 
 ```text
-User ↔ ancor-leader
-          ↓ confirmed requirement
-       root / triage task
-          ↓ native Kanban decomposer
-       child tasks → ancor-worker
-          ↓ blocked / done / review events
-       wake independent background ancor-leader ONLY
-          ↓ inspect and coordinate; no raw event message to user
-       leader decides: remain quiet, ask, report material impact, or deliver verified result
+User ↔ leader → immutable draft → explicit confirmation
+                                      ↓
+                             requirement + event (SQLite)
+                                      ↓
+                      serialized background leader
+                                      ↓
+                        execution tasks → workers
+                                      ↓
+                      events → resolve / replan / verify
+                                      ↓
+                        useful questions or delivery
 ```
 
-## Three-card workflow (soft constraints)
+The leader does light work directly. Substantial work needs a confirmed brief and
+acceptance criteria. A confirmed replacement atomically invalidates the old
+requirement and creates a new one. Requirements are not Kanban cards.
 
-| Card | Owner | Contract |
-| --- | --- | --- |
-| Requirement root | `ancor-leader` | Confirmed version and aggregate acceptance |
-| Independent change | `ancor-leader` | Confirmed base/target version and background application |
-| Execution child | `ancor-worker` | Bounded versioned work and inspectable evidence |
+Coordination considers all current requirements and the board, not only the
+supplied pending events. Planning can be incremental. Worker blockers go to the
+leader first; worker completion is evidence, not requirement acceptance.
 
-Discussion is not authorization. Foreground change handling confirms the exact
-delta, persists an independent handoff, and returns; background leaders stop,
-replan and apply. Change cards reference their root in the body, never
-`parents=[root]`. Native execution prerequisites gate root review.
+## Implementation
 
-These are instructions/body conventions, not new native APIs. Root coordination
-is soft-serial with stale-version review, not lock/CAS protection. Cooperative
-stop acknowledgement and verified quiescence are required before conflicting
-replacement work. Block is not a kill, comment is not wake, reclaim may redispatch,
-and archive is non-recursive, may release dependents and may delete workspaces.
-No atomic tree pause or enforced worker assignment is promised. Leader delivery
-requires target-version evidence; confirmed, applied and delivered are distinct.
+- `ancor/store.py`: immutable drafts, transactional requirements, task links and durable events.
+- `ancor/runtime.py`: one awaited leader process under a cross-process lock.
+- `ancor/host.py`: Gateway-owned event reconciliation and bounded retries.
+- `ancor/board.py`: native Kanban adapter; no native SQL writes.
+- `ancor/service.py`: requirement and acceptance tools.
+- `roles/`: profile identities; `skills/ancor-coordination/`: operational procedure.
 
-## Current capability boundary
+Native Hermes owns worker dispatch and task lifecycle. The plugin owns requirement
+semantics and coordination admission. Idle polling uses no model tokens. Events
+are batched; unchanged unprocessed batches have a retry budget rather than a hot
+model loop. The native event reader is a small, explicit version coupling to
+`kanban_db.list_events`; the other integration surfaces are public plugin APIs and
+native CLI automation.
 
-Full autonomous confirmed-change application is **not verified or available
-through the inspected model tool surface**: dispatched leader runs can request
-stop and verify quiescence, but cannot edit root scope or unlink/archive obsolete
-prerequisites. An independent API coordinator has broader routing tools, not
-those missing mutations. Keep such changes blocked rather than treating CLI
-commands from a model terminal as a workaround. Native operator recovery is a
-different acceptance level, not autonomous completion. See the capability gate
-in the coordination skill and coordinator acceptance in `SETUP.md`.
+## Guarantee boundaries
 
-## Six workflow concerns
+The coordinator lock serializes plugin-launched coordination, not all user chats.
+SQLite transitions are atomic; SQLite and native Kanban are not one transaction,
+so task metadata supports reconciliation after interrupted creation.
 
-1. Submit: stable confirmation IDs, persisted explicit approval and idempotent root handoff.
-2. Decompose/execute: native graph; no-fanout still delegates to a worker with a checkpoint contract.
-3. Blocked: stable question IDs, cross-session persisted answers and explicit background resume.
-4. Changes: independently confirmed handoff, stop acknowledgement AND observed quiescence.
-5. Completion: one integrated leader acceptance stage, including independent review and
-   same-version defect repair; bind delivery to exact artifacts and approved version.
-6. Cross-demand conflicts: declared resources and shared-coordinator cooperative admission,
-   native dependency ordering and safe blocking when ownership is unclear, not false locks.
+Blocking a native task does not prove its process has stopped. Invalidation guards
+are best-effort, not OS isolation or atomic dispatch fencing. The leader must verify
+old execution has quiesced before conflicting replacement work. Role prompts guide
+judgment; acceptance records do not magically establish artifact correctness.
 
-Restart reconciliation recovers missed handoffs, responses, active runs and subscriptions.
-Human final approval is conditional on approved acceptance criteria, not universal.
-The mandatory worker contract lives in `templates/execution-brief.md` under the
-coordination skill. Install its complete file at a durable worker-readable absolute
-path, verify its bytes, and pin path + SHA-256 on the root before decomposition.
-Children read the root and full source; no LLM verbatim copying is required. Missing
-or mismatched source still blocks writes, as do stale version or unclear admission.
-These are soft protocol rules; documentation and static checks do not prove live E2E.
+See [SETUP.md](SETUP.md) for installation and validation. Development tests run with:
 
-## Design
+```sh
+env -u PYTHONPATH python -m pytest tests -q
+```
 
-- `ancor-leader` is the user-facing and coordination profile.
-- `ancor-worker` executes assigned Kanban tasks.
-- A root Kanban task represents one user-confirmed requirement.
-- The native Kanban decomposer creates the initial task graph.
-- The leader supplies a complete execution brief in the root task before decomposition.
-- Native Kanban owns task state, dependencies, dispatch, retries, heartbeats, review, and recovery.
-- Task event subscriptions only wake the independent background `ancor-leader` API session, never the originating user chat. The leader processes the event before deciding whether user input/authorization, material impact, or final verified delivery warrants a message to the dedicated ANCOR channel. Routine events stay quiet.
-- Long-lived user facts belong in local Hermes memory/profile state; current work belongs on the Kanban board.
-
-## Contents
-
-- `roles/ancor-leader/SOUL.md` — leader identity and operating rules.
-- `skills/ancor-coordination/SKILL.md` — leader's demand and Kanban coordination procedure.
-- `roles/ancor-worker/SOUL.md` — worker identity and operating rules.
-- `SETUP.md` — installation and verification procedure.
-- `skills/ancor-coordination/templates/requirement-brief.md` — root-task body template used before confirmation.
-
-The independent change handoff template is
-`skills/ancor-coordination/templates/change-brief.md`. The coordination skill owns
-dynamic subscriptions for roots, changes and newly discovered execution children.
-
-## Configuration
-
-1. Keep the existing `default` profile unchanged.
-2. Create the `ancor` Kanban board and use it explicitly for this workflow.
-3. Disable `kanban.auto_subscribe_on_create` in ANCOR task-creating profile scopes and explicitly reconcile wake-only subscriptions to the independent background leader API session. Do not subscribe user channels to task events; see `SETUP.md` for the separate Gateway slash-create auto-subscription caveat and inherited-subscription cleanup.
-4. Keep `kanban.auto_decompose` enabled initially. The decomposer is independently configured under `auxiliary.kanban_decomposer`; `kanban.orchestrator_profile` identifies the profile that owns the root after fan-out, not the model that performs decomposition.
-5. Verify background wake and task processing separately from leader-authored messages and replies on the dedicated channel; verify routine task events produce no raw user notification.
+Do not deploy until the installed-runtime checks and a real model-backed workflow
+have passed. Unit tests and synthetic coordinator processes are not model E2E.

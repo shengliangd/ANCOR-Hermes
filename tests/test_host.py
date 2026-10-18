@@ -1,0 +1,250 @@
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from ancor.board import NativeBoard
+from ancor.host import Host, child_environment, leader_command, scan_runner
+from ancor.store import Store
+
+
+class Context:
+    profile_name = 'default'
+
+    def __init__(self, path):
+        self.config = {'store_path': str(path), 'gateway_owner': True, 'board': 'test-board'}
+
+    def get_config(self, key, default=None):
+        return self.config.get(key, default)
+
+
+class Board:
+    link = staticmethod(NativeBoard.link)
+
+    def __init__(self, task=None):
+        self.tasks = [task] if task else []
+        self.history = []
+        self.guards = []
+
+    def guard(self, active):
+        self.guards.append(active)
+
+    def list(self):
+        return self.tasks
+
+    def events(self, db_path, task_ids, *, after=0, limit=100):
+        return [e for e in self.history if e['id'] > after and e['task_id'] in task_ids][:limit]
+
+
+def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypatch):
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human:1')
+    store.ack_events([e['id'] for e in store.pending_events()])
+    metadata = {'requirement_id': req['id'], 'revision': 1, 'key': 'worker'}
+    board = Board({'id': 't1', 'title': 'execution', 'body': 'ANCOR-LINK:' + json.dumps(metadata), 'status': 'done'})
+    board.history = [{'id': 17, 'task_id': 't1', 'kind': 'completed', 'payload': {}}]
+    host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
+    calls = []
+
+    async def spawn(*args, **kwargs):
+        calls.append(args)
+        assert kwargs['stdin'] == asyncio.subprocess.DEVNULL
+        class Process:
+            returncode = 0
+            async def wait(self):
+                return 0
+        return Process()
+
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    assert asyncio.run(host.coordinator.tick()) == 'ran'
+    payload = json.loads(calls[0][-1].split('\n', 1)[1])
+    assert payload['events'][0]['source_key'] == 'native:test-board:17'
+    assert payload['snapshot']['board'][0]['status'] == 'done'
+    assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': 't1'}]
+    assert store.pending_events()  # successful exit is NOT an ack
+    restarted = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
+    restarted.scan()
+    assert len(store.pending_events()) == 1
+    assert restarted.state()['task_cursors'] == {'t1': 17}
+
+
+def test_invalidated_requirements_excluded_from_guard_and_snapshot(tmp_path):
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    old = store.confirm(store.create_draft('old', 'old')['id'], 'human:old')
+    new = store.confirm(store.create_draft('new', 'new', old['id'])['id'], 'human:new')
+    board = Board()
+    host = Host(ctx, board=board, store=store)
+    host.scan()
+    assert board.guards == [{new['id']: 1}]
+    assert [r['id'] for r in host.snapshot()['requirements']] == [new['id']]
+
+
+def test_retry_budget_durable_bounded_and_recovers(tmp_path):
+    ctx = Context(tmp_path / 'store.db')
+    now = [0]
+    host = Host(ctx, board=Board(), clock=lambda: now[0])
+    for i in range(40):
+        host.store.add_event('signal', {'n': i})
+    for _ in range(3):
+        assert len(host.pending(32)) == 32
+    host = Host(ctx, board=Board(), clock=lambda: now[0])
+    assert host.pending(32) == []
+    assert host.pending(32) == []
+    now[0] = 3600
+    assert len(host.pending(32)) == 32
+    assert len(host.store.pending_events()) == 40
+
+
+def test_child_routing_removed_but_native_fences_preserved(monkeypatch):
+    monkeypatch.setenv('HERMES_SESSION_ID', 'parent')
+    monkeypatch.setenv('HERMES_DELEGATED_CHILD_CONTEXT', 'guard')
+    monkeypatch.setenv('HERMES_KANBAN_RUN_ID', 'run')
+    env = child_environment()
+    assert 'HERMES_SESSION_ID' not in env
+    assert env['HERMES_DELEGATED_CHILD_CONTEXT'] == 'guard'
+    assert env['HERMES_KANBAN_RUN_ID'] == 'run'
+    cmd = leader_command('named-leader', 'prompt')
+    assert ['hermes', '-p', 'named-leader', '--cli', 'chat', '-q', 'prompt'] == cmd[-7:]
+    assert 'HERMES_DELEGATED_CHILD_CONTEXT' not in cmd
+
+
+def test_lifecycle_waits_for_native_connected_property(tmp_path, monkeypatch):
+    import ancor.host as module
+    monkeypatch.delenv('HERMES_DELEGATED_CHILD_CONTEXT', raising=False)
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    monkeypatch.delenv('HERMES_KANBAN_RUN_ID', raising=False)
+    adapter = SimpleNamespace(is_connected=False)
+    ticks = []
+    sleeps = []
+    async def tick():
+        ticks.append(True)
+        adapter.is_connected = False
+        return 'idle'
+    def factory(ctx):
+        assert adapter.is_connected
+        return SimpleNamespace(coordinator=SimpleNamespace(tick=tick))
+    async def sleep(delay):
+        sleeps.append(delay)
+        if not ticks:
+            adapter.is_connected = True
+    monkeypatch.setattr(module, 'Host', factory)
+    monkeypatch.setattr(asyncio, 'sleep', sleep)
+    asyncio.run(scan_runner(Context(tmp_path / 'store.db'), adapter))
+    assert ticks == [True]
+    assert sleeps == [15, 15]
+
+
+def test_native_event_api_to_store_and_prompt(tmp_path, monkeypatch):
+    import sqlite3
+    from pathlib import Path
+    source = Path('/home/user/.hermes/hermes-agent')
+    if not source.exists():
+        pytest.skip('installed Hermes source unavailable')
+    monkeypatch.syspath_prepend(str(source))
+    db = tmp_path / 'native.db'
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, created_at INTEGER, run_id INTEGER)')
+        conn.execute("INSERT INTO task_events VALUES (9, 'worker', 'blocked', '{}', 1, NULL)")
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human:1')
+    store.link_task(req['id'], 'worker')
+    store.ack_events([e['id'] for e in store.pending_events()])
+    board = Board()
+    board.events = NativeBoard.events
+    host = Host(ctx, store=store, board=board, db_path=db)
+    host.scan()
+    assert host.pending(32)[0]['kind'] == 'native.blocked'
+    assert host.pending(32)[0]['payload']['task_id'] == 'worker'
+    assert host.state()['task_cursors'] == {'worker': 9}
+
+
+def test_idle_never_spawns(tmp_path, monkeypatch):
+    host = Host(Context(tmp_path / 'store.db'), board=Board())
+    async def forbidden(*args, **kwargs):
+        raise AssertionError('idle spawned a model')
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', forbidden)
+    assert asyncio.run(host.coordinator.tick()) == 'idle'
+
+
+def test_per_task_cursors_preserve_racing_and_newly_discovered_history(tmp_path):
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human:1')
+    for task in ('a', 'b'):
+        store.link_task(req['id'], task)
+    store.ack_events([e['id'] for e in store.pending_events()])
+    board = Board()
+    board.history = [{'id': 100, 'task_id': 'a', 'kind': 'completed'}]
+    original = board.events
+    def events(db_path, task_ids, **kwargs):
+        result = []
+        for task_id in task_ids:
+            result.extend(original(db_path, [task_id], **kwargs))
+            if task_id == 'a' and len(board.history) == 1:
+                board.history.extend([{'id': 101, 'task_id': 'a', 'kind': 'blocked'},
+                                      {'id': 102, 'task_id': 'b', 'kind': 'completed'}])
+        return result
+    board.events = events
+    host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
+    host.scan()
+    assert {e['payload']['id'] for e in store.pending_events()} == {100, 102}
+    host.scan()
+    assert {e['payload']['id'] for e in store.pending_events()} == {100, 101, 102}
+    store.link_task(req['id'], 'new')
+    board.history.append({'id': 2, 'task_id': 'new', 'kind': 'blocked'})
+    Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db').scan()
+    assert {e['payload']['id'] for e in store.pending_events()} == {2, 100, 101, 102}
+
+
+def test_bookkeeping_events_do_not_self_wake(tmp_path):
+    ctx = Context(tmp_path / 'store.db')
+    host = Host(ctx, board=Board(), db_path=tmp_path / 'native.db')
+    req = host.store.confirm(host.store.create_draft('x', 'y')['id'], 'human')
+    host.store.link_task(req['id'], 'a')
+    host.store.ack_events([e['id'] for e in host.store.pending_events()])
+    kinds = ['created', 'commented', 'edited', 'attached', 'linked', 'completed',
+             'blocked', 'review_requested', 'gave_up', 'timed_out', 'spawn_failed']
+    host.board.history = [{'id': i, 'task_id': 'a', 'kind': kind}
+                          for i, kind in enumerate(kinds, 1)]
+    host.scan()
+    assert [e['kind'] for e in host.store.pending_events()] == [
+        'native.' + k for k in kinds[5:]]
+    assert host.state()['task_cursors']['a'] == len(kinds)
+    host.store.ack_events([e['id'] for e in host.store.pending_events()])
+    host.scan()
+    assert not host.store.pending_events()
+
+
+def test_scan_ingests_despite_guard_and_individual_read_failure(tmp_path):
+    ctx = Context(tmp_path / 'store.db')
+    board = Board()
+    host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
+    req = host.store.confirm(host.store.create_draft('x', 'y')['id'], 'human')
+    for task in ('bad', 'good'):
+        host.store.link_task(req['id'], task)
+    host.store.ack_events([e['id'] for e in host.store.pending_events()])
+    def guard(active):
+        raise RuntimeError('guard failed')
+    board.guard = guard
+    original = board.events
+    def events(db_path, task_ids, **kwargs):
+        if task_ids == ['bad']:
+            raise RuntimeError('read failed')
+        return original(db_path, task_ids, **kwargs)
+    board.events = events
+    board.history = [{'id': 8, 'task_id': 'good', 'kind': 'blocked'}]
+    host.scan()
+    assert [e['payload']['id'] for e in host.store.pending_events()] == [8]
+    assert host.state()['task_cursors'] == {'good': 8}
+    assert host.snapshot()['guard']['error'] == 'RuntimeError'
+
+
+def test_owner_only(tmp_path):
+    ctx = Context(tmp_path / 'store.db')
+    ctx.profile_name = 'ancor-leader'
+    with pytest.raises(PermissionError):
+        asyncio.run(scan_runner(ctx, SimpleNamespace(is_connected=True)))
