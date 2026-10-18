@@ -52,7 +52,7 @@ class Host:
         self.clock = clock
         self.state_path = path.parent / (path.name + '.host.json')
         self.tasks = []
-        self.guard_state = {}
+
         self.coordinator = Coordinator(path.parent / 'ancor-coordinator.lock',
             pending=self.pending, snapshot=self.snapshot, scan=self.scan,
             batch_size=32, retry_base=15,
@@ -73,14 +73,8 @@ class Host:
     def scan(self):
         snapshot = self.store.snapshot()
         known = {r['id']: r for r in snapshot['requirements']}
-        # Each confirmed replacement gets a new immutable requirement ID.
-        active = {r['id']: 1 for r in known.values() if r['status'] == 'active'}
-        try:
-            self.board.guard(active)
-            self.guard_state = getattr(self.board, 'guard_state', {})
-        except Exception as exc:
-            self.guard_state = {'error': type(exc).__name__}
-            log.exception('ANCOR stale-task guard failed; continuing ingestion')
+        # Invalidation is a durable coordination event, not an automatic stop.
+        # Only the leader decides whether affected native tasks should be blocked.
         try:
             self.tasks = self.board.list()
         except Exception:
@@ -143,7 +137,7 @@ class Host:
     def snapshot(self):
         data = self.store.snapshot()
         return {'requirements': [r for r in data['requirements'] if r['status'] == 'active'],
-                'task_links': data['task_links'], 'guard': self.guard_state,
+                'task_links': data['task_links'],
                 'board': [{k: t[k] for k in ('id', 'title', 'status', 'assignee', 'blocked_reason') if k in t}
                           for t in self.tasks]}
 

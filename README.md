@@ -47,9 +47,10 @@ The coordinator lock serializes plugin-launched coordination, not all user chats
 SQLite transitions are atomic; SQLite and native Kanban are not one transaction,
 so task metadata supports reconciliation after interrupted creation.
 
-Blocking a native task does not prove its process has stopped. Invalidation guards
-are best-effort, not OS isolation or atomic dispatch fencing. The leader must verify
-old execution has quiesced before conflicting replacement work. Role prompts guide
+Blocking a native task does not prove its process has stopped. Invalidation emits
+an event; the triggered leader decides which tasks to stop, hold or replan. Event
+scanning does not automatically stop work or gate unrelated dispatch. The leader
+checks quiescence where replacement work would conflict. Role prompts guide
 judgment; acceptance records do not magically establish artifact correctness.
 
 See [SETUP.md](SETUP.md) for installation and validation. Development tests run with:

@@ -111,24 +111,44 @@ def test_create_requires_active_requirement_and_leader(setup):
     assert not board.tasks
 
 
-def test_stale_worker_blocks_replacement_until_process_quiescent(setup, monkeypatch):
+@pytest.mark.parametrize('target', ['replacement', 'independent'])
+def test_invalidated_worker_does_not_gate_new_work(setup, monkeypatch, target):
     import os
     ctx, store, board, req = setup
     op = operations(setup)
     tid = op.call(create_args(req))['task']['id']
-    board.tasks[tid]['runs'] = [{'id': 1, 'status': 'blocked', 'worker_pid': 123, 'ended_at': 1}]
+    board.tasks[tid]['runs'] = [{'id': 1, 'worker_pid': 123, 'ended_at': None}]
     replacement = store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'test-human-2')
+    if target == 'independent':
+        replacement = store.confirm(store.create_draft('Independent', 'Other tests')['id'], 'test-human-3')
     monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
-    with pytest.raises(RuntimeError, match='quiescen'):
-        op.call(create_args(replacement))
-    assert board.show(tid)['status'] == 'blocked'
-    assert len(board.tasks) == 1
-    def gone(pid, signal):
-        raise ProcessLookupError
-    monkeypatch.setattr(os, 'kill', gone)
     assert op.call(create_args(replacement))['task']['id'] != tid
+    assert board.show(tid)['status'] == 'running'
+    assert not any(call[0] == 'block' for call in board.calls)
+    # Stopping affected work remains an explicit coordinator decision.
+    assert op.call({'action': 'block', 'task_id': tid, 'reason': 'Conflicting work'})['task']['status'] == 'blocked'
+    with pytest.raises(ValueError, match='active'):
+        op.call(create_args(req))
+    board.tasks[tid]['runs'] = []
     with pytest.raises(ValueError, match='active'):
         op.call({'action': 'unblock', 'task_id': tid, 'reason': 'unsafe'})
+
+
+def test_unblock_is_not_gated_by_other_invalidated_workers(setup, monkeypatch):
+    import os
+    ctx, store, board, req = setup
+    op = operations(setup)
+    old_tid = op.call(create_args(req))['task']['id']
+    other = store.confirm(store.create_draft('Other', 'Other tests')['id'], 'human:other')
+    tid = op.call(create_args(other))['task']['id']
+    op.call({'action': 'block', 'task_id': tid, 'reason': 'Wait for answer'})
+    store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'human:change')
+    board.tasks[old_tid]['runs'] = [{'worker_pid': 123, 'ended_at': None}]
+    monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
+    board.calls.clear()
+    assert op.call({'action': 'unblock', 'task_id': tid, 'reason': 'Answered'})['task']['status'] == 'ready'
+    assert board.show(old_tid)['status'] == 'running'
+    assert not any(call[0] == 'block' for call in board.calls)
 
 
 def test_native_metadata_recovers_crash_before_store_link(setup):

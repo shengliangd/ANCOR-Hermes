@@ -34,22 +34,29 @@ from types import SimpleNamespace
 
 
 def configured_context():
-    config = {'human_target': 'feishu:test-operator', 'transport_profile': 'default'}
-    return SimpleNamespace(get_config=lambda key, default=None: config.get(key, default))
+    return SimpleNamespace(get_config=lambda key, default=None: default)
 
 
-@pytest.fixture(autouse=True)
-def native_send_boundary(monkeypatch):
-    import subprocess
-    original = subprocess.run
-    def send(argv, **kwargs):
-        if argv[0] != 'hermes':
-            return original(argv, **kwargs)
-        assert argv == ['hermes', '--profile', 'default', 'send', '--to',
-                        'feishu:test-operator', '--file', '-', '--json']
-        assert 'Requirement:' in kwargs['input']
-        return SimpleNamespace(returncode=0, stdout=json.dumps({'success': True}))
-    monkeypatch.setattr('ancor.notification.subprocess.run', send)
+@pytest.mark.parametrize('brief', ['Complete brief', 'x' * 5000, 'Literal MEDIA:/private/file'])
+def test_confirmation_uses_current_chat_without_delivery_configuration(tmp_path, monkeypatch, brief):
+    from ancor.service import Service
+    from ancor.store import Store
+    def forbidden_send(*args, **kwargs):
+        raise AssertionError('confirmation must not send to a separate destination')
+    monkeypatch.setattr('ancor.notification.HermesSender.__call__', forbidden_send)
+    service = Service(None, Store(tmp_path / 'state.db'))
+    draft = service.requirement({'action': 'draft', 'brief': brief, 'acceptance_criteria': 'exact criteria'})
+    question = draft['clarify_args']['questions'][0]
+    assert Path(draft['draft_file']).read_text() in question['question']
+    assert brief in question['question']
+    assert not Path(service.store.path + '.presentations.db').exists()
+    assert service.pre_tool_call('clarify', draft['clarify_args'], session_id='s', tool_call_id='c') is None
+    result = {'outcome': 'submitted', 'responses': [{'question': question['question'],
+              'choices_offered': question['choices'], 'status': 'answered',
+              'user_response': question['choices'][1]}]}
+    service.post_tool_call('clarify', draft['clarify_args'], result, session_id='s', tool_call_id='c')
+    assert service.store.snapshot()['requirements'][0]['draft_id'] == draft['id']
+    assert not Path(service.store.path + '.presentations.db').exists()
 
 
 def test_native_registration_and_nested_clarify(tmp_path):
@@ -76,10 +83,6 @@ class Context(PluginContext):
         if key == 'store_path':
             import os
             return os.path.join(os.environ['HOME'], 'requirements.db')
-        if key == 'human_target':
-            return 'feishu:test-operator'
-        if key == 'transport_profile':
-            return 'default'
         return default
 ctx = Context(PluginManifest(name='ancor'), manager)
 ancor.register(ctx)
@@ -94,12 +97,8 @@ print('native registration passed; nested clarify unavailable:', result['error']
 from agent.agent_runtime_helpers import invoke_tool
 from ancor.service import Service
 service = Service(ctx)
-from unittest.mock import patch
-with patch('ancor.notification.subprocess.run', return_value=SimpleNamespace(returncode=0, stdout='{"success": true}')) as sender:
-    draft = service.requirement({'action': 'draft', 'brief': 'Complete native draft', 'acceptance_criteria': 'Verified native hook result'})
-assert sender.call_count == 1
-assert 'Complete native draft' in sender.call_args.kwargs['input']
-assert 'Complete native draft' not in draft['clarify_args']['questions'][0]['question']
+draft = service.requirement({'action': 'draft', 'brief': 'Complete native draft', 'acceptance_criteria': 'Verified native hook result'})
+assert 'Complete native draft' in draft['clarify_args']['questions'][0]['question']
 seen = []
 ctx.register_hook('post_tool_call', lambda **payload: seen.append(payload))
 agent = SimpleNamespace(session_id='native-session', _memory_manager=None, clarify_callback=lambda questions: {
@@ -159,6 +158,7 @@ def test_confirmation_survives_service_restart_and_is_exactly_once(tmp_path):
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
     restarted = Service(configured_context(), service.store)
     restarted.post_tool_call('clarify', args, json.dumps(result), session_id='other', tool_call_id='c')
+    restarted.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='other')
     assert not service.store.snapshot()['requirements']
     restarted.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
     restarted.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
@@ -205,51 +205,9 @@ def test_pre_hook_rejects_incomplete_presentation_and_missing_identity(tmp_path)
     assert service.pre_tool_call('clarify', {'questions': [{'question': 'Ordinary clarification?'}]}) is None
 
 
-@pytest.mark.parametrize('failure', ['timeout', 'failure', 'malformed', 'skipped'])
-def test_unverified_send_never_offers_confirmation(tmp_path, monkeypatch, failure):
-    import subprocess
-    from ancor.service import Service
-    from ancor.store import Store
-    service = Service(configured_context(), Store(tmp_path / 'state.db'))
-    draft = service.store.create_draft('immutable brief', 'criteria')
-    calls = []
-    def send(*args, **kwargs):
-        calls.append(kwargs['input'])
-        if failure == 'timeout':
-            raise subprocess.TimeoutExpired('hermes', 60)
-        payload = {'success': False} if failure == 'failure' else {'success': True, 'skipped': True}
-        return SimpleNamespace(returncode=0, stdout='bad json' if failure == 'malformed' else json.dumps(payload))
-    monkeypatch.setattr('ancor.notification.subprocess.run', send)
-    for _ in range(2):
-        with pytest.raises(ValueError, match='unverified'):
-            service.presentation(draft)
-    assert len(calls) == 1  # uncertain delivery is not blindly retried
-    with pytest.raises(ValueError, match='unverified'):
-        service.presentation(draft, deliver=False)
-    assert not service.store.snapshot()['requirements']
-
-
-def test_missing_configuration_and_oversized_draft_fail_closed(tmp_path):
-    from ancor.service import Service
-    from ancor.store import Store
-    store = Store(tmp_path / 'state.db')
-    draft = store.create_draft('brief', 'criteria')
-    with pytest.raises(ValueError, match='configure human_target'):
-        Service(None, store).presentation(draft)
-    for brief in ['x' * 2000, 'MEDIA:/private/file']:
-        with pytest.raises(ValueError, match='2000 characters'):
-            Service(configured_context(), store).presentation(store.create_draft(brief, 'criteria'))
-    assert not store.snapshot()['requirements']
-
-
-@pytest.mark.parametrize('phase', ['pre', 'post'])
-def test_receipt_required_at_both_confirmation_boundaries(tmp_path, phase):
-    import sqlite3
+def test_immutable_draft_file_cannot_be_changed(tmp_path):
     service, draft, args, result = confirmation(tmp_path)
-    if phase == 'post':
-        assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
-    with sqlite3.connect(service.store.path + '.presentations.db') as db:
-        db.execute("UPDATE human_notifications SET receipt=NULL")
-    assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='other')['action'] == 'block'
+    Path(draft['draft_file']).write_text('changed')
+    assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c')['action'] == 'block'
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
     assert not service.store.snapshot()['requirements']

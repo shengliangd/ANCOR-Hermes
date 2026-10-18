@@ -35,12 +35,11 @@ class Service:
             return self.store.snapshot()
         raise ValueError('unknown requirement action')
 
-    def presentation(self, draft, *, deliver=True):
-        """Persist positive native delivery before offering ID-bound consent.
+    def presentation(self, draft):
+        """Offer the immutable draft through native clarify in the current chat.
 
-        The configured destination is operator-owned, not inferred from the model
-        or reply session. This proves accessibility there, not reading or that the
-        current clarify session belongs to the same destination.
+        Surface rendering and delivery belong to Hermes; no separate destination
+        or presentation receipt is required for confirmation.
         """
         text = (f"ANCOR draft {draft['id']}\nReplacement of: {draft['replacement_of'] or 'none'}\n\n"
                 f"Requirement:\n{draft['brief']}\n\nAcceptance criteria:\n{draft['acceptance_criteria']}")
@@ -53,33 +52,7 @@ class Service:
         except FileExistsError:
             if path.read_text(encoding='utf-8') != text:
                 raise ValueError('immutable draft file differs from stored draft')
-        target = self.ctx.get_config('human_target') if self.ctx else None
-        profile = self.ctx.get_config('transport_profile') if self.ctx else None
-        if not isinstance(target, str) or ':' not in target or not target.partition(':')[2].strip() or not profile:
-            raise ValueError('configure human_target and transport_profile for verified draft presentation')
-        # Keep the initial contract text-only and below conservative message limits.
-        # MEDIA is interpreted by native send, rather than delivered literally.
-        if len(text) > 2000 or 'MEDIA:' in text:
-            raise ValueError('draft presentation requires at most 2000 characters and no MEDIA markers')
-        from .notification import HermesSender, NotificationOutbox
-        outbox = NotificationOutbox(self.store.path + '.presentations.db',
-                                   leader_profile=profile, target=target, sender=HermesSender(profile))
-        identifier = profile + ':' + draft['id']
-        if deliver:
-            outbox.enqueue(identifier, 'question', text, actor=profile)
-            receipt = outbox.deliver(identifier, actor=profile)
-        else:
-            try:
-                receipt = outbox.get(identifier)
-            except KeyError:
-                raise ValueError('draft has no verified presentation') from None
-        evidence = receipt.get('receipt')
-        if (receipt['state'] != 'sent' or receipt['message'] != text or receipt['target'] != target
-                or not isinstance(evidence, dict) or evidence.get('success') is not True
-                or evidence.get('error') or evidence.get('skipped')):
-            raise ValueError('draft presentation is unverified; reconcile native delivery before confirmation')
-        question = (f"Confirm ANCOR requirement {draft['id']}? "
-                    f"Read the complete draft delivered to {target} first. "
+        question = (text + f"\n\nConfirm ANCOR requirement {draft['id']}? "
                     'This confirms the requirement, not deployment or payment.')
         return {**draft, 'draft_file': str(path), 'clarify_args': {'questions': [{
             'question': question,
@@ -116,7 +89,7 @@ class Service:
             if len(matches) != 1:
                 raise ValueError('exact ANCOR confirmation choice required')
             draft = self.store.get_draft(matches[0])
-            expected = self.presentation(draft, deliver=False)['clarify_args']
+            expected = self.presentation(draft)['clarify_args']
             if args != expected:
                 raise ValueError('native clarify arguments must match the complete immutable draft exactly')
             with self._confirmations() as db:
@@ -143,7 +116,7 @@ class Service:
                 return
             try:
                 payload = json.loads(result) if isinstance(result, str) else result
-                question = self.presentation(self.store.get_draft(row[0]), deliver=False)['clarify_args']['questions'][0]
+                question = self.presentation(self.store.get_draft(row[0]))['clarify_args']['questions'][0]
                 expected = {'question': question['question'], 'choices_offered': question['choices'],
                             'status': 'answered', 'user_response': f'Confirm ANCOR draft {row[0]}'}
                 if not isinstance(payload, dict) or payload.get('outcome') != 'submitted' or payload.get('responses') != [expected]:

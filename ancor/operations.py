@@ -52,18 +52,6 @@ class Operations:
             if not run.get('ended_at'):
                 raise RuntimeError('worker quiescence not established')
 
-    def guard(self, requirements):
-        # No resource-lock protocol: conservatively gate all new dispatch while
-        # ANY invalidated work may still execute. Native list/block is not atomic.
-        for link in self.service.store.snapshot()['task_links']:
-            if requirements[link['requirement_id']]['status'] != 'invalidated':
-                continue
-            detail = self.detail(link['task_id'])
-            if detail['task']['status'] in {'running', 'ready'}:
-                self.board.block(link['task_id'], 'ANCOR requirement invalidated; do not resume')
-                detail = self.detail(link['task_id'])
-            self.require_quiescence(detail)
-
     def call(self, args):
         if self.ctx.profile_name != self.ctx.get_config('leader_profile', 'ancor-leader'):
             raise PermissionError('leader profile required')
@@ -72,9 +60,7 @@ class Operations:
             raise ValueError('unknown board action')
         store = self.service.store
         if action not in {'list', 'show'}:
-            requirements = self.reconcile()
-            if action in {'create', 'unblock'}:
-                self.guard(requirements)
+            self.reconcile()
         if action == 'create':
             req = store.get_requirement(args['requirement_id'])
             if req['status'] != 'active':

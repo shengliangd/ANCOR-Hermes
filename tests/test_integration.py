@@ -24,10 +24,7 @@ class Context(PluginContext):
     @property
     def profile_name(self): return 'ancor-leader'
     def get_config(self, key, default=None):
-        return {'store_path': os.path.join(os.environ['HOME'], 'store.db'), 'board': 'test',
-                'human_target': 'feishu:synthetic', 'transport_profile': 'default'}.get(key, default)
-from ancor.notification import HermesSender
-HermesSender.__call__ = lambda self, target, message: {'success': True, 'message_id': 'synthetic-presentation'}
+        return {'store_path': os.path.join(os.environ['HOME'], 'store.db'), 'board': 'test'}.get(key, default)
 ctx = Context(PluginManifest(name='ancor'), manager)
 ancor.register(ctx)
 def call(name, args):

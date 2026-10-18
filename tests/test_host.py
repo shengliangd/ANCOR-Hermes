@@ -70,16 +70,39 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     assert restarted.state()['task_cursors'] == {'t1': 17}
 
 
-def test_invalidated_requirements_excluded_from_guard_and_snapshot(tmp_path):
+def test_invalidated_requirements_wake_leader_without_automatic_guard(tmp_path, monkeypatch):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
     old = store.confirm(store.create_draft('old', 'old')['id'], 'human:old')
+    store.ack_events([e['id'] for e in store.pending_events()])
     new = store.confirm(store.create_draft('new', 'new', old['id'])['id'], 'human:new')
-    board = Board()
-    host = Host(ctx, board=board, store=store)
-    host.scan()
-    assert board.guards == [{new['id']: 1}]
+    metadata = {'requirement_id': old['id'], 'revision': 1, 'key': 'worker'}
+    board = Board({'id': 'old-worker', 'status': 'running',
+                   'body': 'ANCOR-LINK:' + json.dumps(metadata)})
+    # A fresh Store/Host must recover the durable event, not depend on memory.
+    host = Host(ctx, board=board, store=Store(ctx.config['store_path']),
+                db_path=tmp_path / 'native.db')
+    calls = []
+
+    async def spawn(*args, **kwargs):
+        calls.append(args)
+        class Process:
+            returncode = 0
+            async def wait(self):
+                return 0
+        return Process()
+
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    assert asyncio.run(host.coordinator.tick()) == 'ran'
+    payload = json.loads(calls[0][-1].split('\n', 1)[1])
+    invalidated = [e for e in payload['events'] if e['kind'] == 'requirement.invalidated']
+    assert len(invalidated) == 1
+    assert invalidated[0]['payload'] == {'requirement_id': old['id'], 'replacement_id': new['id']}
+    assert board.guards == []
+    assert board.tasks[0]['status'] == 'running'
+    assert payload['snapshot']['board'][0]['status'] == 'running'
     assert [r['id'] for r in host.snapshot()['requirements']] == [new['id']]
+    assert invalidated[0]['id'] in [e['id'] for e in store.pending_events()]
 
 
 def test_retry_budget_durable_bounded_and_recovers(tmp_path):
@@ -219,7 +242,7 @@ def test_bookkeeping_events_do_not_self_wake(tmp_path):
     assert not host.store.pending_events()
 
 
-def test_scan_ingests_despite_guard_and_individual_read_failure(tmp_path):
+def test_scan_ingests_despite_individual_read_failure(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     board = Board()
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
@@ -227,9 +250,7 @@ def test_scan_ingests_despite_guard_and_individual_read_failure(tmp_path):
     for task in ('bad', 'good'):
         host.store.link_task(req['id'], task)
     host.store.ack_events([e['id'] for e in host.store.pending_events()])
-    def guard(active):
-        raise RuntimeError('guard failed')
-    board.guard = guard
+
     original = board.events
     def events(db_path, task_ids, **kwargs):
         if task_ids == ['bad']:
@@ -240,7 +261,7 @@ def test_scan_ingests_despite_guard_and_individual_read_failure(tmp_path):
     host.scan()
     assert [e['payload']['id'] for e in host.store.pending_events()] == [8]
     assert host.state()['task_cursors'] == {'good': 8}
-    assert host.snapshot()['guard']['error'] == 'RuntimeError'
+    assert board.guards == []
 
 
 def test_owner_only(tmp_path):

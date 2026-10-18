@@ -63,15 +63,16 @@ execution tasks, progressively, through the plugin board tool. Native dispatch
 still owns execution. Preserve unrelated boards' decomposition settings.
 
 Route the selected user conversation to `ancor-leader` using native profile
-routing. Formal confirmation currently requires `human_target` and
-`transport_profile`: the complete immutable draft is sent there successfully
-before a short ID-bound native confirmation is allowed. Draft presentation is
-limited to 2,000 characters and rejects media directives. This proves a transport
-receipt to the configured destination, not that the confirming session belongs
-to that destination; deploy only in a trusted single-user context. CLI-only
-confirmation without that persistent destination is not supported yet.
-User destination and outbound notification transport must be explicitly
-configured and tested; a background CLI process's stdout is not a user message.
+routing. Present and confirm the draft in that current conversation using native
+`clarify`. Confirmation needs no separate message destination, delivery receipt or
+plugin-imposed length limit. `human_target` and `transport_profile` are only for
+leader-selected background questions and completion notices; they are not
+prerequisites for requirement confirmation.
+
+Invalidation records an event. The triggered leader decides how to stop, hold or
+replan affected work; event ingestion itself does not block tasks. New work cannot
+be created for an invalidated requirement. There is no global requirement that all
+old workers stop before unrelated work can proceed.
 
 ## Verification gates
 

@@ -9,9 +9,9 @@ description: Use when confirming ANCOR requirements or coordinating work.
 
 Do light work yourself. For substantial work, use `ancor_requirement` to draft a
 brief and acceptance criteria. Explain scope, constraints and relevant tradeoffs;
-point out contradictions with existing requirements. Present the returned draft
-and its immutable file reference, then call native `clarify` with the exact
-returned `clarify_args`. Do not manufacture confirmation or substitute a summary.
+present the complete draft in the current conversation, then call native `clarify`
+with the exact returned `clarify_args`. No separate destination or delivery receipt
+is needed. Do not manufacture confirmation or substitute a summary.
 Check `ancor_get_context` to verify activation before saying work was handed off.
 
 For a change, draft the complete replacement with `replacement_of` set to the
