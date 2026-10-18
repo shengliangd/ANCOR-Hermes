@@ -57,6 +57,10 @@ Use `ancor_notify` with a stable ID for questions and `accept:<requirement_id>`
 for accepted completion. On a user's reply, use its `respond` action to preserve
 the answer and enqueue coordination. Use the configured native user destination,
 never raw task-event subscriptions.
+Open each notification with its purpose: “需要你提供信息”, “需要你授权”,
+“需要你决定”, or “完成了一项需求”, followed by the requirement's short name.
+For requests, state the missing input or concrete action/decision, your recommendation
+and how to reply. For completion, state the result and where to find it.
 Explain what matters, what is needed and your recommendation. Keep routine
 progress quiet; do not dump IDs or logs unless useful. Confirm transport success
 before treating a question or completion notice as delivered. If delivery is
