@@ -38,8 +38,10 @@ Native Hermes owns worker dispatch and task lifecycle. The plugin owns requireme
 semantics and coordination admission. Idle polling uses no model tokens. Events
 are batched; unchanged unprocessed batches have a retry budget rather than a hot
 model loop. The native event reader is a small, explicit version coupling to
-`kanban_db.list_events`; the other integration surfaces are public plugin APIs and
-native CLI automation.
+`kanban_db.list_events`. Explicit triage recovery also uses the native domain
+function `specify_triage_task` after a leader review; this does not run the native
+specifier/decomposer model. Both narrow native-source couplings have isolated
+integration tests. Other integration uses public plugin APIs and CLI automation.
 
 ## Guarantee boundaries
 

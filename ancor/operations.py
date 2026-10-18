@@ -15,7 +15,7 @@ class Operations:
             name = self.ctx.get_config('board')
             if not name:
                 raise ValueError('configure ANCOR board')
-            self._board = NativeBoard(name)
+            self._board = NativeBoard(name, profile=self.ctx.get_config('leader_profile', 'ancor-leader'))
         return self._board
 
     def detail(self, task_id):
@@ -56,7 +56,7 @@ class Operations:
         if self.ctx.profile_name != self.ctx.get_config('leader_profile', 'ancor-leader'):
             raise PermissionError('leader profile required')
         action = args['action']
-        if action not in {'create', 'list', 'show', 'block', 'unblock', 'comment'}:
+        if action not in {'create', 'list', 'show', 'block', 'unblock', 'revise', 'comment', 'link', 'unlink', 'edit'}:
             raise ValueError('unknown board action')
         store = self.service.store
         if action not in {'list', 'show'}:
@@ -67,10 +67,21 @@ class Operations:
                 raise ValueError('requirement is not active')
             for field in ('key', 'title', 'body'):
                 store._text(args[field])
+            parent_ids, hold = args.get('parent_ids', []), args.get('hold', False)
+            if not isinstance(parent_ids, list) or any(not isinstance(p, str) or not p.strip() for p in parent_ids):
+                raise ValueError('parent_ids must be a list of task IDs')
+            if type(hold) is not bool:
+                raise ValueError('hold must be a boolean')
+            linked = {item['task_id']: item['requirement_id'] for item in store.snapshot()['task_links']}
+            for parent in parent_ids:
+                if parent not in linked:
+                    raise ValueError('unlinked parent task')
+                if store.get_requirement(linked[parent])['status'] != 'active':
+                    raise ValueError('parent requirement is not active')
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
             task = self.board.create(req['id'], 1, args['key'], title=args['title'],
                                      body=req['brief'] + '\nAcceptance criteria:\n' + req['acceptance_criteria'] + '\nTask:\n' + args['body'],
-                                     assignee=worker_profile)
+                                     assignee=worker_profile, parent_ids=parent_ids, hold=hold)
             actual = self.detail(task['id'])
             if actual['task']['assignee'] != worker_profile:
                 raise RuntimeError('native task assignee verification failed')
@@ -81,12 +92,49 @@ class Operations:
         if action == 'list':
             return {'tasks': [self.detail(tid) for tid, rid in links.items()
                               if not args.get('requirement_id') or rid == args['requirement_id']]}
+        if action in {'link', 'unlink'}:
+            parent, child = args['parent_id'], args['child_id']
+            for tid in (parent, child):
+                if tid not in links:
+                    raise ValueError('unlinked task')
+                # Removing an obsolete prerequisite must not strand active work.
+                # Creating an edge still requires both requirements to be active.
+                if (action == 'link' or tid == child) and store.get_requirement(links[tid])['status'] != 'active':
+                    raise ValueError('requirement is not active')
+            # Native CLI owns cycle, running-child and run-ownership checks.
+            return self.board.dependency(action, parent, child)
         tid = args['task_id']
         if tid not in links:
             raise ValueError('unlinked task')
         detail = self.detail(tid)
         if action == 'show':
             return detail
+        if action == 'revise':
+            reason = store._text(args['reason'])
+            if store.get_requirement(links[tid])['status'] != 'active':
+                raise ValueError('requirement is not active')
+            if detail['task']['status'] != 'triage' or detail['task'].get('archived_at'):
+                raise ValueError('revise requires an unarchived triage task')
+            self.require_quiescence(detail)
+            return self.board.revise(tid, reason)
+        if action == 'edit':
+            req = store.get_requirement(links[tid])
+            if req['status'] != 'active':
+                raise ValueError('requirement is not active')
+            fields = {key: args[key] for key in ('title', 'body', 'priority') if key in args}
+            if 'priority' in fields and type(fields['priority']) is not int:
+                raise ValueError('priority must be an integer')
+            if 'title' in fields:
+                store._text(fields['title'])
+            if 'body' in fields:
+                store._text(fields['body'])
+                metadata = self.board.link(detail['task'])
+                if not metadata or metadata['requirement_id'] != req['id'] or metadata['revision'] != 1:
+                    raise ValueError('native task association mismatch')
+                fields['body'] = (detail['task']['body'].split('\n', 1)[0] + '\n' + req['brief']
+                                  + '\nAcceptance criteria:\n' + req['acceptance_criteria']
+                                  + '\nTask:\n' + fields['body'])
+            return self.board.edit(tid, **fields)
         text = None
         if action == 'block':
             self.board.block(tid, store._text(args['reason']))

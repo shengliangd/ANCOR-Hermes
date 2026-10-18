@@ -103,9 +103,19 @@ class Host:
                 log.exception('ANCOR event read failed for task %s', task_id)
                 continue
             for event in events:
+                # Outcome/anomaly events, not every native state mutation. In
+                # particular respawn_guarded repeats every dispatcher tick, while
+                # rate_limited records an actual ended attempt. Comments, edits,
+                # heartbeats and scheduling bookkeeping must not self-wake.
+                # Native auto_blocked is a DispatchResult field; its durable
+                # circuit-breaker event is gave_up (not auto_blocked).
                 if event['kind'] in {
                     'completed', 'blocked', 'review_requested', 'dependency_wait',
                     'gave_up', 'timed_out', 'spawn_failed', 'crashed', 'stale',
+                    'rate_limited', 'block_loop_detected', 'protocol_violation',
+                    'completion_blocked_hallucination', 'completion_blocked_empty_result',
+                    'suspected_hallucinated_references', 'changes_requested',
+                    'descendant_invalidated',
                 }:
                     self.store.add_event('native.' + event['kind'], event,
                         source_key=f"native:{self.board_name}:{event['id']}")

@@ -98,17 +98,27 @@ def register(ctx, *, scan_runner=None):
             'requirement_id': req['id'], 'body': body,
             'source': 'leader_transcription', 'authorization': False})
 
+    def retirement():
+        from .retirement import Retirement
+        return Retirement(ctx, service.store, operations.board)
+
+    def board_action(args):
+        if args['action'] == 'retire':
+            return retirement().retire(args['requirement_id'], args['task_id'], args['reason'])
+        return operations.call(args)
+
     def acceptance(args):
         if args['action'] == 'accept':
             operations.reconcile()
+            retired = retirement().effective_retired(args['requirement_id'])
             links = [link['task_id'] for link in service.store.snapshot()['task_links']
-                     if link['requirement_id'] == args['requirement_id']]
+                     if link['requirement_id'] == args['requirement_id'] and link['task_id'] not in retired]
             if not links or any(operations.board.show(tid)['status'] != 'done' for tid in links):
                 raise ValueError('all linked native tasks must be done before acceptance')
         return service.acceptance(args)
 
     methods = {'requirement': requirement, 'get_context': get_context, 'notify': notify,
-               'acceptance': acceptance, 'board': operations.call}
+               'acceptance': acceptance, 'board': board_action}
     if leader:
         ctx.register_hook('pre_tool_call', service.pre_tool_call)
         ctx.register_hook('post_tool_call', service.post_tool_call)
@@ -125,10 +135,13 @@ def register(ctx, *, scan_runner=None):
                                'brief': {'type': 'string'}, 'acceptance_criteria': {'type': 'string'},
                                'replacement_of': {'type': 'string'}, 'draft_id': {'type': 'string'},
                                'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'}}, ['action']),
-        'ancor_board': ('Read linked native tasks. Only the coordinator run may create, block, unblock or comment.',
-                        {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock', 'comment']},
+        'ancor_board': ('Read linked native tasks. Coordinator actions: create, block, unblock, comment, edit title/body/priority, link/unlink parent_id → child_id dependencies. Native ownership and cycle checks apply.',
+                        {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock', 'comment', 'link', 'unlink', 'edit', 'revise', 'retire']},
+                         'priority': {'type': 'integer'},
+                         'parent_ids': {'type': 'array', 'items': {'type': 'string'}},
+                         'hold': {'type': 'boolean'},
                          **{field: {'type': 'string'} for field in
-                            ('requirement_id', 'task_id', 'key', 'title', 'body', 'reason')}}, ['action']),
+                            ('requirement_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'body', 'reason')}}, ['action']),
         'ancor_get_context': ('Read the global requirement snapshot and pending events; acknowledge only explicit event IDs.',
                              {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}}}, []),
         'ancor_acceptance': ('Record leader verification against exact requirement criteria, or reject with a reason.',

@@ -31,6 +31,26 @@ def test_installed_native_cli_roundtrip_isolated(tmp_path):
     assert len(board.list()) == 1
     assert board.guard({'r1': 2}) == [first['id']]
     assert board.show(first['id'])['status'] == 'blocked'
+    parent = board.create('r2', 1, 'prerequisite', title='Prerequisite', body='independent demand', assignee='ancor-test-worker')
+    # Establish an actual native claim before testing the running-child guard.
+    if board.show(parent['id'])['status'] == 'ready':
+        board._call('claim', parent['id'], json_output=False)
+    assert board.show(parent['id'])['status'] == 'running'
+    with pytest.raises(subprocess.CalledProcessError):
+        board.dependency('link', first['id'], parent['id'])
+    assert board.dependency('link', parent['id'], first['id'])['parents'] == [parent['id']]
+    board._call('unblock', first['id'], '--reason', 'dependency prepared', json_output=False)
+    assert board.show(first['id'])['status'] == 'todo'
+    changed = board.edit(first['id'], title='Refined work', priority=7)
+    assert changed['task']['priority'] == 7
+    assert board.link(changed['task']) == board.link(first)
+    assert board.dependency('unlink', parent['id'], first['id'])['task']['status'] == 'ready'
+    assert board.dependency('link', parent['id'], first['id'])['task']['status'] == 'todo'
+    with pytest.raises(subprocess.CalledProcessError):
+        board.dependency('link', first['id'], first['id'])
+    board.block(parent['id'], 'park prerequisite')
+    with pytest.raises(subprocess.CalledProcessError):
+        board.dependency('link', first['id'], parent['id'])  # cycle
 
 
 def test_native_events_read_only_and_bounded(tmp_path, monkeypatch):
@@ -98,6 +118,29 @@ def test_guard_defers_unsupported_states_and_isolates_failures():
 
 
 from ancor.board import NativeBoard
+
+
+@pytest.mark.parametrize('action', ['link', 'unlink'])
+def test_dependency_cli_and_readback(action):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        result = {'task': {'id': 'child'}, 'parents': ['parent'] if action == 'link' else []}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(result) if 'show' in argv else '', '')
+    board = NativeBoard('ancor', run=run)
+    assert board.dependency(action, 'parent', 'child')['task']['id'] == 'child'
+    assert calls[0][-3:] == [action, 'parent', 'child']
+    assert calls[1][-3:] == ['show', 'child', '--json']
+
+
+def test_edit_cli_readback_preserves_native_contract():
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps({'task': {'title': '--literal', 'priority': 0}}) if 'show' in argv else '', '')
+    board = NativeBoard('ancor', run=run)
+    assert board.edit('t1', title='--literal', priority=0)['task']['priority'] == 0
+    assert calls[0][-4:] == ['edit', 't1', '--title=--literal', '--priority=0']
 
 
 def test_create_durable_link_and_explicit_cli_scope(tmp_path):

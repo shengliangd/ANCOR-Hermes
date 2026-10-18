@@ -15,6 +15,14 @@ class Board:
         self.tasks = {}
         self.calls = []
 
+    dependency = NativeBoard.dependency
+    edit = NativeBoard.edit
+    def revise(self, task_id, reason):
+        self.calls.append(('revise', task_id, reason))
+        self.tasks[task_id]['comments'].append({'author': 'ancor-leader', 'body': reason.strip()})
+        self.tasks[task_id]['task']['status'] = 'ready'
+        return self.tasks[task_id]
+
     def list(self):
         return [v['task'].copy() for v in self.tasks.values()]
 
@@ -22,24 +30,38 @@ class Board:
         return self.tasks[task_id]['task'].copy()
 
     def create(self, requirement_id, revision, key, **kwargs):
-        self.calls.append(('create', kwargs))
+        self.calls.append(('create', kwargs.copy()))
         link = dict(requirement_id=requirement_id, revision=revision, key=key)
         for value in self.tasks.values():
             if self.link(value['task']) == link:
                 return value['task'].copy()
-        task = dict(id=str(len(self.tasks) + 1), status='running', **kwargs)
+        parent_ids = kwargs.pop('parent_ids', [])
+        hold = kwargs.pop('hold', False)
+        task = dict(id=str(len(self.tasks) + 1), status='blocked' if hold else 'running', **kwargs)
         task['body'] = 'ANCOR-LINK:' + json.dumps(link) + '\n' + kwargs['body']
-        self.tasks[task['id']] = dict(task=task, comments=[], runs=[], events=[], parents=[], children=[])
+        self.tasks[task['id']] = dict(task=task, comments=[], runs=[], events=[], parents=parent_ids, children=[])
         return task.copy()
 
     def _call(self, *args, json_output=True):
         self.calls.append(args)
         if args[0] == 'show':
             return self.tasks[args[1]]
+        if args[0] == 'edit':
+            for flag in args[2:]:
+                key, value = flag[2:].split('=', 1)
+                self.tasks[args[1]]['task'][key] = int(value) if key == 'priority' else value
+            return ''
+        if args[0] in {'link', 'unlink'}:
+            parents = self.tasks[args[2]]['parents']
+            if args[0] == 'link':
+                parents.append(args[1])
+            else:
+                parents.remove(args[1])
+            return ''
         if args[0] == 'comment':
             self.tasks[args[1]]['comments'].append({'author': 'ancor-leader', 'body': args[2]})
             return ''
-        if args[0] == 'unblock':
+        if args[0] in {'unblock', 'revise'}:
             self.tasks[args[1]]['task']['status'] = 'ready'
             return ''
         raise AssertionError(args)
@@ -69,6 +91,25 @@ def create_args(req, **extra):
     return dict(action='create', requirement_id=req['id'], key='first', title='Implement', body='Work details', **extra)
 
 
+def test_create_with_atomic_parents_and_hold(setup):
+    op = operations(setup)
+    parent = op.call(create_args(setup[3]))['task']['id']
+    args = create_args(setup[3], parent_ids=[parent], hold=True)
+    args['key'] = 'dependent'
+    result = op.call(args)
+    kwargs = [call[1] for call in setup[2].calls if call[0] == 'create'][-1]
+    assert kwargs['parent_ids'] == [parent] and kwargs['hold'] is True
+    assert result['task']['status'] == 'blocked'
+    assert result['parents'] == [parent]
+
+
+@pytest.mark.parametrize('extra', [{'parent_ids': ['foreign']}, {'parent_ids': 'x'}, {'hold': 1}])
+def test_create_rejects_invalid_planning_inputs(setup, extra):
+    with pytest.raises(ValueError):
+        operations(setup).call(create_args(setup[3], **extra))
+    assert not setup[2].tasks
+
+
 def test_create_links_readback_and_replays_without_requirement_card(setup):
     ctx, store, board, req = setup
     op = operations(setup)
@@ -80,6 +121,136 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     assert len(board.tasks) == 1
     assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': result['task']['id']}]
     assert store.get_requirement(req['id'])['status'] == 'active'
+
+
+def test_scoped_dependencies_across_active_requirements(setup):
+    ctx, store, board, req = setup
+    op = operations(setup)
+    parent = op.call(create_args(req))['task']['id']
+    other = store.confirm(store.create_draft('Other', 'Pass')['id'], 'human:other')
+    child = op.call(create_args(other))['task']['id']
+    board.tasks[child]['task']['status'] = 'blocked'
+    args = dict(action='link', parent_id=parent, child_id=child)
+    assert op.call(args)['parents'] == [parent]
+    assert op.call(dict(args, action='unlink'))['parents'] == []
+    with pytest.raises(ValueError, match='unlinked'):
+        op.call(dict(args, parent_id='foreign'))
+    store.accept(other['id'], 'evidence')
+    with pytest.raises(ValueError, match='active'):
+        op.call(args)
+
+
+def test_unlink_obsolete_prerequisite_from_active_child(setup):
+    ctx, store, board, req = setup
+    op = operations(setup)
+    parent = op.call(create_args(req))['task']['id']
+    other = store.confirm(store.create_draft('Other', 'Pass')['id'], 'human:other')
+    child = op.call(create_args(other))['task']['id']
+    args = dict(action='link', parent_id=parent, child_id=child)
+    op.call(args)
+    store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'human:change')
+    assert op.call(dict(args, action='unlink'))['parents'] == []
+    with pytest.raises(ValueError, match='active'):
+        op.call(args)
+    store.accept(other['id'], 'evidence')
+    with pytest.raises(ValueError, match='active'):
+        op.call(dict(args, action='unlink'))
+    with pytest.raises(ValueError, match='unlinked'):
+        op.call(dict(args, action='unlink', parent_id='foreign'))
+
+
+def test_revise_is_explicit_reviewed_triage_recovery(setup):
+    ctx, store, board, req = setup
+    op = operations(setup)
+    tid = op.call(create_args(req))['task']['id']
+    board.tasks[tid]['task']['status'] = 'triage'
+    assert op.call({'action': 'show', 'task_id': tid})['task']['status'] == 'triage'
+    assert not any(call[0] == 'revise' for call in board.calls)
+    result = op.call({'action': 'revise', 'task_id': tid, 'reason': 'Leader reviewed revised plan'})
+    assert result['task']['status'] == 'ready'
+    assert ('revise', tid, 'Leader reviewed revised plan') in board.calls
+
+
+@pytest.mark.parametrize('fault', ['inactive', 'unlinked', 'running', 'blocked', 'archived', 'empty_reason', 'executor'])
+def test_revise_rejects_unsafe_recovery(setup, monkeypatch, fault):
+    import os
+    ctx, store, board, req = setup
+    op = operations(setup)
+    tid = op.call(create_args(req))['task']['id']
+    board.tasks[tid]['task']['status'] = 'triage'
+    args = dict(action='revise', task_id=tid, reason='Reviewed')
+    if fault == 'inactive':
+        store.accept(req['id'], 'evidence')
+    elif fault == 'unlinked':
+        args['task_id'] = 'foreign'
+    elif fault in {'running', 'blocked'}:
+        board.tasks[tid]['task']['status'] = fault
+    elif fault == 'archived':
+        board.tasks[tid]['task']['archived_at'] = 1
+    elif fault == 'empty_reason':
+        args['reason'] = '  '
+    elif fault == 'executor':
+        board.tasks[tid]['runs'] = [{'worker_pid': 234, 'ended_at': 1}]
+        monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
+    board.calls.clear()
+    with pytest.raises((ValueError, RuntimeError)):
+        op.call(args)
+    assert not any(call[0] == 'revise' for call in board.calls)
+
+
+def test_promote_is_not_exposed(setup):
+    with pytest.raises(ValueError, match='unknown board action'):
+        operations(setup).call(dict(action='promote', task_id='unused', reason='Reviewed'))
+
+
+def test_edit_keeps_requirement_context_and_association(setup):
+    ctx, store, board, req = setup
+    op = operations(setup)
+    task = op.call(create_args(req))['task'].copy()
+    args = dict(action='edit', task_id=task['id'], title='Refined', body='New task details', priority=0)
+    edited = op.call(args)['task']
+    assert edited['title'] == 'Refined' and edited['priority'] == 0
+    assert NativeBoard.link(edited) == NativeBoard.link(task)
+    assert edited['body'].endswith('Task:\nNew task details')
+    assert req['brief'] in edited['body'] and req['acceptance_criteria'] in edited['body']
+    assert edited['assignee'] == 'ancor-worker'
+    store.accept(req['id'], 'evidence')
+    with pytest.raises(ValueError, match='active'):
+        op.call(args)
+
+
+@pytest.mark.parametrize('priority', [True, 1.5, '3', None])
+def test_edit_rejects_non_integer_priority(setup, priority):
+    op = operations(setup)
+    tid = op.call(create_args(setup[3]))['task']['id']
+    with pytest.raises(ValueError, match='integer'):
+        op.call(dict(action='edit', task_id=tid, priority=priority))
+
+
+def test_configured_leader_is_used_for_native_cli(setup):
+    ctx = setup[0]
+    ctx.profile_name = 'custom-leader'
+    ctx.get_config = lambda key, default=None: {'leader_profile': 'custom-leader', 'board': 'custom-board'}.get(key, default)
+    op = importlib.import_module('ancor.operations').Operations(ctx, setup[1])
+    assert op.board.prefix[:6] == ['hermes', '-p', 'custom-leader', 'kanban', '--board', 'custom-board']
+
+
+@pytest.mark.parametrize('action', ['link', 'unlink', 'edit', 'revise'])
+def test_new_mutations_are_leader_only(setup, action):
+    setup[0].profile_name = 'ancor-worker'
+    with pytest.raises(PermissionError, match='leader'):
+        operations(setup).call({'action': action})
+    assert setup[2].calls == []
+
+
+@pytest.mark.parametrize('changes', [{}, {'title': ''}, {'body': ''}])
+def test_empty_edits_do_not_mutate(setup, changes):
+    op = operations(setup)
+    tid = op.call(create_args(setup[3]))['task']['id']
+    setup[2].calls.clear()
+    with pytest.raises(ValueError):
+        op.call(dict(action='edit', task_id=tid, **changes))
+    assert not any(call[0] == 'edit' for call in setup[2].calls)
 
 
 def test_scoped_read_and_mutations(setup):

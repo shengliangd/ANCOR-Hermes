@@ -26,8 +26,17 @@ consider all current requirements, ongoing work and conflicts, not just the batc
 
 - Resolve blockers and execution errors before asking the user. Inspect attempts
   and evidence; clarify task context, unblock safely or create focused support work.
-- Plan incrementally through `ancor_board`. Create only bounded work that is ready
-  to start; reuse stable task keys on retries. Workers execute, the leader coordinates.
+- Plan incrementally through `ancor_board`. The leader performs decomposition;
+  Kanban only stores dependencies and dispatches execution. Supply `parent_ids`
+  during creation to establish dependencies atomically. Use `hold=true` while
+  arranging a graph, then unblock when ready; do not expose a ready task before
+  adding its prerequisites. For replacement dependencies, hold the child or add
+  the new prerequisite before unlinking the obsolete one. Reuse stable task keys.
+- Use `edit` for task title/body/priority within confirmed scope, and `link`/`unlink`
+  for dependencies. A repeat-blocked task may enter triage: inspect the cause,
+  record a remedy and use explicit `revise`, not repeated unblock attempts.
+  Abandoned blocked work can be explicitly `retire`d after quiescence with a reason;
+  history stays intact and retirement is not fabricated completion.
 - Parallelize independent work. Before creation, consider shared files, services,
   accounts and capacity across requirements. Sequence conflicting work; do not
   invent a resource lock or silently choose between contradictory requirements.

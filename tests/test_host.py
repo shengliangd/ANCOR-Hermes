@@ -37,14 +37,22 @@ class Board:
         return [e for e in self.history if e['id'] > after and e['task_id'] in task_ids][:limit]
 
 
-def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypatch):
+@pytest.mark.parametrize('kind', [
+    'completed', 'blocked', 'review_requested', 'dependency_wait',
+    'gave_up', 'timed_out', 'spawn_failed', 'crashed', 'stale',
+    'rate_limited', 'block_loop_detected', 'protocol_violation',
+    'completion_blocked_hallucination', 'completion_blocked_empty_result',
+    'suspected_hallucinated_references', 'changes_requested',
+    'descendant_invalidated',
+])
+def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypatch, kind):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
     req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human:1')
     store.ack_events([e['id'] for e in store.pending_events()])
     metadata = {'requirement_id': req['id'], 'revision': 1, 'key': 'worker'}
     board = Board({'id': 't1', 'title': 'execution', 'body': 'ANCOR-LINK:' + json.dumps(metadata), 'status': 'done'})
-    board.history = [{'id': 17, 'task_id': 't1', 'kind': 'completed', 'payload': {}}]
+    board.history = [{'id': 17, 'task_id': 't1', 'kind': kind, 'payload': {'reason': 'attention'}}]
     host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
     calls = []
 
@@ -61,6 +69,8 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     assert asyncio.run(host.coordinator.tick()) == 'ran'
     payload = json.loads(calls[0][-1].split('\n', 1)[1])
     assert payload['events'][0]['source_key'] == 'native:test-board:17'
+    assert payload['events'][0]['kind'] == 'native.' + kind
+    assert payload['events'][0]['payload'] == board.history[0]
     assert payload['snapshot']['board'][0]['status'] == 'done'
     assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': 't1'}]
     assert store.pending_events()  # successful exit is NOT an ack
@@ -68,6 +78,15 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     restarted.scan()
     assert len(store.pending_events()) == 1
     assert restarted.state()['task_cursors'] == {'t1': 17}
+    # Replay the durable inbox write after a crash before cursor persistence.
+    restarted.save({'task_cursors': {}})
+    restarted.scan()
+    assert len(store.pending_events()) == 1
+    store.ack_events([e['id'] for e in store.pending_events()])
+    restarted.save({'task_cursors': {}})
+    restarted.scan()
+    assert not store.pending_events()  # replay must not resurrect handled work
+    assert board.guards == []
 
 
 def test_invalidated_requirements_wake_leader_without_automatic_guard(tmp_path, monkeypatch):
@@ -225,20 +244,32 @@ def test_per_task_cursors_preserve_racing_and_newly_discovered_history(tmp_path)
 
 def test_bookkeeping_events_do_not_self_wake(tmp_path):
     ctx = Context(tmp_path / 'store.db')
-    host = Host(ctx, board=Board(), db_path=tmp_path / 'native.db')
+    board = Board()
+    host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
     req = host.store.confirm(host.store.create_draft('x', 'y')['id'], 'human')
     host.store.link_task(req['id'], 'a')
     host.store.ack_events([e['id'] for e in host.store.pending_events()])
-    kinds = ['created', 'commented', 'edited', 'attached', 'linked', 'completed',
-             'blocked', 'review_requested', 'gave_up', 'timed_out', 'spawn_failed']
+    ignored = ['created', 'commented', 'edited', 'attached', 'linked',
+               'heartbeat', 'claim_extended', 'claimed', 'spawned',
+               'worker_registered', 'respawn_guarded', 'skipped_nonspawnable',
+               'reclaim_deferred', 'status', 'assigned', 'promoted', 'unblocked']
+    actionable = ['completed', 'blocked', 'review_requested', 'gave_up',
+                  'timed_out', 'spawn_failed']
+    kinds = ignored + actionable
     host.board.history = [{'id': i, 'task_id': 'a', 'kind': kind}
                           for i, kind in enumerate(kinds, 1)]
     host.scan()
     assert [e['kind'] for e in host.store.pending_events()] == [
-        'native.' + k for k in kinds[5:]]
+        'native.' + k for k in actionable]
     assert host.state()['task_cursors']['a'] == len(kinds)
     host.store.ack_events([e['id'] for e in host.store.pending_events()])
-    host.scan()
+    # Fresh comments/edits and repeated dispatcher deferrals after coordinator
+    # handling are also quiet, not merely an already-consumed cursor replay.
+    board.history.extend({'id': len(kinds) + i, 'task_id': 'a', 'kind': kind}
+                              for i, kind in enumerate(ignored, 1))
+    restarted = Host(ctx, board=host.board, db_path=tmp_path / 'native.db')
+    assert asyncio.run(restarted.coordinator.tick()) == 'idle'
+    assert restarted.state()['task_cursors']['a'] == len(kinds) + len(ignored)
     assert not host.store.pending_events()
 
 

@@ -1,4 +1,4 @@
-"""Thin CLI board adapter; no model-mediated operations or native DB writes.
+"""Thin CLI adapter plus version-coupled native triage revision; no raw SQL.
 
 CLI contract inspected in installed hermes_cli/kanban_parser.py and kanban.py.
 Call from a thread when used by an async gateway (CLI operations are blocking).
@@ -64,6 +64,64 @@ class NativeBoard:
         except (ValueError, TypeError):
             return None
 
+    def edit(self, task_id, *, title=None, body=None, priority=None):
+        fields = {key: value for key, value in
+                  (('title', title), ('body', body), ('priority', priority)) if value is not None}
+        if not fields:
+            raise ValueError('provide title, body or priority')
+        self._call('edit', task_id, *(f'--{key}={value}' for key, value in fields.items()), json_output=False)
+        actual = self._call('show', task_id)
+        if any(actual['task'][key] != value for key, value in fields.items()):
+            raise RuntimeError('native edit verification failed')
+        return actual
+
+    def dependency(self, action, parent_id, child_id):
+        """Native prerequisite edge, not an ANCOR requirement association."""
+        if action not in {'link', 'unlink'}:
+            raise ValueError('unknown dependency action')
+        self._call(action, parent_id, child_id, json_output=False)
+        actual = self._call('show', child_id)
+        if (parent_id in actual['parents']) != (action == 'link'):
+            raise RuntimeError('native dependency verification failed')
+        return actual
+
+    def revise(self, task_id, reason):
+        """Version-coupled native domain adapter, not CLI specify (auxiliary LLM).
+
+        Requires kanban_db_connect.connect and kanban_db domain functions.
+        Native connect/write_txn retain delegated-child fences; never clear
+        lineage or use raw SQL. Leader edits scope before this explicit review.
+        Omitted fields preserve exact existing title/body/assignee. Audit intent
+        is committed BEFORE release; native specify cannot nest in an outer txn.
+        A refused release can therefore leave its truthful review-intent comment.
+        """
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_db_connect import connect
+        from pathlib import Path
+        reason = reason.strip()
+        if not reason:
+            raise ValueError('reason is required')
+        path = (self.env or {}).get('HERMES_KANBAN_DB')
+        conn = connect(db_path=Path(path) if path else None, board=self.prefix[5])
+        try:
+            before = kb.get_task(conn, task_id)
+            if before is None or before.status != 'triage':
+                raise ValueError('revise requires an unarchived triage task')
+            comment_id = kb.add_comment(conn, task_id, self.prefix[2], reason)
+            if not kb.specify_triage_task(conn, task_id, author=self.prefix[2]):
+                raise RuntimeError('native revise refused; review intent recorded')
+            after = kb.get_task(conn, task_id)
+            comments = kb.list_comments(conn, task_id)
+            if (after is None or after.status not in {'todo', 'ready', 'running'}
+                    or any(getattr(after, key) != getattr(before, key)
+                           for key in ('title', 'body', 'assignee'))
+                    or not any(c.id == comment_id and c.body == reason
+                               and c.author == self.prefix[2] for c in comments)):
+                raise RuntimeError('native revise verification failed')
+        finally:
+            conn.close()
+        return self._call('show', task_id)
+
     def block(self, task_id, reason):
         self._call('block', task_id, reason, '--kind', 'needs_input', json_output=False)
         task = self.show(task_id)
@@ -98,16 +156,20 @@ class NativeBoard:
                 self.guard_state['stopped'].append(task['id'])
         return self.guard_state['stopped']
 
-    def create(self, requirement_id, revision, key, *, title, body, assignee):
+    def create(self, requirement_id, revision, key, *, title, body, assignee, parent_ids=(), hold=False):
         link = {'requirement_id': requirement_id, 'revision': revision, 'key': key}
         encoded = json.dumps(link, sort_keys=True, separators=(',', ':'))
         # Native idempotency + in-body metadata survives a crash before store linking.
         token = 'ancor:' + hashlib.sha256(encoded.encode()).hexdigest()
         task = self._call('create', title, '--body', 'ANCOR-LINK:' + encoded + '\n' + body,
                           '--assignee', assignee, '--idempotency-key', token,
-                          '--created-by', 'ancor-leader', '--initial-status', 'running',
+                          '--created-by', 'ancor-leader', '--initial-status', 'blocked' if hold else 'running',
+                          *(flag for parent in parent_ids for flag in ('--parent', parent)),
                           '--completion-contract', 'local-only')
-        actual = self.show(task['id'])
+        detail = self._call('show', task['id'])
+        actual = detail['task']
+        if set(parent_ids) - set(detail.get('parents', [])) or (hold and actual['status'] != 'blocked'):
+            raise RuntimeError('native creation planning verification failed')
         if self.link(actual) != link:
             raise RuntimeError('native task link verification failed')
         return actual
