@@ -59,6 +59,26 @@ Record useful decisions on tasks, then acknowledge only the supplied event IDs
 that have been handled. New events remain pending. An unresolved human question
 should be durable and explicit, not a reason to spin or repeatedly send it.
 
+## Waiting and liveness
+
+Before ending a turn, inspect `progression` for every active requirement. Identify
+its real next event source: native work/dependency, a durable human question, or
+an explicit timed recheck. Missing-source warnings require a plan, not repeated
+self-wakes. Use `ancor_wake` schedule with requirement_id, a concrete reason, and
+future due_at (Unix seconds). List before scheduling; replace by wake_id when the
+plan changes, cancel obsolete wakes. Registration itself does not wake the leader.
+Due wakes enter the ordinary serialized inbox and require explicit acknowledgement.
+Invalidated/accepted requirements suppress obsolete wakes. A long wait may be
+legitimate: do not move it earlier just to keep the system busy.
+
+`host.liveness` is insurance while any requirement is active, not a work plan.
+Inspect current work, repair missing progression sources, then acknowledge it.
+The coordinator's first ANCOR tool call records actual coordination and resets
+the two-hour deadline once per child session; process creation, queued events and
+failed CLI startup do not. Scanner outages, launch failures, or an existing stuck
+coordinator can make it overdue: report the infrastructure problem, never start
+an overlapping leader. No active requirements means no periodic insurance calls.
+
 ## Human communication
 
 Use `ancor_notify` with a stable ID for questions and `accept:<requirement_id>`

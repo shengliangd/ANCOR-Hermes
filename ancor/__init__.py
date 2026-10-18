@@ -53,12 +53,23 @@ def register(ctx, *, scan_runner=None):
                 response_event(row)
         return rows
 
+    def wake(args):
+        from .scheduling import Scheduling
+        return Scheduling(service.store).call(args)
+
     def get_context(args):
         try:
             extra = {'notifications': notifications()}
         except ValueError as exc:
             extra = {'notifications': [], 'notifications_error': str(exc)}
-        return {**service.get_context(args), **extra}
+        from .scheduling import Scheduling
+        data = service.get_context(args)
+        try:
+            tasks = operations.board.list()
+        except Exception as exc:
+            tasks = []
+            extra['board_error'] = str(exc)
+        return {**data, **Scheduling(service.store).observation(data, tasks), **extra}
 
     def notify(args, **native):
         action = args['action']
@@ -119,11 +130,15 @@ def register(ctx, *, scan_runner=None):
         return service.acceptance(args)
 
     methods = {'requirement': requirement, 'get_context': get_context, 'notify': notify,
-               'acceptance': acceptance, 'board': board_action}
+               'acceptance': acceptance, 'board': board_action, 'wake': wake}
     if leader:
         ctx.register_hook('pre_tool_call', service.pre_tool_call)
         ctx.register_hook('post_tool_call', service.post_tool_call)
     definitions = {
+        'ancor_wake': ('Manage durable future one-shot wakes. schedule requires requirement_id, reason, due_at (Unix seconds); replace requires wake_id, reason, due_at; cancel requires wake_id. list optionally filters requirement_id. Mutations require coordinator. Never create immediate self-wake loops.',
+                       {'action': {'type': 'string', 'enum': ['schedule', 'list', 'cancel', 'replace']},
+                        'requirement_id': {'type': 'string'}, 'wake_id': {'type': 'string'},
+                        'reason': {'type': 'string'}, 'due_at': {'type': 'number'}}, ['action']),
         'ancor_notify': ('Send a durable question or accepted completion (coordinator only), list notifications, or transcribe a human answer. Answers are advisory, never authorization. Reuse stable IDs; completion IDs must be accept:<requirement_id>. Uncertain delivery requires operator reconciliation, not a new ID.',
                          {'action': {'type': 'string', 'enum': ['send', 'list', 'respond']},
                           'id': {'type': 'string'},
@@ -160,9 +175,11 @@ def register(ctx, *, scan_runner=None):
     }
     if worker:
         definitions = {'ancor_get_context': ('Read the global requirement snapshot without acknowledging events.', {}, [])}
+    coordination_observed = False
     for name, (description, properties, required) in definitions.items():
         method = methods[name.removeprefix('ancor_')]
         def handle(args, _method=method, _name=name, **kwargs):
+            nonlocal coordination_observed
             try:
                 if worker:
                     if args:
@@ -171,6 +188,7 @@ def register(ctx, *, scan_runner=None):
                 if ctx.profile_name != ctx.get_config('leader_profile', 'ancor-leader'):
                     raise PermissionError('leader profile required')
                 mutation = (_name == 'ancor_acceptance'
+                            or (_name == 'ancor_wake' and args.get('action') != 'list')
                             or (_name == 'ancor_notify' and args.get('action') == 'send')
                             or (_name == 'ancor_board' and args.get('action') not in {'list', 'show'})
                             or (_name == 'ancor_requirement' and args.get('action') == 'link')
@@ -178,6 +196,10 @@ def register(ctx, *, scan_runner=None):
                 # Cooperation marker, not a shell/process security sandbox.
                 if mutation and os.environ.get('ANCOR_COORDINATOR') != '1':
                     raise PermissionError('coordinator run required (ANCOR_COORDINATOR=1)')
+                if not coordination_observed and os.environ.get('ANCOR_COORDINATOR') == '1':
+                    from .scheduling import Scheduling
+                    Scheduling(service.store).started()
+                    coordination_observed = True
                 result = _method(args, **kwargs) if _name == 'ancor_notify' else _method(args)
                 return json.dumps(result, ensure_ascii=False)
             except Exception as exc:

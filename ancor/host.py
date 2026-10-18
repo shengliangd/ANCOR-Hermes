@@ -51,6 +51,8 @@ class Host:
                                           env=child_environment())
         self.db_path = db_path
         self.clock = clock
+        from .scheduling import Scheduling
+        self.scheduling = Scheduling(self.store, clock)
         self.state_path = path.parent / (path.name + '.host.json')
         self.tasks = []
         self.startup = True
@@ -73,6 +75,7 @@ class Host:
         temporary.replace(self.state_path)
 
     def scan(self):
+        self.scheduling.scan()
         snapshot = self.store.snapshot()
         known = {r['id']: r for r in snapshot['requirements']}
         # Invalidation is a durable coordination event, not an automatic stop.
@@ -142,15 +145,20 @@ class Host:
         # Reserve one slot for newest input: a full unchanged head batch must
         # not hide human replies/completions behind its hour-long cooldown.
         events = pending[:limit] if len(pending) <= limit else pending[:limit - 1] + pending[-1:]
+        # Reserve a slot for overdue insurance even behind a large input backlog.
+        overdue = next((e for e in pending if e['kind'] == 'host.liveness'), None)
+        if overdue and overdue not in events:
+            events = events[:limit - 1] + [overdue]
         if not events:
             return []
         signature = hashlib.sha256(json.dumps([e['id'] for e in events]).encode()).hexdigest()
         state = self.state()
         if state.get('batch') != signature:
             state.update(batch=signature, attempts=0, retry_at=0)
-        if self.clock() < state.get('retry_at', 0):
+        insurance = any(e['kind'] == 'host.liveness' for e in events)
+        if not insurance and self.clock() < state.get('retry_at', 0):
             return []
-        if state.get('attempts', 0) >= 3:
+        if not insurance and state.get('attempts', 0) >= 3:
             log.error('ANCOR unchanged pending batch exhausted three attempts; retry in one hour')
             state.update(attempts=0, retry_at=self.clock() + 3600)
             self.save(state)
@@ -204,7 +212,7 @@ class Host:
         requirements = [r for r in data['requirements'] if r['status'] == 'active' or
                         (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)]
         relevant = {r['id'] for r in requirements}
-        return {'requirements': requirements,
+        return {**self.scheduling.observation(data, self.tasks), 'requirements': requirements,
                 'invalidated_tasks': self.invalidated_tasks(data),
                 'acceptances': [e for e in self.store.acceptances()
                                 if e['payload']['requirement_id'] in relevant],
@@ -228,7 +236,24 @@ async def scan_runner(ctx, adapter):
         await asyncio.sleep(interval)
     host = Host(ctx)
     while adapter.is_connected:
-        outcome = await host.coordinator.tick()
+        tick = asyncio.create_task(host.coordinator.tick())
+        try:
+            while not tick.done():
+                done, _ = await asyncio.wait({tick}, timeout=interval)
+                if not done and host.scheduling.observation(host.store.snapshot())['liveness']['overdue']:
+                    log.error('ANCOR liveness overdue: coordinator still running; no overlapping launch')
+            outcome = await tick
+        finally:
+            if not tick.done():
+                tick.cancel()
+                try:
+                    await tick
+                except asyncio.CancelledError:
+                    pass
+        if outcome == 'busy':
+            observation = host.scheduling.observation(host.store.snapshot())
+            if observation['liveness']['overdue']:
+                log.error('ANCOR liveness overdue: coordinator lock remains held; inspect stuck/surviving leader, no overlapping launch')
         if outcome == 'failed':
             log.error('ANCOR coordinator infrastructure failure: %s', host.coordinator.last_error)
         await asyncio.sleep(interval)

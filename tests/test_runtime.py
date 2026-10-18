@@ -59,7 +59,7 @@ def test_cancellation_stops_grandchild_before_unlock(tmp_path):
     def running(pid):
         try:
             return Path(f'/proc/{pid}/stat').read_text().split(') ')[1][0] != 'Z'
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return False
 
     async def scenario():

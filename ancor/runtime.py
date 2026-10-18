@@ -10,7 +10,9 @@ from pathlib import Path
 
 class Coordinator:
     def __init__(self, lock_path, *, pending, snapshot, scan, batch_size=32,
-                 command=None, clock=time.monotonic, retry_base=5, retry_max=300):
+                 command=None, clock=time.monotonic, retry_base=5, retry_max=300,
+                 started=lambda: None):
+        self.started = started
         if retry_base <= 0 or retry_max < retry_base:
             raise ValueError('invalid retry bounds')
         self.clock, self.retry_base, self.retry_max = clock, retry_base, retry_max
@@ -83,4 +85,8 @@ class Coordinator:
                 raise
             if proc.returncode:
                 raise RuntimeError(f'leader exited {proc.returncode}')
+            # A successful command is the generic runtime's readiness fallback.
+            # Production records readiness from the child's first business tool,
+            # not this callback or subprocess creation.
+            self.started()
             return 'ran'

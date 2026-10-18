@@ -52,7 +52,8 @@ assert event['payload']['source'] == 'leader_transcription'
 assert store.get_requirement(req['id'])['status'] == 'active'
 assert 'coordinator run required' in call('ancor_requirement', {'action':'link'})['error']
 assert 'coordinator run required' in call('ancor_get_context', {'ack_event_ids':[event['id']]})['error']
-assert call('ancor_get_context', {})['pending_events']
+# Context now observes native tasks too; install the subprocess fixture before
+# its first read so Operations does not cache an unmocked NativeBoard.
 # Replace only the native CLI subprocess boundary, retain NativeBoard and Operations.
 tasks = {'one': {'id':'one', 'status':'done', 'body':''},
          'two': {'id':'two', 'status':'blocked', 'body':''}}
@@ -66,6 +67,11 @@ def run(argv, **kwargs):
 original = NativeBoard.__init__
 def init(self, board, **kwargs): original(self, board, run=run, **kwargs)
 NativeBoard.__init__ = init
+assert call('ancor_get_context', {})['pending_events']
+wake_entry = registry.get_entry('ancor_wake', scope=manager.scope_key)
+assert wake_entry
+assert call('ancor_wake', {'action': 'list'}) == []
+assert 'coordinator run required' in call('ancor_wake', {'action': 'schedule'})['error']
 store.link_task(req['id'], 'one')
 store.link_task(req['id'], 'two')
 assert len(call('ancor_board', {'action':'list'})['tasks']) == 2
