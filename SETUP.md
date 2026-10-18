@@ -24,6 +24,27 @@ configuration, memory and routes. The worker instructions use read-only requirem
 context and safe checkpoints to stop obsolete work; this is cooperative behavior,
 not process isolation.
 
+## Disable automatic self-improvement
+
+Keep ANCOR role instructions and skills fixed to the reviewed repository version.
+Disable automatic post-turn review and skill curation in both role profiles:
+
+```sh
+hermes -p ancor-leader config set auxiliary.background_review.enabled false
+hermes -p ancor-leader config set curator.enabled false
+hermes -p ancor-worker config set auxiliary.background_review.enabled false
+hermes -p ancor-worker config set curator.enabled false
+```
+
+These are native profile settings, not plugin settings. Apply them before starting
+sessions; restart existing role sessions and the serving Gateway after changing
+an existing installation. Read back both profiles' configuration. If automatic
+improvement already changed installed skills or instructions, review the diff and
+restore the approved repository versions before validation; disabling it does not
+undo earlier edits. This disables automatic maintenance, not explicit `/refine`
+or all file-writing tools. Re-enabling self-improvement is a separate future
+experiment, not part of the current setup.
+
 ## Settings
 
 Use `hermes config set` in the appropriate native profile. Plugin settings live
