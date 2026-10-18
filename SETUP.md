@@ -115,6 +115,39 @@ replan affected work; event ingestion itself does not block tasks. New work cann
 be created for an invalidated requirement. There is no global requirement that all
 old workers stop before unrelated work can proceed.
 
+## Restart recovery contract
+
+On the first scan that acquires the existing coordinator flock, the host reads
+current requirements, native tasks/events, acceptance evidence and the existing
+notification outbox. Pending events already trigger reconciliation. If the inbox
+is empty but active requirements, undelivered acceptances or unresolved notices
+remain, it records one durable `host.recovery` event. Acknowledging that event
+makes subsequent idle polls quiet; it is not recreated on every poll. A later
+host startup may reconcile still-unresolved work again. Drafts alone do not wake
+a model. A sent completion is neither recreated nor resent.
+
+Acceptance criteria for recovery:
+- Confirmed work resumes without human resubmission, including an interrupted
+  coordinator that acknowledged its original event before finishing coordination.
+- A surviving coordinator retains its inherited flock; a restarted host waits.
+  Existing native task keys/claims remain authoritative; recovery does not dispatch
+  workers itself or replace native scheduling.
+- Durable worker outcome events from downtime are ingested using per-task cursors
+  and deduplicated source keys.
+- Acceptance before notification enqueue wakes the leader with original evidence;
+  only the leader decides the real completion text and enqueues the stable ID.
+- Pending notices remain pending; `sending`/`uncertain` require transport evidence
+  and operator reconciliation, never blind retries or replacement IDs.
+- No continuous idle model calls. Unhandled identical batches retain the existing
+  three-attempt/hour cooldown; the newest event gets a reserved batch slot so new
+  input cannot hide behind a full cooling head batch.
+
+These are durable wake/reconciliation guarantees, not guarantees that an arbitrary
+model successfully completes work. Recovery does not infer acceptance or delivery.
+The host reads the outbox without requiring transport credentials/configuration.
+Crash tests use real OS processes and locks with scripted leader decisions; native
+history reads use the installed read-only API. They are not actual-model E2E.
+
 ## Verification gates
 
 1. Run `env -u PYTHONPATH python -m pytest tests -q` in the source checkout.

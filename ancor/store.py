@@ -152,6 +152,12 @@ class Store:
                     'SELECT * FROM events WHERE acknowledged = 0 ORDER BY id')],
             }
 
+    def acceptances(self):
+        """Retain accepted evidence even after its coordination event is handled."""
+        with self._transaction() as db:
+            return [self._event(row) for row in db.execute(
+                "SELECT * FROM events WHERE kind = 'requirement.accepted' ORDER BY id")]
+
     def accept(self, requirement_id, evidence):
         self._text(evidence)
         with self._transaction() as db:

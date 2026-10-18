@@ -22,6 +22,14 @@ requirement or change cards in Kanban.
 
 Start from `ancor_get_context` and the board. Pending events help direct attention;
 consider all current requirements, ongoing work and conflicts, not just the batch.
+On `host.recovery`, reconcile the current durable snapshot rather than replaying
+old decisions: reuse existing task keys, inspect acceptance evidence and the
+outbox, and finish missing handoffs. An accepted requirement without a notice
+needs a real leader-authored completion, not another acceptance. Reuse the exact
+stored message for a pending notification. Never resend `sending`/`uncertain`
+notifications or replace their IDs; reconcile transport evidence first. Sent
+completions are finished. Acknowledge recovery once handled or durably waiting;
+waiting alone is not a reason for repeated coordination turns.
 
 - Resolve blockers and execution errors before asking the user. Inspect attempts
   and evidence; clarify task context, unblock safely or create focused support work.

@@ -268,6 +268,11 @@ def test_bookkeeping_events_do_not_self_wake(tmp_path):
     board.history.extend({'id': len(kinds) + i, 'task_id': 'a', 'kind': kind}
                               for i, kind in enumerate(ignored, 1))
     restarted = Host(ctx, board=host.board, db_path=tmp_path / 'native.db')
+    # Startup reconciliation is independent of bookkeeping events. Consume its
+    # one durable wake without invoking a real model in this unit test.
+    recovery = restarted.pending(32)
+    assert [e['kind'] for e in recovery] == ['host.recovery']
+    host.store.ack_events([e['id'] for e in recovery])
     assert asyncio.run(restarted.coordinator.tick()) == 'idle'
     assert restarted.state()['task_cursors']['a'] == len(kinds) + len(ignored)
     assert not host.store.pending_events()

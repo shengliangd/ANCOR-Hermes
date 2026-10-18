@@ -43,6 +43,7 @@ class Host:
         path = Path(ctx.get_config('store_path', ''))
         if not path.is_absolute():
             raise ValueError('configure shared absolute store_path for ANCOR')
+        self.ctx = ctx
         self.profile = ctx.get_config('leader_profile', 'ancor-leader')
         self.board_name = ctx.get_config('board', 'ancor')
         self.store = store or Store(path)
@@ -52,6 +53,7 @@ class Host:
         self.clock = clock
         self.state_path = path.parent / (path.name + '.host.json')
         self.tasks = []
+        self.startup = True
 
         self.coordinator = Coordinator(path.parent / 'ancor-coordinator.lock',
             pending=self.pending, snapshot=self.snapshot, scan=self.scan,
@@ -126,7 +128,20 @@ class Host:
                 self.save(state)
 
     def pending(self, limit):
-        events = self.store.pending_events()[:limit]
+        if self.startup:
+            # Runs under the SAME inherited coordinator flock, after discovery.
+            # A pending inbox already wakes the leader with this current snapshot.
+            data = self.snapshot()
+            if (data['requirements'] or data['notifications'] or data['invalidated_tasks']) and not self.store.pending_events():
+                self.store.add_event('host.recovery', {
+                    'reason': 'Reconcile durable state after host startup; inspect current context. '
+                              'Reuse task keys and notification IDs; never resend sending/uncertain notices. '
+                              'No automatic stop: the leader decides how to resolve invalidated tasks.'})
+            self.startup = False
+        pending = self.store.pending_events()
+        # Reserve one slot for newest input: a full unchanged head batch must
+        # not hide human replies/completions behind its hour-long cooldown.
+        events = pending[:limit] if len(pending) <= limit else pending[:limit - 1] + pending[-1:]
         if not events:
             return []
         signature = hashlib.sha256(json.dumps([e['id'] for e in events]).encode()).hexdigest()
@@ -144,9 +159,57 @@ class Host:
         self.save(state)
         return events
 
+    def invalidated_tasks(self, data):
+        """Surface obsolete unfinished work, never stop it or infer retirement."""
+        from .operations import Operations
+        from .retirement import Retirement
+
+        invalidated = {r['id']: r for r in data['requirements'] if r['status'] == 'invalidated'}
+        tasks = {t['id']: t for t in self.tasks}
+        retired = {}
+        unresolved = []
+        for link in data['task_links']:
+            rid, tid = link['requirement_id'], link['task_id']
+            if rid not in invalidated:
+                continue
+            task = tasks.get(tid, {})
+            status = task.get('status')
+            if status in {'todo', 'ready', 'running', 'review', 'triage'}:
+                reason = 'Invalidated requirement still has unfinished ' + status + ' work'
+            else:
+                try:
+                    detail = self.board._call('show', tid)
+                    Operations.require_quiescence(detail)
+                    if any(not run.get('ended_at') for run in detail['runs']):
+                        raise RuntimeError('active run')
+                    if detail['task']['status'] == 'done':
+                        continue
+                    if rid not in retired:
+                        retired[rid] = Retirement(self.ctx, self.store, self.board).effective_retired(rid)
+                    if tid in retired[rid]:
+                        continue
+                    reason = 'Invalidated requirement has unresolved work without safe retirement'
+                except Exception:
+                    # Failed reads are not evidence that obsolete work is quiet.
+                    reason = 'Invalidated task quiescence could not be established; inspect native detail'
+            unresolved.append({'requirement': invalidated[rid], 'task_id': tid, 'reason': reason})
+        return unresolved
+
     def snapshot(self):
+        from .notification import NotificationOutbox
         data = self.store.snapshot()
-        return {'requirements': [r for r in data['requirements'] if r['status'] == 'active'],
+        notifications = NotificationOutbox.read_existing(self.store.path + '.notifications.db')
+        delivered = {n['id'] for n in notifications
+                     if n['state'] == 'sent' and n['kind'] == 'completion'}
+        requirements = [r for r in data['requirements'] if r['status'] == 'active' or
+                        (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)]
+        relevant = {r['id'] for r in requirements}
+        return {'requirements': requirements,
+                'invalidated_tasks': self.invalidated_tasks(data),
+                'acceptances': [e for e in self.store.acceptances()
+                                if e['payload']['requirement_id'] in relevant],
+                'notifications': [n for n in notifications if n['state'] != 'sent' or
+                                  (n['kind'] == 'question' and n['answer'] is None)],
                 'task_links': data['task_links'],
                 'board': [{k: t[k] for k in ('id', 'title', 'status', 'assignee', 'blocked_reason') if k in t}
                           for t in self.tasks]}

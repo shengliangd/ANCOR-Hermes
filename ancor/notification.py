@@ -102,6 +102,21 @@ class NotificationOutbox:
         with self._db() as db:
             return [self._row(db, row[0]) for row in db.execute('SELECT id FROM human_notifications ORDER BY rowid')]
 
+    @classmethod
+    def read_existing(cls, path):
+        """Host inspection without configuring transport or creating an outbox."""
+        from pathlib import Path
+        path = Path(path)
+        if not path.exists():
+            return []
+        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            return [cls._row(db, row[0]) for row in db.execute(
+                'SELECT id FROM human_notifications ORDER BY rowid')]
+        finally:
+            db.close()
+
     def enqueue(self, identifier, kind, message, *, actor):
         self._leader(actor)
         if kind not in ('question', 'completion'):
