@@ -1,4 +1,5 @@
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -82,6 +83,44 @@ def test_cli_rejects_invalid_or_skipped_delivery(monkeypatch, stdout, code):
     monkeypatch.setattr('ancor.notification.subprocess.run', lambda *a, **k: SimpleNamespace(returncode=code, stdout=stdout))
     with pytest.raises(RuntimeError):
         HermesSender('transport')('telegram:123', 'Hello')
+
+
+@pytest.mark.parametrize('failure,reason,exception_class,code', [
+    ('bad-json', 'invalid_receipt_json', 'ValueError', 0),
+    ('shape', 'invalid_receipt_shape', 'RuntimeError', 0),
+    ('exit', 'nonzero_exit', 'RuntimeError', 7),
+    ('unconfirmed', 'delivery_unconfirmed', 'RuntimeError', 0),
+    ('timeout', 'timeout', 'TimeoutExpired', None),
+    ('missing', 'executable_not_found', 'FileNotFoundError', None),
+    ('denied', 'executable_os_error', 'PermissionError', None),
+])
+def test_safe_durable_sender_diagnostics_no_retry(tmp_path, monkeypatch, failure,
+                                                 reason, exception_class, code):
+    calls = []
+    executable = str(tmp_path / 'hermes')
+    monkeypatch.setattr('shutil.which', lambda _: executable)
+    def run(*args, **kwargs):
+        calls.append(args)
+        if failure == 'timeout':
+            raise subprocess.TimeoutExpired('SECRET', 1, output='SECRET', stderr='SECRET')
+        if failure == 'missing':
+            raise FileNotFoundError('SECRET')
+        if failure == 'denied':
+            raise PermissionError('SECRET')
+        stdout = {'bad-json': 'SECRET', 'shape': '[]', 'exit': 'SECRET',
+                  'unconfirmed': '{"error":"SECRET"}'}[failure]
+        return SimpleNamespace(returncode=code, stdout=stdout)
+    monkeypatch.setattr('ancor.notification.subprocess.run', run)
+    outbox = box(tmp_path, HermesSender('transport'))
+    outbox.enqueue('q', 'question', 'SECRET body', actor='leader')
+    row = outbox.deliver('q', actor='leader')
+    assert row['state'] == 'uncertain'
+    assert json.loads(row['error']) == {
+        'exception_class': exception_class, 'reason_code': reason,
+        'exit_code': code, 'resolved_executable': executable}
+    assert 'SECRET' not in row['error']
+    assert box(tmp_path).deliver('q', actor='leader') == row
+    assert len(calls) == 1
 
 
 def test_text_only_and_explicit_target(tmp_path):

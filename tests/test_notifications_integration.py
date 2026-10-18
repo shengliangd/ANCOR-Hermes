@@ -22,6 +22,7 @@ from ancor.notification import HermesSender, NotificationOutbox
 from ancor.store import Store
 sent = []
 def send(self, target, message):
+    assert self.executable == config.get('sender_executable', 'hermes')
     sent.append((self.profile, target, message))
     return {'success': True, 'message_id': 'synthetic'}
 HermesSender.__call__ = send
@@ -74,6 +75,7 @@ completion = dict(id='accept:' + req['id'], kind='completion', message='Done', r
 assert 'accepted' in call('send', **completion)['error']
 store.accept(req['id'], 'synthetic evidence')
 assert 'error' in call('send', **dict(completion, id='unlinked'))
+config['sender_executable'] = '/isolated/bin/hermes'
 assert call('send', **completion)['state'] == 'sent'
 assert 'error' in call('respond', id=completion['id'], answer='yes')
 assert store.get_requirement(req['id'])['status'] == 'accepted'

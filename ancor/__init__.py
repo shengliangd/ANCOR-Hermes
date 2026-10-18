@@ -35,7 +35,8 @@ def register(ctx, *, scan_runner=None):
             service.store.path + '.notifications.db',
             leader_profile=ctx.get_config('leader_profile', 'ancor-leader'),
             target=ctx.get_config('human_target'),
-            sender=HermesSender(ctx.get_config('transport_profile')))
+            sender=HermesSender(ctx.get_config('transport_profile'),
+                                executable=ctx.get_config('sender_executable', 'hermes')))
 
     def response_event(row):
         return service.store.add_event('notification.response', {

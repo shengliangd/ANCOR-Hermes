@@ -11,6 +11,16 @@ from contextlib import contextmanager
 import json
 import sqlite3
 import subprocess
+import shutil
+
+
+class SenderError(RuntimeError):
+    """Allowlisted transport diagnostics, never subprocess output or message text."""
+    def __init__(self, reason_code, resolved_executable, exit_code=None,
+                 exception_class='RuntimeError'):
+        self.diagnostics = dict(exception_class=exception_class, reason_code=reason_code,
+                                exit_code=exit_code, resolved_executable=resolved_executable)
+        super().__init__(reason_code)
 
 
 class HermesSender:
@@ -20,18 +30,28 @@ class HermesSender:
         self.profile, self.executable, self.timeout = profile, executable, timeout
 
     def __call__(self, target, message):
-        result = subprocess.run(
-            [self.executable, '--profile', self.profile, 'send', '--to', target,
-             '--file', '-', '--json'], input=message, text=True,
-            capture_output=True, timeout=self.timeout, check=False)
+        resolved = shutil.which(self.executable)
+        try:
+            result = subprocess.run(
+                [self.executable, '--profile', self.profile, 'send', '--to', target,
+                 '--file', '-', '--json'], input=message, text=True,
+                capture_output=True, timeout=self.timeout, check=False)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            reason = ('timeout' if isinstance(exc, subprocess.TimeoutExpired) else
+                      'executable_not_found' if isinstance(exc, FileNotFoundError) else
+                      'executable_os_error')
+            raise SenderError(reason, resolved, exception_class=type(exc).__name__) from None
+        if result.returncode:
+            raise SenderError('nonzero_exit', resolved, result.returncode)
         try:
             receipt = json.loads(result.stdout)
         except (ValueError, TypeError):
-            raise RuntimeError('native send returned no valid receipt') from None
+            raise SenderError('invalid_receipt_json', resolved, result.returncode,
+                              exception_class='ValueError') from None
         if not isinstance(receipt, dict):
-            raise RuntimeError('native send returned invalid receipt shape')
-        if result.returncode or receipt.get('error') or receipt.get('skipped') or receipt.get('success') is not True:
-            raise RuntimeError('native send did not confirm delivery')
+            raise SenderError('invalid_receipt_shape', resolved, result.returncode)
+        if receipt.get('error') or receipt.get('skipped') or receipt.get('success') is not True:
+            raise SenderError('delivery_unconfirmed', resolved, result.returncode)
         return receipt
 
 
@@ -115,7 +135,8 @@ class NotificationOutbox:
             # Do not store raw subprocess output/exceptions: may contain credentials.
             with self._db() as db:
                 db.execute("UPDATE human_notifications SET state='uncertain',error=? WHERE id=?",
-                           (type(exc).__name__, identifier))
+                           (json.dumps(exc.diagnostics) if isinstance(exc, SenderError)
+                            else type(exc).__name__, identifier))
         else:
             with self._db() as db:
                 db.execute("UPDATE human_notifications SET state='sent',receipt=? WHERE id=?", (encoded, identifier))

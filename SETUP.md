@@ -62,6 +62,18 @@ plugin doctor before starting:
 | `poll_interval` | owner | At least 15 seconds |
 | `human_target` | leader | Explicit native `platform:destination` |
 | `transport_profile` | leader | Profile owning that configured transport |
+| `sender_executable` | leader | Optional executable, default `hermes` (native transport) |
+
+For an isolated transport test only, set `sender_executable` to the absolute path
+of the approved test executable through native config, e.g.
+`hermes -p ancor-leader config set plugins.entries.ancor.settings.sender_executable /absolute/isolated/bin/hermes`.
+It must implement the native `send --file - --json` contract. A PATH-only override
+is insufficient when Hermes bootstrap prepends its own launcher. Do not configure
+the test executable in a live profile; leave `hermes` for normal native delivery.
+Failed sends retain safe structured diagnostics in the outbox `error` field
+(exception class, reason code, exit code, resolved executable), never raw output
+or exception text. Legacy errors remain readable. `uncertain`/`sending` entries
+are not retried automatically: reconcile transport evidence before any retry.
 
 Enable the plugin/toolset in the selected profiles. The owner registers lifecycle
 infrastructure, not business tools. The leader receives requirement, context,
