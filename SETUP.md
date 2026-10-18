@@ -27,7 +27,7 @@ not process isolation.
 ## Settings
 
 Use `hermes config set` in the appropriate native profile. Plugin settings live
-under `plugins.entries.ancor`; confirm the installed configuration reader and
+under `plugins.entries.ancor.settings`; confirm the installed configuration reader and
 plugin doctor before starting:
 
 | Setting | Scope | Value |
@@ -61,6 +61,14 @@ subscriptions before reusing an old board. Existing business state is not migrat
 Disable automatic root decomposition for this workflow: the leader creates only
 execution tasks, progressively, through the plugin board tool. Native dispatch
 still owns execution. Preserve unrelated boards' decomposition settings.
+
+In the Gateway owner profile, run `hermes config set kanban.review_dispatch false`.
+This is an owner-wide dispatcher setting, not a per-board switch: use a dedicated
+owner if unrelated boards need native review dispatch. Workers finish execution
+with `kanban_complete`, not `kanban_request_review`. The leader independently
+verifies completed artifacts through `ancor_acceptance`; no native review stage
+or leader task-completion tool is needed. Disabling review dispatch does not
+repair existing review/failed tasks; preserve their evidence for operator review.
 
 Route the selected user conversation to `ancor-leader` using native profile
 routing. Present and confirm the draft in that current conversation using native

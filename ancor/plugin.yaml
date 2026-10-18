@@ -11,29 +11,27 @@ provides_hooks:
   - pre_tool_call
   - post_tool_call
 config_schema:
-  type: object
-  properties:
-    leader_profile:
-      type: string
-      default: ancor-leader
-    owner_profile:
-      type: string
-      default: default
-    gateway_owner:
-      type: boolean
-      default: false
-    board:
-      type: string
-      default: ancor
-    worker_profile:
-      type: string
-      default: ancor-worker
-    poll_interval:
-      type: number
-      default: 15
-    human_target:
-      type: string
-    transport_profile:
-      type: string
-    store_path:
-      type: string
+  leader_profile:
+    type: string
+    default: ancor-leader
+  owner_profile:
+    type: string
+    default: default
+  gateway_owner:
+    type: boolean
+    default: false
+  board:
+    type: string
+    default: ancor
+  worker_profile:
+    type: string
+    default: ancor-worker
+  poll_interval:
+    type: number
+    default: 15
+  human_target:
+    type: string
+  transport_profile:
+    type: string
+  store_path:
+    type: string

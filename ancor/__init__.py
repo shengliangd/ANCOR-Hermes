@@ -146,7 +146,16 @@ def register(ctx, *, scan_runner=None):
                              {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}}}, []),
         'ancor_acceptance': ('Record leader verification against exact requirement criteria, or reject with a reason.',
                             {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['accept', 'reject']},
-                             'evidence': {'type': 'object'}, 'reason': {'type': 'string'}}, ['requirement_id', 'action']),
+                             'evidence': {
+                                 'type': 'object',
+                                 'description': 'Required for accept. Bind exact stored acceptance criteria and independently verified artifacts to linked task IDs.',
+                                 'properties': {
+                                     'criteria': {'type': 'string', 'description': 'Exact requirement acceptance_criteria text.'},
+                                     **{field: {'type': 'array', 'minItems': 1,
+                                                'items': {'type': 'string', 'pattern': r'\S'}}
+                                        for field in ('verification', 'artifacts', 'task_ids')}},
+                                 'required': ['criteria', 'verification', 'artifacts', 'task_ids']},
+                             'reason': {'type': 'string'}}, ['requirement_id', 'action']),
     }
     if worker:
         definitions = {'ancor_get_context': ('Read the global requirement snapshot without acknowledging events.', {}, [])}
