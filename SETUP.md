@@ -20,9 +20,9 @@ file:///absolute/path/to/ANCOR-Hermes-native-config#ancor
 
 Install each role's `SOUL.md` in its profile home and the complete
 `skills/ancor-coordination` directory in the leader profile. Preserve unrelated
-configuration, memory and routes. The worker role update is currently pending
-protected-file approval; do not assume the repository's old worker instructions
-fully describe the replacement workflow.
+configuration, memory and routes. The worker instructions use read-only requirement
+context and safe checkpoints to stop obsolete work; this is cooperative behavior,
+not process isolation.
 
 ## Settings
 
