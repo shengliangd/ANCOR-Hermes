@@ -18,13 +18,13 @@ class Retirement:
 
     def retire(self, requirement_id, task_id, reason):
         """Persist retirement intent; return its durable three-field mapping."""
-        if self.ctx.profile_name != self.ctx.get_config('leader_profile', 'ancor-leader'):
-            raise PermissionError('leader profile required')
+        if self.ctx.profile_name != self.ctx.get_config('coordinator_profile', 'ancor-coordinator'):
+            raise PermissionError('coordinator profile required')
         self.store._text(reason)
         with self.store._transaction() as db:
             req = self.store._get(db, 'requirements', requirement_id)
-            if req['status'] not in {'active', 'invalidated'}:
-                raise ValueError('retirement requires active or invalidated requirement')
+            if req['status'] not in {'active', 'invalidated', 'cancelled'}:
+                raise ValueError('retirement requires active, invalidated or cancelled requirement')
             if not db.execute('SELECT 1 FROM task_links WHERE requirement_id = ? AND task_id = ?',
                               (requirement_id, task_id)).fetchone():
                 raise ValueError('unlinked task')

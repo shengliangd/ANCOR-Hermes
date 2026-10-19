@@ -33,6 +33,13 @@ class Service:
         if action == 'link':
             self.store.link_task(args['requirement_id'], args['task_id'])
             return self.store.snapshot()
+        if action == 'cancel':
+            return self.store.cancel(args['requirement_id'], args['reason'])
+        if action == 'cancel_many':
+            return self.store.cancel_many(args['requirement_ids'], args['reason'])
+        if action == 'replace_many':
+            draft = self.store.create_draft(args['brief'], args['acceptance_criteria'], args['requirement_ids'])
+            return self.presentation(draft)
         raise ValueError('unknown requirement action')
 
     def presentation(self, draft):

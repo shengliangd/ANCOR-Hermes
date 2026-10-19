@@ -8,16 +8,16 @@ from ancor.notification import HermesSender, NotificationOutbox
 
 
 def box(tmp_path, sender=lambda *_: {'success': True, 'message_id': 'native-1'}):
-    return NotificationOutbox(tmp_path / 'notify.db', leader_profile='leader',
+    return NotificationOutbox(tmp_path / 'notify.db', coordinator_profile='coordinator',
                               target='telegram:explicit-test-target', sender=sender)
 
 
 def test_durable_selection_delivery_and_answer_readback(tmp_path):
     first = box(tmp_path)
-    first.enqueue('q1', 'question', 'Which option? Reply with q1.', actor='leader')
+    first.enqueue('q1', 'question', 'Which option? Reply with q1.', actor='coordinator')
     reopened = box(tmp_path)
     assert reopened.get('q1')['state'] == 'pending'
-    assert reopened.deliver('q1', actor='leader')['receipt']['message_id'] == 'native-1'
+    assert reopened.deliver('q1', actor='coordinator')['receipt']['message_id'] == 'native-1'
     reopened.respond('q1', 'Option B', 'human-session:turn-4')
     persisted = box(tmp_path).get('q1')
     assert persisted['state'] == 'sent'
@@ -30,7 +30,7 @@ def test_worker_cannot_select_or_deliver(tmp_path):
     outbox = box(tmp_path)
     with pytest.raises(PermissionError):
         outbox.enqueue('w', 'question', 'raw worker event', actor='worker')
-    outbox.enqueue('c', 'completion', 'Leader verified completion', actor='leader')
+    outbox.enqueue('c', 'completion', 'Coordinator verified completion', actor='coordinator')
     with pytest.raises(PermissionError):
         outbox.deliver('c', actor='worker')
     assert outbox.get('c')['state'] == 'pending'
@@ -40,29 +40,29 @@ def test_idempotency_and_no_automatic_duplicate_send(tmp_path):
     calls = []
     outbox = box(tmp_path, lambda *args: calls.append(args) or {'success': True})
     for _ in range(2):
-        outbox.enqueue('c', 'completion', 'Done', actor='leader')
-        outbox.deliver('c', actor='leader')
+        outbox.enqueue('c', 'completion', 'Done', actor='coordinator')
+        outbox.deliver('c', actor='coordinator')
     assert len(calls) == 1
     with pytest.raises(ValueError):
-        outbox.enqueue('c', 'completion', 'Changed', actor='leader')
+        outbox.enqueue('c', 'completion', 'Changed', actor='coordinator')
 
 
 @pytest.mark.parametrize('receipt', [{'success': True, 'skipped': True}, {'accepted': True}, {'error': 'no'}, None])
 def test_unconfirmed_receipts_never_become_sent(tmp_path, receipt):
     outbox = box(tmp_path, lambda *_: receipt)
-    outbox.enqueue('q', 'question', 'Question', actor='leader')
-    assert outbox.deliver('q', actor='leader')['state'] == 'uncertain'
-    assert box(tmp_path).deliver('q', actor='leader')['state'] == 'uncertain'
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator')
+    assert outbox.deliver('q', actor='coordinator')['state'] == 'uncertain'
+    assert box(tmp_path).deliver('q', actor='coordinator')['state'] == 'uncertain'
 
 
 def test_crash_claim_survives_restart_without_resend(tmp_path):
     def crash(*_):
         raise KeyboardInterrupt()
     outbox = box(tmp_path, crash)
-    outbox.enqueue('q', 'question', 'Question', actor='leader')
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator')
     with pytest.raises(KeyboardInterrupt):
-        outbox.deliver('q', actor='leader')
-    assert box(tmp_path).deliver('q', actor='leader')['state'] == 'sending'
+        outbox.deliver('q', actor='coordinator')
+    assert box(tmp_path).deliver('q', actor='coordinator')['state'] == 'sending'
 
 
 def test_public_cli_argv_and_receipt(monkeypatch):
@@ -112,31 +112,31 @@ def test_safe_durable_sender_diagnostics_no_retry(tmp_path, monkeypatch, failure
         return SimpleNamespace(returncode=code, stdout=stdout)
     monkeypatch.setattr('ancor.notification.subprocess.run', run)
     outbox = box(tmp_path, HermesSender('transport'))
-    outbox.enqueue('q', 'question', 'SECRET body', actor='leader')
-    row = outbox.deliver('q', actor='leader')
+    outbox.enqueue('q', 'question', 'SECRET body', actor='coordinator')
+    row = outbox.deliver('q', actor='coordinator')
     assert row['state'] == 'uncertain'
     assert json.loads(row['error']) == {
         'exception_class': exception_class, 'reason_code': reason,
         'exit_code': code, 'resolved_executable': executable}
     assert 'SECRET' not in row['error']
-    assert box(tmp_path).deliver('q', actor='leader') == row
+    assert box(tmp_path).deliver('q', actor='coordinator') == row
     assert len(calls) == 1
 
 
 def test_text_only_and_explicit_target(tmp_path):
     with pytest.raises(ValueError):
-        NotificationOutbox(tmp_path / 'x', leader_profile='leader', target='telegram', sender=None)
+        NotificationOutbox(tmp_path / 'x', coordinator_profile='coordinator', target='telegram', sender=None)
     with pytest.raises(ValueError):
-        box(tmp_path).enqueue('q', 'question', 'MEDIA:/secret', actor='leader')
+        box(tmp_path).enqueue('q', 'question', 'MEDIA:/secret', actor='coordinator')
 
 
 def test_answer_is_immutable_and_not_completion_acceptance(tmp_path):
     outbox = box(tmp_path)
-    outbox.enqueue('q', 'question', 'Question', actor='leader')
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator')
     outbox.respond('q', 'yes', 'turn-1')
     outbox.respond('q', 'yes', 'turn-1')
     with pytest.raises(ValueError):
         outbox.respond('q', 'no', 'turn-2')
-    outbox.enqueue('c', 'completion', 'Complete', actor='leader')
+    outbox.enqueue('c', 'completion', 'Complete', actor='coordinator')
     with pytest.raises(ValueError):
         outbox.respond('c', 'accepted', 'turn-3')

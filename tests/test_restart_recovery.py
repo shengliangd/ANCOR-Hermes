@@ -1,4 +1,4 @@
-"""Real process crashes/restarts; scripted leader, never model/transport E2E."""
+"""Real process crashes/restarts; scripted coordinator, never model/transport E2E."""
 import asyncio
 import json
 import os
@@ -77,17 +77,17 @@ def test_invalidated_orphan_restart(tmp_path, status, retired, run, expected):
         return deepcopy(detail)
     board._call = show
     if retired:
-        ctx.profile_name = 'ancor-leader'
+        ctx.profile_name = 'ancor-coordinator'
         Retirement(ctx, store, board).retire(old['id'], 'old-worker', 'Superseded')
         ctx.profile_name = 'default'
     detail['task']['status'] = status
     detail['runs'] = [run] if run else []
     before = deepcopy(detail)
     store.accept(new['id'], 'verified replacement')
-    box = NotificationOutbox(str(path) + '.notifications.db', leader_profile='ancor-leader',
+    box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
                              target='test:destination', sender=lambda *a: {'success': True})
-    box.enqueue('accept:' + new['id'], 'completion', 'Delivered replacement', actor='ancor-leader')
-    box.deliver('accept:' + new['id'], actor='ancor-leader')
+    box.enqueue('accept:' + new['id'], 'completion', 'Delivered replacement', actor='ancor-coordinator')
+    box.deliver('accept:' + new['id'], actor='ancor-coordinator')
     store.ack_events([e['id'] for e in store.pending_events()])
 
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
@@ -99,7 +99,7 @@ def test_invalidated_orphan_restart(tmp_path, status, retired, run, expected):
         assert unresolved[0]['requirement'] == store.get_requirement(old['id'])
         assert unresolved[0]['task_id'] == 'old-worker'
         assert unresolved[0]['reason']
-        assert 'leader decides' in events[0]['payload']['reason']
+        assert 'coordinator decides' in events[0]['payload']['reason']
     else:
         assert unresolved == []
     store.ack_events([e['id'] for e in events])
@@ -149,12 +149,12 @@ def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state)
     req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human')
     store.accept(req['id'], 'evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
-    box = NotificationOutbox(str(path) + '.notifications.db', leader_profile='ancor-leader',
+    box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
                              target='test:destination', sender=lambda *a: {'success': True})
     identifier = 'accept:' + req['id']
-    box.enqueue(identifier, 'completion', 'Exact result', actor='ancor-leader')
+    box.enqueue(identifier, 'completion', 'Exact result', actor='ancor-coordinator')
     if state == 'sent':
-        box.deliver(identifier, actor='ancor-leader')
+        box.deliver(identifier, actor='ancor-coordinator')
     elif state in {'sending', 'uncertain'}:
         script = (
             'import sys,time; from pathlib import Path; from ancor.notification import NotificationOutbox; '
@@ -162,9 +162,9 @@ def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state)
             '\ndef sender(*args):\n checkpoint.touch()\n'
             ' if sys.argv[4] == "uncertain": raise TimeoutError("test")\n'
             ' while True: time.sleep(.01)\n'
-            'box=NotificationOutbox(sys.argv[1],leader_profile="ancor-leader",'
+            'box=NotificationOutbox(sys.argv[1],coordinator_profile="ancor-coordinator",'
             'target="test:destination",sender=sender); '
-            'box.deliver(sys.argv[2],actor="ancor-leader")')
+            'box.deliver(sys.argv[2],actor="ancor-coordinator")')
         checkpoint = tmp_path / 'sending'
         child = subprocess.Popen([sys.executable, '-c', script, box.path, identifier, str(checkpoint), state])
         try:
@@ -195,22 +195,22 @@ def test_sent_question_is_not_completion_delivery(tmp_path):
     req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human')
     store.accept(req['id'], 'evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
-    box = NotificationOutbox(str(path) + '.notifications.db', leader_profile='ancor-leader',
+    box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
                              target='test:destination', sender=lambda *a: {'success': True})
     identifier = 'accept:' + req['id']
-    box.enqueue(identifier, 'question', 'Is this suitable?', actor='ancor-leader')
-    box.deliver(identifier, actor='ancor-leader')
+    box.enqueue(identifier, 'question', 'Is this suitable?', actor='ancor-coordinator')
+    box.deliver(identifier, actor='ancor-coordinator')
     box.respond(identifier, 'yes', 'human:answer')
     host = Host(Context(path), board=Board())
     assert host.snapshot()['requirements'] == [store.get_requirement(req['id'])]
     assert [e['kind'] for e in host.pending(32)] == ['host.recovery']
 
 
-def test_interrupted_host_and_leader_resume_without_duplicate_flight(tmp_path):
+def test_interrupted_host_and_coordinator_resume_without_duplicate_flight(tmp_path):
     path = tmp_path / 'store.db'
     store = Store(path)
     req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human:original')
-    checkpoint = tmp_path / 'leader'
+    checkpoint = tmp_path / 'coordinator'
     child_script = ('import os,sys,time; from pathlib import Path; from ancor.store import Store; '
                     's=Store(sys.argv[1]); s.ack_events([e["id"] for e in s.pending_events()]); '
                     'Path(sys.argv[2]).write_text(str(os.getpid())); time.sleep(60)')
@@ -218,16 +218,16 @@ def test_interrupted_host_and_leader_resume_without_duplicate_flight(tmp_path):
         '\nhost.coordinator.command=lambda p:[sys.executable,"-c",sys.argv[4],sys.argv[1],sys.argv[3]]'
         '\nasyncio.run(host.coordinator.tick())')
     process = subprocess.Popen([sys.executable, '-c', host_script, str(path), 'crash', str(checkpoint), child_script])
-    leader = None
+    coordinator = None
     try:
         wait_file(checkpoint)
-        leader = int(checkpoint.read_text())
+        coordinator = int(checkpoint.read_text())
         process.kill()
         process.wait(timeout=5)
         restarted = Host(Context(path), board=Board())
         assert asyncio.run(restarted.coordinator.tick()) == 'busy'
         assert not store.pending_events()  # surviving child still owns the flock
-        os.kill(leader, 9)
+        os.kill(coordinator, 9)
         output = tmp_path / 'recovered'
         result = subprocess.run([sys.executable, '-c', SCRIPT, str(path), 'restart', str(output)],
                                 capture_output=True, text=True, timeout=15)
@@ -240,9 +240,9 @@ def test_interrupted_host_and_leader_resume_without_duplicate_flight(tmp_path):
         if process.poll() is None:
             process.kill()
         process.wait(timeout=5)
-        if leader:
+        if coordinator:
             try:
-                os.kill(leader, 9)
+                os.kill(coordinator, 9)
             except ProcessLookupError:
                 pass
 

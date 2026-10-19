@@ -21,8 +21,9 @@ from ancor.board import NativeBoard
 import ancor
 manager = get_plugin_manager()
 class Context(PluginContext):
+    role = 'ancor-interactor'
     @property
-    def profile_name(self): return 'ancor-leader'
+    def profile_name(self): return self.role
     def get_config(self, key, default=None):
         return {'store_path': os.path.join(os.environ['HOME'], 'store.db'), 'board': 'test'}.get(key, default)
 ctx = Context(PluginManifest(name='ancor'), manager)
@@ -30,14 +31,11 @@ ancor.register(ctx)
 def call(name, args):
     return json.loads(ctx.dispatch_tool(name, args))
 entry = registry.get_entry('ancor_board', scope=manager.scope_key)
+assert entry is None
+ctx.role = 'ancor-coordinator'
+ancor.register(ctx)
+entry = registry.get_entry('ancor_board', scope=manager.scope_key)
 assert entry
-os.environ.pop('ANCOR_COORDINATOR', None)
-for action in ('create', 'block', 'unblock', 'comment'):
-    assert 'coordinator run required' in call('ancor_board', {'action': action})['error']
-for marker in ('0', 'true', ''):
-    os.environ['ANCOR_COORDINATOR'] = marker
-    assert 'coordinator run required' in call('ancor_acceptance', {'action': 'reject'})['error']
-os.environ.pop('ANCOR_COORDINATOR', None)
 draft = call('ancor_requirement', {'action':'draft', 'brief':'exact brief', 'acceptance_criteria':'criteria'})
 assert draft['clarify_args']
 assert call('ancor_requirement', {'action':'confirm', 'draft_id':draft['id']})['id'] == draft['id']
@@ -48,10 +46,8 @@ req = store.confirm(draft['id'], 'synthetic-fixture')
 text = '  Exact user reply\nDo not broaden scope.  '
 event = call('ancor_requirement', {'action':'respond', 'requirement_id':req['id'], 'body':text})
 assert event['payload']['body'] == text and event['payload']['authorization'] is False
-assert event['payload']['source'] == 'leader_transcription'
+assert event['payload']['source'] == 'interactor_transcription'
 assert store.get_requirement(req['id'])['status'] == 'active'
-assert 'coordinator run required' in call('ancor_requirement', {'action':'link'})['error']
-assert 'coordinator run required' in call('ancor_get_context', {'ack_event_ids':[event['id']]})['error']
 # Context now observes native tasks too; install the subprocess fixture before
 # its first read so Operations does not cache an unmocked NativeBoard.
 # Replace only the native CLI subprocess boundary, retain NativeBoard and Operations.
@@ -71,12 +67,11 @@ assert call('ancor_get_context', {})['pending_events']
 wake_entry = registry.get_entry('ancor_wake', scope=manager.scope_key)
 assert wake_entry
 assert call('ancor_wake', {'action': 'list'}) == []
-assert 'coordinator run required' in call('ancor_wake', {'action': 'schedule'})['error']
+assert 'error' in call('ancor_wake', {'action': 'schedule'})
 store.link_task(req['id'], 'one')
 store.link_task(req['id'], 'two')
 assert len(call('ancor_board', {'action':'list'})['tasks']) == 2
 assert call('ancor_board', {'action':'show', 'task_id':'one'})['task']['id'] == 'one'
-os.environ['ANCOR_COORDINATOR'] = '1'
 assert 'error' not in call('ancor_requirement', {'action':'link', 'requirement_id':req['id'], 'task_id':'one'})
 evidence = {'criteria':'criteria', 'verification':['checked'], 'artifacts':['result'], 'task_ids':['one']}
 args = {'requirement_id':req['id'], 'action':'accept', 'evidence':evidence}

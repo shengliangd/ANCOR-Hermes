@@ -17,9 +17,12 @@ def register(ctx, *, scan_runner=None):
             if pump is None or pump.done():
                 pump = ctx.spawn_task(scan_runner(ctx, adapter), name='ancor:scan')
         ctx.register_platform_handler('api_server', connected)
-    leader = ctx.profile_name == ctx.get_config('leader_profile', 'ancor-leader')
+    interactor_profile = ctx.get_config('interactor_profile', 'ancor-interactor')
+    coordinator_profile = ctx.get_config('coordinator_profile', 'ancor-coordinator')
+    interactor = ctx.profile_name == interactor_profile
+    coordinator = ctx.profile_name == coordinator_profile
     worker = ctx.profile_name == ctx.get_config('worker_profile', 'ancor-worker')
-    if not leader and not worker:
+    if not interactor and not coordinator and not worker:
         return
     from .service import Service
     service = Service(ctx)
@@ -33,7 +36,7 @@ def register(ctx, *, scan_runner=None):
         # Fail closed: destination and credential-owning profile are explicit.
         return NotificationOutbox(
             service.store.path + '.notifications.db',
-            leader_profile=ctx.get_config('leader_profile', 'ancor-leader'),
+            coordinator_profile=coordinator_profile,
             target=ctx.get_config('human_target'),
             sender=HermesSender(ctx.get_config('transport_profile'),
                                 executable=ctx.get_config('sender_executable', 'hermes')))
@@ -42,7 +45,7 @@ def register(ctx, *, scan_runner=None):
         return service.store.add_event('notification.response', {
             'notification_id': row['id'], 'body': row['answer'],
             'reference': row['answer_reference'],
-            'source': 'leader_transcription', 'authorization': False},
+            'source': 'interactor_transcription', 'authorization': False},
             source_key='notification.response:' + row['id'])
 
     def notifications():
@@ -65,7 +68,7 @@ def register(ctx, *, scan_runner=None):
         from .scheduling import Scheduling
         data = service.get_context(args)
         try:
-            tasks = operations.board.list()
+            tasks = operations.board.list() if coordinator else []
         except Exception as exc:
             tasks = []
             extra['board_error'] = str(exc)
@@ -78,6 +81,8 @@ def register(ctx, *, scan_runner=None):
         box = outbox()
         identifier = args['id']
         if action == 'send':
+            if not coordinator:
+                raise PermissionError('coordinator profile required to send notifications')
             if args['kind'] == 'completion':
                 req = service.store.get_requirement(args['requirement_id'])
                 if req['status'] != 'accepted':
@@ -93,9 +98,11 @@ def register(ctx, *, scan_runner=None):
             reference = json.dumps({key: native[key] for key in ('session_id', 'tool_call_id')
                                     if isinstance(native.get(key), str) and native[key]}, sort_keys=True)
             if reference == '{}':
-                reference = 'leader_transcription:' + identifier
+                reference = 'interactor_transcription:' + identifier
             if existing['answer'] == args['answer']:
                 reference = existing['answer_reference']
+            if not interactor:
+                raise PermissionError('interactor profile required to respond')
             row = box.respond(identifier, args['answer'], reference)
             return {'notification': row, 'event': response_event(row)}
         raise ValueError('unknown notification action')
@@ -108,7 +115,7 @@ def register(ctx, *, scan_runner=None):
         # Foreground transcription is advisory input, never consent evidence.
         return service.store.add_event('requirement.response', {
             'requirement_id': req['id'], 'body': body,
-            'source': 'leader_transcription', 'authorization': False})
+            'source': 'interactor_transcription', 'authorization': False})
 
     def retirement():
         from .retirement import Retirement
@@ -131,7 +138,7 @@ def register(ctx, *, scan_runner=None):
 
     methods = {'requirement': requirement, 'get_context': get_context, 'notify': notify,
                'acceptance': acceptance, 'board': board_action, 'wake': wake}
-    if leader:
+    if interactor:
         ctx.register_hook('pre_tool_call', service.pre_tool_call)
         ctx.register_hook('post_tool_call', service.post_tool_call)
     definitions = {
@@ -145,14 +152,16 @@ def register(ctx, *, scan_runner=None):
                           'kind': {'type': 'string', 'enum': ['question', 'completion']},
                           'message': {'type': 'string'}, 'answer': {'type': 'string'},
                           'requirement_id': {'type': 'string'}}, ['action']),
-        'ancor_requirement': ('Prepare an immutable draft and exact native clarify_args. Call native clarify separately; only its submitted exact confirmation activates the requirement. respond records the exact human reply in body as advisory leader transcription, never new authorization.',
-                              {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'link', 'respond']},
+        'ancor_requirement': ('Prepare an immutable draft and exact native clarify_args. Call native clarify separately; only its submitted exact confirmation activates the requirement. respond records the exact human reply in body as advisory interactor transcription, never new authorization.',
+                              {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'link', 'cancel', 'cancel_many', 'replace_many', 'respond']},
                                'body': {'type': 'string'},
                                'brief': {'type': 'string'}, 'acceptance_criteria': {'type': 'string'},
                                'replacement_of': {'type': 'string'}, 'draft_id': {'type': 'string'},
-                               'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'}}, ['action']),
+                               'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
+                               'requirement_ids': {'type': 'array', 'items': {'type': 'string'}},
+                               'reason': {'type': 'string'}}, ['action']),
         'ancor_board': ('Read linked native tasks. Coordinator actions: create, block, unblock, comment, edit title/body/priority, link/unlink parent_id → child_id dependencies. Native ownership and cycle checks apply.',
-                        {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock', 'comment', 'link', 'unlink', 'edit', 'revise', 'retire']},
+                        {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock', 'comment', 'link', 'unlink', 'edit', 'revise', 'retire', 'associate']},
                          'priority': {'type': 'integer'},
                          'parent_ids': {'type': 'array', 'items': {'type': 'string'}},
                          'hold': {'type': 'boolean'},
@@ -160,7 +169,7 @@ def register(ctx, *, scan_runner=None):
                             ('requirement_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'body', 'reason')}}, ['action']),
         'ancor_get_context': ('Read the global requirement snapshot and pending events; acknowledge only explicit event IDs.',
                              {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}}}, []),
-        'ancor_acceptance': ('Record leader verification against exact requirement criteria, or reject with a reason.',
+        'ancor_acceptance': ('Record coordinator verification against exact requirement criteria, or reject with a reason.',
                             {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['accept', 'reject']},
                              'evidence': {
                                  'type': 'object',
@@ -175,6 +184,11 @@ def register(ctx, *, scan_runner=None):
     }
     if worker:
         definitions = {'ancor_get_context': ('Read the global requirement snapshot without acknowledging events.', {}, [])}
+    elif interactor:
+        definitions = {name: value for name, value in definitions.items()
+                       if name in {'ancor_requirement', 'ancor_get_context', 'ancor_notify'}}
+    elif coordinator:
+        pass
     coordination_observed = False
     for name, (description, properties, required) in definitions.items():
         method = methods[name.removeprefix('ancor_')]
@@ -185,18 +199,19 @@ def register(ctx, *, scan_runner=None):
                     if args:
                         raise PermissionError('worker context is read-only')
                     return json.dumps(service.store.snapshot(), ensure_ascii=False)
-                if ctx.profile_name != ctx.get_config('leader_profile', 'ancor-leader'):
-                    raise PermissionError('leader profile required')
+                allowed = (interactor_profile if interactor else coordinator_profile)
+                if ctx.profile_name != allowed:
+                    raise PermissionError('ANCOR role profile required')
                 mutation = (_name == 'ancor_acceptance'
                             or (_name == 'ancor_wake' and args.get('action') != 'list')
                             or (_name == 'ancor_notify' and args.get('action') == 'send')
                             or (_name == 'ancor_board' and args.get('action') not in {'list', 'show'})
-                            or (_name == 'ancor_requirement' and args.get('action') == 'link')
+                            or (_name == 'ancor_requirement' and args.get('action') in {'link', 'cancel'})
                             or (_name == 'ancor_get_context' and bool(args.get('ack_event_ids'))))
                 # Cooperation marker, not a shell/process security sandbox.
-                if mutation and os.environ.get('ANCOR_COORDINATOR') != '1':
-                    raise PermissionError('coordinator run required (ANCOR_COORDINATOR=1)')
-                if not coordination_observed and os.environ.get('ANCOR_COORDINATOR') == '1':
+                if mutation and not coordinator:
+                    raise PermissionError('coordinator profile required')
+                if not coordination_observed and coordinator:
                     from .scheduling import Scheduling
                     Scheduling(service.store).started()
                     coordination_observed = True

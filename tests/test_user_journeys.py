@@ -88,22 +88,27 @@ class Journey:
                        'transport_profile': 'default'}
         config = self.config
         class Context(PluginContext):
+            role = 'ancor-interactor'
             @property
             def profile_name(self):
-                return 'ancor-leader'
+                return self.role
             def get_config(self, key, default=None):
                 return config.get(key, default)
         self.ctx = Context(PluginManifest(name='ancor'), get_plugin_manager())
+        self.coord = Context(PluginManifest(name='ancor-coordinator'), get_plugin_manager())
+        self.coord.role = 'ancor-coordinator'
+        self.coord.profile_name_override = 'ancor-coordinator'
         self.sent = []
         def send(self_sender, target, message):
             self.sent.append((target, message))
             return {'success': True, 'message_id': 'simulated-transport-' + str(len(self.sent))}
         HermesSender.__call__ = send
         ancor.register(self.ctx)
+        ancor.register(self.coord)
         assert registry.get_entry('ancor_requirement', scope=get_plugin_manager().scope_key)
         self.store = Store(config['store_path'])
         # An isolated native profile is needed by NativeBoard's explicit -p.
-        profile = Path(os.environ['HERMES_HOME']) / 'profiles' / 'ancor-leader'
+        profile = Path(os.environ['HERMES_HOME']) / 'profiles' / 'ancor-interactor'
         profile.mkdir(parents=True, exist_ok=True)
         # Supported native opt-outs for automatic model-backed work. There is
         # no goal_judge.enabled switch in this native version: goal judging is
@@ -115,10 +120,11 @@ class Journey:
             (config_home / 'config.yaml').write_text(disposable_config, encoding='utf-8')
         self.board = NativeBoard('default')
         self.calls = 0
-        os.environ['ANCOR_COORDINATOR'] = '1'
 
     def call(self, tool, **args):
-        value = json.loads(self.ctx.dispatch_tool('ancor_' + tool, args))
+        context = self.coord if tool in {'board', 'acceptance', 'wake'} else self.ctx
+        if tool == 'notify' and args.get('action') == 'respond': context = self.ctx
+        value = json.loads(context.dispatch_tool('ancor_' + tool, args))
         assert not value.get('error'), (tool, args, value)
         return value
 
@@ -209,7 +215,7 @@ class Journey:
                     db_path=kanban_db_path(board='default'))
 
     def evidence(self, req, tids):
-        return {'criteria': req['acceptance_criteria'], 'verification': ['Independent leader fixture checked exact values'],
+        return {'criteria': req['acceptance_criteria'], 'verification': ['Independent coordinator fixture checked exact values'],
                 'artifacts': [str(Path(os.environ['HOME']) / (tid + '.txt')) for tid in tids], 'task_ids': tids}
 
 
@@ -246,7 +252,7 @@ def journey_rolling(j):
     assert a not in unlinked['parents']
     assert j.status(b) == 'blocked', 'held task cannot escape during dependency edits'
     j.call('board', action='link', parent_id=a, child_id=b)
-    j.call('board', action='unblock', task_id=b, reason='Leader finished dependency planning')
+    j.call('board', action='unblock', task_id=b, reason='Coordinator finished dependency planning')
     assert j.status(b) == 'todo'
     j.complete(a)
     assert j.status(b) == 'ready', 'native dependency completion must automatically release B'
@@ -260,23 +266,31 @@ def journey_blocker(j):
     req = j.requirement()
     tid = j.create(req, 'blocked-worker')
     j.claim(tid)
-    j.worker(tid, 'block', 'Need leader to identify report source', '--kind', 'needs_input')
+    j.worker(tid, 'block', 'Need coordinator to identify report source', '--kind', 'needs_input')
     host = j.host()
     host.scan()
     assert any(e['kind'] == 'native.blocked' for e in j.store.pending_events())
     assert not j.sent, 'worker blocker must not automatically notify the human'
-    j.call('board', action='comment', task_id=tid, body='Leader resolved source: use approved fixture')
-    j.call('board', action='unblock', task_id=tid, reason='Source resolved by leader')
+    j.call('board', action='comment', task_id=tid, body='Coordinator resolved source: use approved fixture')
+    j.call('board', action='unblock', task_id=tid, reason='Source resolved by coordinator')
     j.claim(tid)
     j.worker(tid, 'block', 'Human must choose report label', '--kind', 'needs_input')
     j.call('notify', action='send', id='label-question', kind='question', message='Use label Quarterly?')
     answer = 'Yes, use Quarterly. Do not deploy.'
-    response = j.call('notify', action='respond', id='label-question', answer=answer)
-    assert response['event']['payload']['authorization'] is False
-    assert response['notification']['answer'] == answer
+    from ancor.notification import NotificationOutbox
+    response = NotificationOutbox(j.store.path + '.notifications.db', coordinator_profile='ancor-coordinator',
+                                  target='feishu:simulated-human', sender=lambda *a: None).respond(
+                                      'label-question', answer, 'interactor_transcription:label-question')
+    assert response['answer'] == answer
+    event = j.store.add_event('notification.response', {
+        'notification_id': response['id'], 'body': answer,
+        'reference': response['answer_reference'],
+        'source': 'interactor_transcription', 'authorization': False},
+        source_key='notification.response:' + response['id'])
+    assert event['payload']['authorization'] is False
     j.call('board', action='comment', task_id=tid, body=answer)
     assert j.status(tid) == 'triage', 'native repeat-block protection must remain intact'
-    j.call('board', action='revise', task_id=tid, reason='Leader reviewed repeated blocker; human supplied label')
+    j.call('board', action='revise', task_id=tid, reason='Coordinator reviewed repeated blocker; human supplied label')
     j.complete(tid)
     assert len(j.sent) == 1
 
@@ -295,7 +309,7 @@ def journey_replacement(j):
     assert j.status(old_task) == 'running', 'confirmation records invalidation, not automatic stop'
     assert 'not active' in j.error('board', action='create', requirement_id=old['id'], key='forbidden', title='No', body='No')
     j.complete(other_task)
-    j.call('board', action='block', task_id=old_task, reason='Superseded; leader stop decision')
+    j.call('board', action='block', task_id=old_task, reason='Superseded; coordinator stop decision')
     new_task = j.create(new, 'replacement')
     j.complete(new_task)
     assert j.status(other_task) == 'done'
@@ -306,7 +320,7 @@ def journey_acceptance(j):
     req = j.requirement()
     tid = j.create(req, 'initial')
     abandoned = j.create(req, 'abandoned-alternative')
-    j.call('board', action='block', task_id=abandoned, reason='Leader chooses replacement approach')
+    j.call('board', action='block', task_id=abandoned, reason='Coordinator chooses replacement approach')
     j.call('board', action='retire', requirement_id=req['id'], task_id=abandoned,
            reason='Alternative abandoned; preserve history, replacement covers criteria')
     premature = dict(action='send', id='accept:' + req['id'], requirement_id=req['id'],

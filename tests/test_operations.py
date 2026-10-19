@@ -19,7 +19,7 @@ class Board:
     edit = NativeBoard.edit
     def revise(self, task_id, reason):
         self.calls.append(('revise', task_id, reason))
-        self.tasks[task_id]['comments'].append({'author': 'ancor-leader', 'body': reason.strip()})
+        self.tasks[task_id]['comments'].append({'author': 'ancor-coordinator', 'body': reason.strip()})
         self.tasks[task_id]['task']['status'] = 'ready'
         return self.tasks[task_id]
 
@@ -59,7 +59,7 @@ class Board:
                 parents.remove(args[1])
             return ''
         if args[0] == 'comment':
-            self.tasks[args[1]]['comments'].append({'author': 'ancor-leader', 'body': args[2]})
+            self.tasks[args[1]]['comments'].append({'author': 'ancor-coordinator', 'body': args[2]})
             return ''
         if args[0] in {'unblock', 'revise'}:
             self.tasks[args[1]]['task']['status'] = 'ready'
@@ -76,7 +76,7 @@ class Board:
 def setup(tmp_path):
     store = Store(tmp_path / 'store.db')
     req = store.confirm(store.create_draft('Build thing', 'Tests pass')['id'], 'test-human')
-    ctx = SimpleNamespace(profile_name='ancor-leader', get_config=lambda key, default=None: default)
+    ctx = SimpleNamespace(profile_name='ancor-coordinator', get_config=lambda key, default=None: default)
     return ctx, store, Board(), req
 
 
@@ -166,9 +166,9 @@ def test_revise_is_explicit_reviewed_triage_recovery(setup):
     board.tasks[tid]['task']['status'] = 'triage'
     assert op.call({'action': 'show', 'task_id': tid})['task']['status'] == 'triage'
     assert not any(call[0] == 'revise' for call in board.calls)
-    result = op.call({'action': 'revise', 'task_id': tid, 'reason': 'Leader reviewed revised plan'})
+    result = op.call({'action': 'revise', 'task_id': tid, 'reason': 'Coordinator reviewed revised plan'})
     assert result['task']['status'] == 'ready'
-    assert ('revise', tid, 'Leader reviewed revised plan') in board.calls
+    assert ('revise', tid, 'Coordinator reviewed revised plan') in board.calls
 
 
 @pytest.mark.parametrize('fault', ['inactive', 'unlinked', 'running', 'blocked', 'archived', 'empty_reason', 'executor'])
@@ -227,18 +227,18 @@ def test_edit_rejects_non_integer_priority(setup, priority):
         op.call(dict(action='edit', task_id=tid, priority=priority))
 
 
-def test_configured_leader_is_used_for_native_cli(setup):
+def test_configured_coordinator_is_used_for_native_cli(setup):
     ctx = setup[0]
-    ctx.profile_name = 'custom-leader'
-    ctx.get_config = lambda key, default=None: {'leader_profile': 'custom-leader', 'board': 'custom-board'}.get(key, default)
+    ctx.profile_name = 'custom-coordinator'
+    ctx.get_config = lambda key, default=None: {'coordinator_profile': 'custom-coordinator', 'board': 'custom-board'}.get(key, default)
     op = importlib.import_module('ancor.operations').Operations(ctx, setup[1])
-    assert op.board.prefix[:6] == ['hermes', '-p', 'custom-leader', 'kanban', '--board', 'custom-board']
+    assert op.board.prefix[:6] == ['hermes', '-p', 'custom-coordinator', 'kanban', '--board', 'custom-board']
 
 
 @pytest.mark.parametrize('action', ['link', 'unlink', 'edit', 'revise'])
-def test_new_mutations_are_leader_only(setup, action):
+def test_new_mutations_are_coordinator_only(setup, action):
     setup[0].profile_name = 'ancor-worker'
-    with pytest.raises(PermissionError, match='leader'):
+    with pytest.raises(PermissionError, match='coordinator'):
         operations(setup).call({'action': action})
     assert setup[2].calls == []
 
@@ -269,13 +269,13 @@ def test_scoped_read_and_mutations(setup):
         op.call({'action': 'block', 'task_id': 'unrelated', 'reason': 'no'})
 
 
-def test_create_requires_active_requirement_and_leader(setup):
+def test_create_requires_active_requirement_and_coordinator(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     ctx.profile_name = 'ancor-worker'
     with pytest.raises(PermissionError):
         op.call(create_args(req))
-    ctx.profile_name = 'ancor-leader'
+    ctx.profile_name = 'ancor-coordinator'
     store.accept(req['id'], 'test evidence')
     with pytest.raises(ValueError, match='active'):
         op.call(create_args(req))
@@ -398,5 +398,5 @@ def test_native_parser_accepts_exact_mutation_contracts(monkeypatch):
     build_parser(parser.add_subparsers())
     args = parser.parse_args(['kanban', '--board', 'ancor', 'unblock', 't1', '--reason', 'Answer recorded'])
     assert args.task_ids == ['t1'] and args.reason == 'Answer recorded'
-    args = parser.parse_args(['kanban', '--board', 'ancor', 'comment', 't1', 'User answer', '--author', 'ancor-leader'])
-    assert args.text == ['User answer'] and args.author == 'ancor-leader'
+    args = parser.parse_args(['kanban', '--board', 'ancor', 'comment', 't1', 'User answer', '--author', 'ancor-coordinator'])
+    assert args.text == ['User answer'] and args.author == 'ancor-coordinator'

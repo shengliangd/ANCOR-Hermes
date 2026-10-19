@@ -22,13 +22,13 @@ class Coordinator:
         self.lock_path = Path(lock_path)
         self.pending, self.snapshot, self.scan = pending, snapshot, scan
         self.batch_size = batch_size
-        self.command = command or (lambda prompt: ['hermes', '-p', 'ancor-leader', '--cli', 'chat', '-q', prompt])
+        self.command = command or (lambda prompt: ['hermes', '-p', 'ancor-coordinator', '--cli', 'chat', '-q', prompt])
 
     async def tick(self):
         """One wake/poll; callbacks are synchronous and called under the global lock.
 
         Retry state is process-local. Caller schedules ticks; no idle model calls.
-        Ack belongs to the leader's explicit store tool, never exit-code inference.
+        Ack belongs to the coordinator's explicit store tool, never exit-code inference.
         """
         if self.clock() < self.next_attempt:
             return 'backoff'
@@ -52,12 +52,16 @@ class Coordinator:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return 'busy'
-            self.scan()
-            events = list(self.pending(self.batch_size))[:self.batch_size]
+            # Native board/SQLite adapters are synchronous. Keep them off the
+            # Gateway/plugin event loop; the coordinator subprocess is already
+            # awaited separately below.
+            await asyncio.to_thread(self.scan)
+            events = list(await asyncio.to_thread(self.pending, self.batch_size))[:self.batch_size]
             if not events:
                 return 'idle'
-            prompt = 'Process these ANCOR events; explicitly acknowledge only handled event IDs.\n' + json.dumps({'events': events, 'snapshot': self.snapshot()}, separators=(',', ':'), ensure_ascii=False)
-            # flock follows the shared open-file description: a surviving leader
+            snapshot = await asyncio.to_thread(self.snapshot)
+            prompt = 'Process these ANCOR events; explicitly acknowledge only handled event IDs.\n' + json.dumps({'events': events, 'snapshot': snapshot}, separators=(',', ':'), ensure_ascii=False)
+            # flock follows the shared open-file description: a surviving coordinator
             # must retain ownership after a host crash. Close, never LOCK_UN, here.
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(*self.command(prompt), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, close_fds=True, pass_fds=(lock.fileno(),), start_new_session=True))
             try:
@@ -69,7 +73,7 @@ class Coordinator:
                 async def reap():
                     child = await spawn
                     # Descendants share this session's process group. Kill it even
-                    # if the leader has already exited, then reap our direct child.
+                    # if the coordinator has already exited, then reap our direct child.
                     try:
                         os.killpg(child.pid, signal.SIGKILL)
                     except ProcessLookupError:
@@ -84,7 +88,7 @@ class Coordinator:
                 cleanup.result()
                 raise
             if proc.returncode:
-                raise RuntimeError(f'leader exited {proc.returncode}')
+                raise RuntimeError(f'coordinator exited {proc.returncode}')
             # A successful command is the generic runtime's readiness fallback.
             # Production records readiness from the child's first business tool,
             # not this callback or subprocess creation.

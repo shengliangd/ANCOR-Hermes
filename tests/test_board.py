@@ -156,11 +156,11 @@ def test_create_durable_link_and_explicit_cli_scope(tmp_path):
         else:
             result = []
         return subprocess.CompletedProcess(argv, 0, json.dumps(result), '')
-    board = NativeBoard('ancor', profile='ancor-leader', run=run)
+    board = NativeBoard('ancor', profile='ancor-coordinator', run=run)
     result = board.create('r1', 2, 'step1', title='Do it', body='details', assignee='ancor-worker')
     assert result['id'] == 't1'
     assert board.link(result) == {'requirement_id': 'r1', 'revision': 2, 'key': 'step1'}
     create = next(c for c in calls if 'create' in c)
-    assert create[:6] == ['hermes', '-p', 'ancor-leader', 'kanban', '--board', 'ancor']
+    assert create[:6] == ['hermes', '-p', 'ancor-coordinator', 'kanban', '--board', 'ancor']
     assert '--idempotency-key' in create
     assert calls[-1][-3:] == ['show', 't1', '--json']

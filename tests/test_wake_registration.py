@@ -15,7 +15,7 @@ from ancor.store import Store
 def registered(tmp_path, monkeypatch):
     tools = {}
     config = {'store_path': str(tmp_path / 'db'), 'board': 'test'}
-    ctx = SimpleNamespace(profile_name='ancor-leader',
+    ctx = SimpleNamespace(profile_name='ancor-coordinator',
         get_config=lambda key, default=None: config.get(key, default),
         register_tool=lambda **kw: tools.update({kw['name']: kw}),
         register_hook=lambda *args: None)
@@ -29,7 +29,6 @@ def registered(tmp_path, monkeypatch):
 
 
 def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
-    monkeypatch.delenv('ANCOR_COORDINATOR', raising=False)
     ctx, tools, store, req = registered(tmp_path, monkeypatch)
     schema = tools['ancor_wake']['schema']['parameters']
     from pathlib import Path
@@ -39,16 +38,15 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     assert not schema['additionalProperties']
     call = lambda name, args: json.loads(tools[name]['handler'](args))
     args = dict(action='schedule', requirement_id=req['id'], reason='external release', due_at=time.time() + 1000)
-    assert 'coordinator run required' in call('ancor_wake', args)['error']
     assert call('ancor_wake', {'action': 'list'}) == []
     context = call('ancor_get_context', {})
     assert context['progression'][0]['sources'] == [{'kind': 'native_task', 'task_id': 'task', 'status': 'running'}]
-    assert context['liveness']['last_started'] is None
+    assert context['liveness']['last_started'] is not None
     host = Host(ctx, store=store, board=SimpleNamespace())
     host.tasks = [{'id': 'task', 'status': 'running'}]
     assert host.snapshot()['progression'] == context['progression']
-    monkeypatch.setenv('ANCOR_COORDINATOR', '1')
-    wake = call('ancor_wake', args)
+    assert 'error' not in call('ancor_wake', args)
+    wake = call('ancor_wake', dict(action='schedule', requirement_id=req['id'], reason='external release 2', due_at=time.time() + 2000))
     first = call('ancor_get_context', {})['liveness']
     assert first['last_started'] is not None
     assert call('ancor_get_context', {})['liveness']['generation'] == first['generation'] == 1

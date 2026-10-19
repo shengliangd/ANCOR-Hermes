@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from ancor.board import NativeBoard
-from ancor.host import Host, child_environment, leader_command, scan_runner
+from ancor.host import Host, child_environment, coordinator_command, scan_runner
 from ancor.store import Store
 
 
@@ -89,7 +89,7 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     assert board.guards == []
 
 
-def test_invalidated_requirements_wake_leader_without_automatic_guard(tmp_path, monkeypatch):
+def test_invalidated_requirements_wake_coordinator_without_automatic_guard(tmp_path, monkeypatch):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
     old = store.confirm(store.create_draft('old', 'old')['id'], 'human:old')
@@ -148,8 +148,8 @@ def test_child_routing_removed_but_native_fences_preserved(monkeypatch):
     assert 'HERMES_SESSION_ID' not in env
     assert env['HERMES_DELEGATED_CHILD_CONTEXT'] == 'guard'
     assert env['HERMES_KANBAN_RUN_ID'] == 'run'
-    cmd = leader_command('named-leader', 'prompt')
-    assert ['hermes', '-p', 'named-leader', '--cli', 'chat', '-q', 'prompt'] == cmd[-7:]
+    cmd = coordinator_command('named-coordinator', 'prompt')
+    assert ['hermes', '-p', 'named-coordinator', '--cli', 'chat', '-q', 'prompt'] == cmd[-7:]
     assert 'HERMES_DELEGATED_CHILD_CONTEXT' not in cmd
 
 
@@ -302,6 +302,6 @@ def test_scan_ingests_despite_individual_read_failure(tmp_path):
 
 def test_owner_only(tmp_path):
     ctx = Context(tmp_path / 'store.db')
-    ctx.profile_name = 'ancor-leader'
+    ctx.profile_name = 'ancor-coordinator'
     with pytest.raises(PermissionError):
         asyncio.run(scan_runner(ctx, SimpleNamespace(is_connected=True)))

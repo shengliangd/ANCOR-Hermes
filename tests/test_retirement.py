@@ -25,7 +25,7 @@ def case(tmp_path):
     store = Store(tmp_path / 'requirements.db')
     req = store.confirm(store.create_draft('Goal', 'Criteria')['id'], 'human')
     store.link_task(req['id'], 't1')
-    ctx = SimpleNamespace(profile_name='ancor-leader', get_config=lambda key, default=None: default)
+    ctx = SimpleNamespace(profile_name='ancor-coordinator', get_config=lambda key, default=None: default)
     return ctx, store, ReadOnlyBoard(), req
 
 

@@ -78,7 +78,7 @@ manager = get_plugin_manager()
 class Context(PluginContext):
     @property
     def profile_name(self):
-        return 'ancor-leader'
+        return 'ancor-interactor'
     def get_config(self, key, default=None):
         if key == 'store_path':
             import os
@@ -121,10 +121,10 @@ print('native agent clarify pre/post integration passed')
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_only_leader_has_business_tools():
+def test_only_ancor_roles_have_business_tools():
     plugin = importlib.import_module('ancor')
     assert callable(getattr(plugin, 'register', None)), 'plugin registration missing'
-    for role, expected in [('ancor-leader', True), ('ancor-worker', True), ('default', False)]:
+    for role, expected in [('ancor-interactor', True), ('ancor-coordinator', True), ('ancor-worker', True), ('default', False)]:
         tools = {}
         ctx = SimpleNamespace(profile_name=role, get_config=lambda key, default=None: default,
                               register_tool=lambda **kw: tools.update({kw['name']: kw}),
@@ -132,8 +132,10 @@ def test_only_leader_has_business_tools():
                               register_platform_handler=lambda *args: None)
         plugin.register(ctx)
         assert bool(tools) is expected
-        if role == 'ancor-leader':
-            assert {'ancor_requirement', 'ancor_get_context', 'ancor_acceptance'} <= tools.keys()
+        if role == 'ancor-interactor':
+            assert set(tools) == {'ancor_requirement', 'ancor_get_context', 'ancor_notify'}
+        elif role == 'ancor-coordinator':
+            assert {'ancor_requirement', 'ancor_get_context', 'ancor_acceptance', 'ancor_board', 'ancor_wake', 'ancor_notify'} <= tools.keys()
         elif role == 'ancor-worker':
             assert set(tools) == {'ancor_get_context'}
             assert 'error' in json.loads(tools['ancor_get_context']['handler']({'ack_event_ids': [1]}))

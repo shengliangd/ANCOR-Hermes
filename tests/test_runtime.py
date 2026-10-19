@@ -96,14 +96,14 @@ def test_cancellation_stops_grandchild_before_unlock(tmp_path):
     asyncio.run(scenario())
 
 
-def test_host_crash_keeps_lock_until_leader_exits(tmp_path):
+def test_host_crash_keeps_lock_until_coordinator_exits(tmp_path):
     import subprocess
     import fcntl
 
     lock_path = tmp_path / 'lock'
-    pid_file = tmp_path / 'leader'
+    pid_file = tmp_path / 'coordinator'
     release = tmp_path / 'release'
-    leader = ('import os,pathlib,sys,time; '
+    coordinator = ('import os,pathlib,sys,time; '
               'pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); '
               '\nwhile not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)')
     host_script = (
@@ -113,7 +113,7 @@ def test_host_crash_keeps_lock_until_leader_exits(tmp_path):
         'command=lambda p:[sys.executable,"-c",sys.argv[3],sys.argv[2],sys.argv[4]]); '
         'asyncio.run(c.tick())')
     host = subprocess.Popen([sys.executable, '-c', host_script, str(lock_path),
-                             str(pid_file), leader, str(release)])
+                             str(pid_file), coordinator, str(release)])
     try:
         asyncio.run(wait_file(pid_file))
         host.kill()
@@ -130,7 +130,7 @@ def test_host_crash_keeps_lock_until_leader_exits(tmp_path):
                         return
                     except BlockingIOError:
                         await asyncio.sleep(.01)
-                raise AssertionError('lock survived leader exit')
+                raise AssertionError('lock survived coordinator exit')
             asyncio.run(wait_unlocked())
     finally:
         release.touch()
@@ -143,7 +143,7 @@ def test_retry_backoff_preserves_pending(tmp_path):
     now = [0.0]
     runner = Coordinator(tmp_path / 'lock', pending=lambda n: [{'id': 1}], snapshot=lambda: {}, scan=lambda: None, clock=lambda: now[0], retry_base=5, command=lambda p: [sys.executable, '-c', 'raise SystemExit(7)'])
     assert asyncio.run(runner.tick()) == 'failed'
-    assert runner.last_error == 'leader exited 7'
+    assert runner.last_error == 'coordinator exited 7'
     assert asyncio.run(runner.tick()) == 'backoff'
     now[0] = 5
     assert asyncio.run(runner.tick()) == 'failed'
@@ -158,7 +158,7 @@ def test_pending_bounded_and_not_automatically_acknowledged(tmp_path):
     def pending(n):
         limits.append(n)
         return events[:n]
-    runner = Coordinator(tmp_path / 'leader.lock', pending=pending, snapshot=lambda: {'revision': 3}, scan=lambda: None, batch_size=1, command=lambda prompt: [sys.executable, '-c', 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])', str(output), prompt])
+    runner = Coordinator(tmp_path / 'coordinator.lock', pending=pending, snapshot=lambda: {'revision': 3}, scan=lambda: None, batch_size=1, command=lambda prompt: [sys.executable, '-c', 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])', str(output), prompt])
     assert asyncio.run(runner.tick()) == 'ran'
     assert limits == [1]
     assert json.loads(output.read_text().split('\n', 1)[1]) == {'events': [{'id': 1}], 'snapshot': {'revision': 3}}

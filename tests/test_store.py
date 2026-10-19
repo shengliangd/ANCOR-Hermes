@@ -117,3 +117,33 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(reopened.get_requirement(requirement['id']), requirement)
         with self.assertRaises(ValueError):
             reopened.confirm(draft['id'], ' ')
+
+    def test_optional_replacement_id_rejects_blank_values(self):
+        with self.assertRaises(ValueError):
+            self.store.create_draft('brief', 'criteria', '')
+        with self.assertRaises(ValueError):
+            self.store.create_draft('brief', 'criteria', '  \n')
+        draft = self.store.create_draft('brief', 'criteria', None)
+        self.assertIsNone(draft['replacement_of'])
+
+    def test_cancel_is_durable_and_only_active_requirements_can_cancel(self):
+        requirement = self.store.confirm(self.store.create_draft('brief', 'criteria')['id'], 'ref')
+        result = self.store.cancel(requirement['id'], 'user withdrew the request')
+        self.assertEqual(result['status'], 'cancelled')
+        self.assertEqual(self.store.pending_events()[-1]['kind'], 'requirement.cancelled')
+        self.assertEqual(self.store.pending_events()[-1]['payload']['reason'], 'user withdrew the request')
+        with self.assertRaises(ValueError):
+            self.store.cancel(requirement['id'], 'duplicate cancellation')
+
+    def test_batch_cancel_and_replacement(self):
+        first = self.store.confirm(self.store.create_draft('one', 'criteria')['id'], 'ref1')
+        second = self.store.confirm(self.store.create_draft('two', 'criteria')['id'], 'ref2')
+        cancelled = self.store.cancel_many([first['id'], second['id']], 'withdrawn together')
+        self.assertEqual([r['status'] for r in cancelled], ['cancelled', 'cancelled'])
+        a = self.store.confirm(self.store.create_draft('a', 'criteria')['id'], 'ref3')
+        b = self.store.confirm(self.store.create_draft('b', 'criteria')['id'], 'ref4')
+        draft = self.store.create_draft('combined', 'combined criteria', [a['id'], b['id']])
+        combined = self.store.confirm(draft['id'], 'ref5')
+        self.assertEqual(combined['status'], 'active')
+        self.assertEqual(self.store.get_requirement(a['id'])['status'], 'invalidated')
+        self.assertEqual(self.store.get_requirement(b['id'])['status'], 'invalidated')

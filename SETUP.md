@@ -6,7 +6,7 @@ required for the coordinator's `flock`/process lifecycle implementation.
 
 ## Profiles and package
 
-Create native profiles `ancor-leader` and `ancor-worker`, with explicitly selected
+Create native profiles `ancor-interactor`, `ancor-coordinator` and `ancor-worker`, with explicitly selected
 models and separately provisioned credentials. Keep bot credentials with the
 Gateway owner; do not copy the default `.env` wholesale.
 
@@ -19,7 +19,7 @@ file:///absolute/path/to/ANCOR-Hermes-native-config#ancor
 ```
 
 Install each role's `SOUL.md` in its profile home and the complete
-`skills/ancor-coordination` directory in the leader profile. Preserve unrelated
+skills/ancor-coordination directory in the coordinator profile. Preserve unrelated
 configuration, memory and routes. The worker instructions use read-only requirement
 context and safe checkpoints to stop obsolete work; this is cooperative behavior,
 not process isolation.
@@ -30,8 +30,10 @@ Keep ANCOR role instructions and skills fixed to the reviewed repository version
 Disable automatic post-turn review and skill curation in both role profiles:
 
 ```sh
-hermes -p ancor-leader config set auxiliary.background_review.enabled false
-hermes -p ancor-leader config set curator.enabled false
+hermes -p ancor-interactor config set auxiliary.background_review.enabled false
+hermes -p ancor-interactor config set curator.enabled false
+hermes -p ancor-coordinator config set auxiliary.background_review.enabled false
+hermes -p ancor-coordinator config set curator.enabled false
 hermes -p ancor-worker config set auxiliary.background_review.enabled false
 hermes -p ancor-worker config set curator.enabled false
 ```
@@ -55,18 +57,19 @@ plugin doctor before starting:
 | --- | --- | --- |
 | `store_path` | all three | Same absolute durable SQLite path, outside plugin code |
 | `board` | all three | Dedicated native board, e.g. `ancor` |
-| `leader_profile` | all three | `ancor-leader` |
+| `interactor_profile` | all three | `ancor-interactor` |
+| `coordinator_profile` | all three | `ancor-coordinator` |
 | `worker_profile` | all three | `ancor-worker` |
 | `owner_profile` | all three | Actual Gateway-owning profile |
 | `gateway_owner` | owner only | `true`; keep `false` in role profiles |
 | `poll_interval` | owner | At least 15 seconds |
-| `human_target` | leader | Explicit native `platform:destination` |
-| `transport_profile` | leader | Profile owning that configured transport |
-| `sender_executable` | leader | Optional executable, default `hermes` (native transport) |
+| `human_target` | coordinator | Explicit native `platform:destination` |
+| `transport_profile` | coordinator | Profile owning that configured transport |
+| `sender_executable` | coordinator | Optional executable, default `hermes` (native transport) |
 
 For an isolated transport test only, set `sender_executable` to the absolute path
 of the approved test executable through native config, e.g.
-`hermes -p ancor-leader config set plugins.entries.ancor.settings.sender_executable /absolute/isolated/bin/hermes`.
+`hermes -p ancor-interactor config set plugins.entries.ancor.settings.sender_executable /absolute/isolated/bin/hermes`.
 It must implement the native `send --file - --json` contract. A PATH-only override
 is insufficient when Hermes bootstrap prepends its own launcher. Do not configure
 the test executable in a live profile; leave `hermes` for normal native delivery.
@@ -76,8 +79,9 @@ or exception text. Legacy errors remain readable. `uncertain`/`sending` entries
 are not retried automatically: reconcile transport evidence before any retry.
 
 Enable the plugin/toolset in the selected profiles. The owner registers lifecycle
-infrastructure, not business tools. The leader receives requirement, context,
-board and acceptance tools; the worker receives read-only requirement context.
+infrastructure, not business tools. The interactor receives requirement and user-response tools; the coordinator receives
+global context, board, wake and acceptance tools; the worker receives read-only
+requirement context.
 
 The current lifecycle host is the owner's native `api_server` platform connection.
 Configure that listener through native Hermes settings and keep the Gateway
@@ -88,29 +92,29 @@ required. Native Kanban dispatch must be enabled and able to run `ancor-worker`.
 Create the dedicated board through native board commands; do not change the
 installation-wide current board. Turn off creator auto-subscription in the ANCOR
 profiles. Do not add user-facing task subscriptions: questions and delivery are
-leader decisions, not direct worker event notifications. Audit existing ANCOR
+coordinator decisions, not direct worker event notifications. Audit existing ANCOR
 subscriptions before reusing an old board. Existing business state is not migrated.
 
-Disable automatic root decomposition for this workflow: the leader creates only
+Disable automatic root decomposition for this workflow: the coordinator creates only
 execution tasks, progressively, through the plugin board tool. Native dispatch
 still owns execution. Preserve unrelated boards' decomposition settings.
 
 In the Gateway owner profile, run `hermes config set kanban.review_dispatch false`.
 This is an owner-wide dispatcher setting, not a per-board switch: use a dedicated
 owner if unrelated boards need native review dispatch. Workers finish execution
-with `kanban_complete`, not `kanban_request_review`. The leader independently
+with `kanban_complete`, not `kanban_request_review`. The coordinator independently
 verifies completed artifacts through `ancor_acceptance`; no native review stage
-or leader task-completion tool is needed. Disabling review dispatch does not
+or coordinator task-completion tool is needed. Disabling review dispatch does not
 repair existing review/failed tasks; preserve their evidence for operator review.
 
-Route the selected user conversation to `ancor-leader` using native profile
+Route the selected user conversation to `ancor-interactor` using native profile
 routing. Present and confirm the draft in that current conversation using native
 `clarify`. Confirmation needs no separate message destination, delivery receipt or
 plugin-imposed length limit. `human_target` and `transport_profile` are only for
-leader-selected background questions and completion notices; they are not
+coordinator-selected background questions and completion notices; they are not
 prerequisites for requirement confirmation.
 
-Invalidation records an event. The triggered leader decides how to stop, hold or
+Invalidation records an event. The triggered coordinator decides how to stop, hold or
 replan affected work; event ingestion itself does not block tasks. New work cannot
 be created for an invalidated requirement. There is no global requirement that all
 old workers stop before unrelated work can proceed.
@@ -134,8 +138,8 @@ Acceptance criteria for recovery:
   workers itself or replace native scheduling.
 - Durable worker outcome events from downtime are ingested using per-task cursors
   and deduplicated source keys.
-- Acceptance before notification enqueue wakes the leader with original evidence;
-  only the leader decides the real completion text and enqueues the stable ID.
+- Acceptance before notification enqueue wakes the coordinator with original evidence;
+  only the coordinator decides the real completion text and enqueues the stable ID.
 - Pending notices remain pending; `sending`/`uncertain` require transport evidence
   and operator reconciliation, never blind retries or replacement IDs.
 - No continuous idle model calls. Unhandled identical batches retain the existing
@@ -145,7 +149,7 @@ Acceptance criteria for recovery:
 These are durable wake/reconciliation guarantees, not guarantees that an arbitrary
 model successfully completes work. Recovery does not infer acceptance or delivery.
 The host reads the outbox without requiring transport credentials/configuration.
-Crash tests use real OS processes and locks with scripted leader decisions; native
+Crash tests use real OS processes and locks with scripted coordinator decisions; native
 history reads use the installed read-only API. They are not actual-model E2E.
 
 ## Verification gates

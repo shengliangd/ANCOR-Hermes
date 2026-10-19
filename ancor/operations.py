@@ -1,4 +1,4 @@
-"""Leader coordination via the native CLI; no acceptance or scheduler ownership."""
+"""Coordinator operations over the native CLI."""
 from .board import NativeBoard
 from .service import Service
 
@@ -15,7 +15,7 @@ class Operations:
             name = self.ctx.get_config('board')
             if not name:
                 raise ValueError('configure ANCOR board')
-            self._board = NativeBoard(name, profile=self.ctx.get_config('leader_profile', 'ancor-leader'))
+            self._board = NativeBoard(name, profile=self.ctx.get_config('coordinator_profile', 'ancor-coordinator'))
         return self._board
 
     def detail(self, task_id):
@@ -53,10 +53,11 @@ class Operations:
                 raise RuntimeError('worker quiescence not established')
 
     def call(self, args):
-        if self.ctx.profile_name != self.ctx.get_config('leader_profile', 'ancor-leader'):
-            raise PermissionError('leader profile required')
+        expected = self.ctx.get_config('coordinator_profile', 'ancor-coordinator')
+        if self.ctx.profile_name != expected:
+            raise PermissionError('coordinator profile required')
         action = args['action']
-        if action not in {'create', 'list', 'show', 'block', 'unblock', 'revise', 'comment', 'link', 'unlink', 'edit'}:
+        if action not in {'create', 'list', 'show', 'block', 'unblock', 'revise', 'comment', 'link', 'unlink', 'edit', 'associate'}:
             raise ValueError('unknown board action')
         store = self.service.store
         if action not in {'list', 'show'}:
@@ -109,6 +110,8 @@ class Operations:
         detail = self.detail(tid)
         if action == 'show':
             return detail
+        if action == 'associate':
+            return store.associate_task(tid, args['requirement_id'], args['reason'])
         if action == 'revise':
             reason = store._text(args['reason'])
             if store.get_requirement(links[tid])['status'] != 'active':
@@ -145,10 +148,11 @@ class Operations:
             self.board._call('unblock', tid, '--reason', store._text(args['reason']), json_output=False)
         elif action == 'comment':
             text = store._text(args['body']).strip()
-            self.board._call('comment', tid, text, '--author', 'ancor-leader', json_output=False)
+            author = expected
+            self.board._call('comment', tid, text, '--author', author, json_output=False)
         actual = self.detail(tid)
         if action == 'unblock' and actual['task']['status'] not in {'ready', 'todo', 'running'}:
             raise RuntimeError('native unblock verification failed')
-        if action == 'comment' and not any(c['body'] == text and c['author'] == 'ancor-leader' for c in actual['comments']):
+        if action == 'comment' and not any(c['body'] == text and c['author'] == expected for c in actual['comments']):
             raise RuntimeError('native comment verification failed')
         return actual

@@ -1,4 +1,4 @@
-"""Leader-selected durable notifications through the public ``hermes send`` CLI.
+"""Coordinator-selected durable notifications through the public ``hermes send`` CLI.
 
 No worker event is automatically forwarded. Bind actor to trusted plugin context,
 not model arguments. Configure an explicit destination and the transport-owning
@@ -56,11 +56,11 @@ class HermesSender:
 
 
 class NotificationOutbox:
-    def __init__(self, path, *, leader_profile, target, sender):
-        if not leader_profile or not isinstance(target, str) or ':' not in target or not target.partition(':')[2].strip():
-            raise ValueError('leader and explicit platform:destination required')
+    def __init__(self, path, *, coordinator_profile, target, sender):
+        if not coordinator_profile or not isinstance(target, str) or ':' not in target or not target.partition(':')[2].strip():
+            raise ValueError('coordinator and explicit platform:destination required')
         self.path = str(path)
-        self.leader_profile, self.target, self.sender = leader_profile, target, sender
+        self.coordinator_profile, self.target, self.sender = coordinator_profile, target, sender
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS human_notifications (
                 id TEXT PRIMARY KEY, kind TEXT NOT NULL, message TEXT NOT NULL,
@@ -81,9 +81,9 @@ class NotificationOutbox:
         finally:
             db.close()
 
-    def _leader(self, actor):
-        if actor != self.leader_profile:
-            raise PermissionError('only the leader selects human notifications')
+    def _coordinator(self, actor):
+        if actor != self.coordinator_profile:
+            raise PermissionError('only the coordinator selects human notifications')
 
     @staticmethod
     def _row(db, identifier):
@@ -118,7 +118,7 @@ class NotificationOutbox:
             db.close()
 
     def enqueue(self, identifier, kind, message, *, actor):
-        self._leader(actor)
+        self._coordinator(actor)
         if kind not in ('question', 'completion'):
             raise ValueError('only questions and completion notices are supported')
         if not all(isinstance(v, str) and v.strip() for v in (identifier, message)):
@@ -135,7 +135,7 @@ class NotificationOutbox:
         return self.get(identifier)
 
     def deliver(self, identifier, *, actor):
-        self._leader(actor)
+        self._coordinator(actor)
         with self._db() as db:
             row = self._row(db, identifier)
             if row['state'] != 'pending':

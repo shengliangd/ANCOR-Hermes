@@ -29,13 +29,16 @@ def child_environment(environ=None):
                 'HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY', 'HERMES_CRON_SESSION'}}
 
 
-def leader_command(profile, prompt):
+def coordinator_command(profile, prompt):
     # env -u affects only the child, never concurrent Gateway sessions. Explicit
     # -p is resolved by the native CLI before importing profile-scoped modules.
     clean = child_environment()
     removed = sorted(set(os.environ) - set(clean))
     return ['env', *[part for key in removed for part in ('-u', key)],
-            'ANCOR_COORDINATOR=1', 'hermes', '-p', profile, '--cli', 'chat', '-q', prompt]
+            'hermes', '-p', profile, '--cli', 'chat', '-q', prompt]
+
+
+
 
 
 class Host:
@@ -44,7 +47,7 @@ class Host:
         if not path.is_absolute():
             raise ValueError('configure shared absolute store_path for ANCOR')
         self.ctx = ctx
-        self.profile = ctx.get_config('leader_profile', 'ancor-leader')
+        self.profile = ctx.get_config('coordinator_profile', 'ancor-coordinator')
         self.board_name = ctx.get_config('board', 'ancor')
         self.store = store or Store(path)
         self.board = board or NativeBoard(self.board_name, profile=self.profile,
@@ -60,7 +63,7 @@ class Host:
         self.coordinator = Coordinator(path.parent / 'ancor-coordinator.lock',
             pending=self.pending, snapshot=self.snapshot, scan=self.scan,
             batch_size=32, retry_base=15,
-            command=lambda prompt: leader_command(self.profile, prompt))
+            command=lambda prompt: coordinator_command(self.profile, prompt))
 
     def state(self):
         try:
@@ -79,7 +82,7 @@ class Host:
         snapshot = self.store.snapshot()
         known = {r['id']: r for r in snapshot['requirements']}
         # Invalidation is a durable coordination event, not an automatic stop.
-        # Only the leader decides whether affected native tasks should be blocked.
+        # Only the coordinator decides whether affected native tasks should be blocked.
         try:
             self.tasks = self.board.list()
         except Exception:
@@ -133,13 +136,13 @@ class Host:
     def pending(self, limit):
         if self.startup:
             # Runs under the SAME inherited coordinator flock, after discovery.
-            # A pending inbox already wakes the leader with this current snapshot.
+            # A pending inbox already wakes the coordinator with this current snapshot.
             data = self.snapshot()
             if (data['requirements'] or data['notifications'] or data['invalidated_tasks']) and not self.store.pending_events():
                 self.store.add_event('host.recovery', {
                     'reason': 'Reconcile durable state after host startup; inspect current context. '
                               'Reuse task keys and notification IDs; never resend sending/uncertain notices. '
-                              'No automatic stop: the leader decides how to resolve invalidated tasks.'})
+                              'No automatic stop: the coordinator decides how to resolve invalidated tasks.'})
             self.startup = False
         pending = self.store.pending_events()
         # Reserve one slot for newest input: a full unchanged head batch must
@@ -253,7 +256,7 @@ async def scan_runner(ctx, adapter):
         if outcome == 'busy':
             observation = host.scheduling.observation(host.store.snapshot())
             if observation['liveness']['overdue']:
-                log.error('ANCOR liveness overdue: coordinator lock remains held; inspect stuck/surviving leader, no overlapping launch')
+                log.error('ANCOR liveness overdue: coordinator lock remains held; inspect stuck/surviving coordinator, no overlapping launch')
         if outcome == 'failed':
             log.error('ANCOR coordinator infrastructure failure: %s', host.coordinator.last_error)
         await asyncio.sleep(interval)

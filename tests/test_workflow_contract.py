@@ -24,7 +24,7 @@ def test_acceptance_schema_matches_service_contract(tmp_path):
     from ancor.service import Service
     from ancor.store import Store
     tools = {}
-    ctx = SimpleNamespace(profile_name='ancor-leader',
+    ctx = SimpleNamespace(profile_name='ancor-coordinator',
                           get_config=lambda key, default=None: default,
                           register_hook=lambda *args: None,
                           register_tool=lambda **kw: tools.update({kw['name']: kw}))

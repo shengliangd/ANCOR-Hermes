@@ -1,6 +1,6 @@
 name: ancor
 version: 0.1.0
-description: Durable requirements and leader acceptance over native Hermes Kanban.
+description: Durable requirements and interactor/coordinator workflow over native Hermes Kanban.
 provides_tools:
   - ancor_requirement
   - ancor_get_context
@@ -12,9 +12,12 @@ provides_hooks:
   - pre_tool_call
   - post_tool_call
 config_schema:
-  leader_profile:
+  interactor_profile:
     type: string
-    default: ancor-leader
+    default: ancor-interactor
+  coordinator_profile:
+    type: string
+    default: ancor-coordinator
   owner_profile:
     type: string
     default: default

@@ -25,7 +25,7 @@ consider all current requirements, ongoing work and conflicts, not just the batc
 On `host.recovery`, reconcile the current durable snapshot rather than replaying
 old decisions: reuse existing task keys, inspect acceptance evidence and the
 outbox, and finish missing handoffs. An accepted requirement without a notice
-needs a real leader-authored completion, not another acceptance. Reuse the exact
+needs a real coordinator-authored completion, not another acceptance. Reuse the exact
 stored message for a pending notification. Never resend `sending`/`uncertain`
 notifications or replace their IDs; reconcile transport evidence first. Sent
 completions are finished. Acknowledge recovery once handled or durably waiting;
@@ -33,7 +33,7 @@ waiting alone is not a reason for repeated coordination turns.
 
 - Resolve blockers and execution errors before asking the user. Inspect attempts
   and evidence; clarify task context, unblock safely or create focused support work.
-- Plan incrementally through `ancor_board`. The leader performs decomposition;
+- Plan incrementally through `ancor_board`. The coordinator performs decomposition;
   Kanban only stores dependencies and dispatches execution. Supply `parent_ids`
   during creation to establish dependencies atomically. Use `hold=true` while
   arranging a graph, then unblock when ready; do not expose a ready task before
@@ -66,7 +66,7 @@ its real next event source: native work/dependency, a durable human question, or
 an explicit timed recheck. Missing-source warnings require a plan, not repeated
 self-wakes. Use `ancor_wake` schedule with requirement_id, a concrete reason, and
 future due_at (Unix seconds). List before scheduling; replace by wake_id when the
-plan changes, cancel obsolete wakes. Registration itself does not wake the leader.
+plan changes, cancel obsolete wakes. Registration itself does not wake the coordinator.
 Due wakes enter the ordinary serialized inbox and require explicit acknowledgement.
 Invalidated/accepted requirements suppress obsolete wakes. A long wait may be
 legitimate: do not move it earlier just to keep the system busy.
@@ -77,7 +77,7 @@ The coordinator's first ANCOR tool call records actual coordination and resets
 the two-hour deadline once per child session; process creation, queued events and
 failed CLI startup do not. Scanner outages, launch failures, or an existing stuck
 coordinator can make it overdue: report the infrastructure problem, never start
-an overlapping leader. No active requirements means no periodic insurance calls.
+an overlapping coordinator. No active requirements means no periodic insurance calls.
 
 ## Human communication
 

@@ -52,6 +52,15 @@ class Store:
         return value
 
     @staticmethod
+    def _optional_text(value):
+        """Convert omitted/blank optional inputs to the stored NULL value."""
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('optional text must be nonempty when provided')
+        return value
+
+    @staticmethod
     def _get(db, table, identifier):
         row = db.execute(f'SELECT * FROM {table} WHERE id = ?', (identifier,)).fetchone()
         if row is None:
@@ -61,6 +70,12 @@ class Store:
     def create_draft(self, brief, acceptance_criteria, replacement_of=None):
         self._text(brief)
         self._text(acceptance_criteria)
+        if isinstance(replacement_of, list):
+            if not replacement_of or any(not isinstance(i, str) or not i.strip() for i in replacement_of):
+                raise ValueError('replacement_of list must contain nonempty IDs')
+            replacement_of = json.dumps(list(dict.fromkeys(replacement_of)))
+        else:
+            replacement_of = self._optional_text(replacement_of)
         identifier = uuid4().hex
         with self._transaction() as db:
             db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?)',
@@ -117,19 +132,21 @@ class Store:
             if existing:
                 return dict(existing)
             draft = self._get(db, 'drafts', draft_id)
-            if draft['replacement_of'] is not None:
-                base = self._get(db, 'requirements', draft['replacement_of'])
-                if base['status'] != 'active':
-                    raise ValueError('replacement base is no longer active')
-                db.execute("UPDATE requirements SET status = 'invalidated' WHERE id = ?",
-                           (base['id'],))
+            replacement_ids = ([draft['replacement_of']] if draft['replacement_of'] is not None else [])
+            if draft['replacement_of'] and draft['replacement_of'].startswith('['):
+                replacement_ids = json.loads(draft['replacement_of'])
+            bases = [self._get(db, 'requirements', i) for i in replacement_ids]
+            if any(base['status'] != 'active' for base in bases):
+                raise ValueError('all replacement bases must be active')
+            for base in bases:
+                db.execute("UPDATE requirements SET status = 'invalidated' WHERE id = ?", (base['id'],))
             identifier = uuid4().hex
             db.execute('INSERT INTO requirements VALUES (?, ?, ?, ?, ?, ?, ?)',
                        (identifier, draft_id, draft['brief'], draft['acceptance_criteria'],
                         draft['replacement_of'], confirmation_reference, 'active'))
-            if draft['replacement_of'] is not None:
+            for base in bases:
                 self._add_event(db, 'requirement.invalidated',
-                                {'requirement_id': draft['replacement_of'], 'replacement_id': identifier})
+                                {'requirement_id': base['id'], 'replacement_id': identifier})
             self._add_event(db, 'requirement.confirmed', {'requirement_id': identifier})
             return self._get(db, 'requirements', identifier)
 
@@ -170,6 +187,20 @@ class Store:
                             {'requirement_id': requirement_id, 'evidence': evidence})
             return self._get(db, 'requirements', requirement_id)
 
+    def cancel_many(self, requirement_ids, reason):
+        self._text(reason)
+        ids = list(dict.fromkeys(requirement_ids))
+        if not ids or any(not isinstance(i, str) or not i.strip() for i in ids):
+            raise ValueError('requirement_ids must contain nonempty IDs')
+        with self._transaction() as db:
+            rows = [self._get(db, 'requirements', i) for i in ids]
+            if any(row['status'] != 'active' for row in rows):
+                raise ValueError('all requirements must be active')
+            for row in rows:
+                db.execute("UPDATE requirements SET status = 'cancelled' WHERE id = ?", (row['id'],))
+                self._add_event(db, 'requirement.cancelled', {'requirement_id': row['id'], 'reason': reason, 'batch_requirement_ids': ids})
+            return [self._get(db, 'requirements', i) for i in ids]
+
     def reject(self, requirement_id, reason):
         self._text(reason)
         with self._transaction() as db:
@@ -179,3 +210,26 @@ class Store:
             self._add_event(db, 'requirement.rejected',
                             {'requirement_id': requirement_id, 'reason': reason})
             return requirement
+
+    def cancel(self, requirement_id, reason):
+        """Cancel an active requirement and emit a durable coordinator input."""
+        self._text(reason)
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            if requirement['status'] != 'active':
+                raise ValueError('requirement is not active')
+            db.execute("UPDATE requirements SET status = 'cancelled' WHERE id = ?",
+                       (requirement_id,))
+            self._add_event(db, 'requirement.cancelled',
+                            {'requirement_id': requirement_id, 'reason': reason})
+            return self._get(db, 'requirements', requirement_id)
+
+    def associate_task(self, task_id, requirement_id, reason):
+        self._text(task_id); self._text(reason)
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            if requirement['status'] != 'active':
+                raise ValueError('association target must be active')
+            db.execute('INSERT OR IGNORE INTO task_links VALUES (?, ?)', (requirement_id, task_id))
+            self._add_event(db, 'task.associated', {'task_id': task_id, 'requirement_id': requirement_id, 'reason': reason})
+            return {'task_id': task_id, 'requirement_id': requirement_id, 'reason': reason}

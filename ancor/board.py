@@ -9,7 +9,7 @@ import subprocess
 
 
 class NativeBoard:
-    def __init__(self, board, *, profile='ancor-leader', executable='hermes', run=subprocess.run, env=None):
+    def __init__(self, board, *, profile='ancor-coordinator', executable='hermes', run=subprocess.run, env=None):
         self.prefix = [executable, '-p', profile, 'kanban', '--board', board]
         self.run, self.env = run, env
 
@@ -24,7 +24,7 @@ class NativeBoard:
         Native CLI show omits event IDs, unsuitable for durable deduplication.
         Installed signature: list_events(conn, task_id) -> list[Event]; fields
         id/task_id/kind/payload/created_at/run_id. No init/migration is called.
-        Caller persists cursor only AFTER durable ingestion (not leader ack).
+        Caller persists cursor only AFTER durable ingestion (not coordinator ack).
         Returned batch bounded; native API still loads each tracked task history.
         """
         import sqlite3
@@ -90,7 +90,7 @@ class NativeBoard:
 
         Requires kanban_db_connect.connect and kanban_db domain functions.
         Native connect/write_txn retain delegated-child fences; never clear
-        lineage or use raw SQL. Leader edits scope before this explicit review.
+        lineage or use raw SQL. Coordinator edits scope before this explicit review.
         Omitted fields preserve exact existing title/body/assignee. Audit intent
         is committed BEFORE release; native specify cannot nest in an outer txn.
         A refused release can therefore leave its truthful review-intent comment.
@@ -163,7 +163,7 @@ class NativeBoard:
         token = 'ancor:' + hashlib.sha256(encoded.encode()).hexdigest()
         task = self._call('create', title, '--body', 'ANCOR-LINK:' + encoded + '\n' + body,
                           '--assignee', assignee, '--idempotency-key', token,
-                          '--created-by', 'ancor-leader', '--initial-status', 'blocked' if hold else 'running',
+                          '--created-by', 'ancor-coordinator', '--initial-status', 'blocked' if hold else 'running',
                           *(flag for parent in parent_ids for flag in ('--parent', parent)),
                           '--completion-contract', 'local-only')
         detail = self._call('show', task['id'])
@@ -173,3 +173,7 @@ class NativeBoard:
         if self.link(actual) != link:
             raise RuntimeError('native task link verification failed')
         return actual
+
+    def transfer(self, task_id, requirement_id, revision, key, body):
+        encoded = json.dumps({'requirement_id': requirement_id, 'revision': revision, 'key': key}, sort_keys=True, separators=(',', ':'))
+        return self.edit(task_id, body='ANCOR-LINK:' + encoded + '\n' + body)

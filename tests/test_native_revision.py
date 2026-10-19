@@ -29,11 +29,11 @@ def test_native_revise_preserves_scope_and_parent_gating(tmp_path, monkeypatch, 
         before = kb.get_task(conn, task)
         board = NativeBoard('isolated', env={'HERMES_KANBAN_DB': str(path)})
         monkeypatch.setattr(board, '_call', lambda *a, **k: {'task': asdict(kb.get_task(conn, task))})
-        result = board.revise(task, 'Leader reviewed scope; release approved')
+        result = board.revise(task, 'Coordinator reviewed scope; release approved')
         assert result['task']['status'] == ('todo' if gated else 'ready')
         after = kb.get_task(conn, task)
         assert (after.title, after.body, after.assignee) == (before.title, before.body, before.assignee)
-        assert any(c.body == 'Leader reviewed scope; release approved' for c in kb.list_comments(conn, task))
+        assert any(c.body == 'Coordinator reviewed scope; release approved' for c in kb.list_comments(conn, task))
         assert any(e.kind == 'specified' for e in kb.list_events(conn, task))
     finally:
         conn.close()
