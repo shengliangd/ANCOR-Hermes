@@ -120,6 +120,27 @@ def test_guard_defers_unsupported_states_and_isolates_failures():
 from ancor.board import NativeBoard
 
 
+def test_list_merges_native_heartbeat_metadata(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    tasks = [{'id': 'a', 'status': 'running'}, {'id': 'b', 'status': 'blocked'}]
+    run = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, json.dumps(tasks), '')
+    board = NativeBoard('test', run=run)
+    monkeypatch.setattr(board, 'metadata', lambda: {
+        'a': SimpleNamespace(last_heartbeat_at=12, block_kind=None, block_recurrences=0),
+        'b': SimpleNamespace(last_heartbeat_at=None, block_kind='needs_input', block_recurrences=2)})
+    assert board.list() == [
+        {'id': 'a', 'status': 'running', 'last_heartbeat_at': 12,
+         'block_kind': None, 'block_recurrences': 0},
+        {'id': 'b', 'status': 'blocked', 'last_heartbeat_at': None,
+         'block_kind': 'needs_input', 'block_recurrences': 2}]
+    plain = [{'id': 'c', 'status': 'ready'}]
+    fallback = NativeBoard('test', run=lambda argv, **kwargs: subprocess.CompletedProcess(
+        argv, 0, json.dumps(plain), ''))
+    monkeypatch.setattr(fallback, 'metadata', lambda: 1 / 0)
+    assert fallback.list() == plain
+
+
 @pytest.mark.parametrize('action', ['link', 'unlink'])
 def test_dependency_cli_and_readback(action):
     calls = []

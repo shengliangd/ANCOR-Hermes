@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import ancor
 from ancor.host import Host
+from ancor.notification import NotificationOutbox
 from ancor.runtime import Coordinator
 from ancor.scheduling import Scheduling
 from ancor.store import Store
@@ -14,12 +15,14 @@ from ancor.store import Store
 
 def registered(tmp_path, monkeypatch):
     tools = {}
-    config = {'store_path': str(tmp_path / 'db'), 'board': 'test'}
+    config = {'store_path': str(tmp_path / 'db'), 'board': 'test',
+              'human_target': 'test:destination', 'transport_profile': 'test'}
     ctx = SimpleNamespace(profile_name='ancor-coordinator',
         get_config=lambda key, default=None: config.get(key, default),
         register_tool=lambda **kw: tools.update({kw['name']: kw}),
         register_hook=lambda *args: None)
-    monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [{'id': 'task', 'status': 'running'}])
+    monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [
+        {'id': 'task', 'status': 'running', 'last_heartbeat_at': time.time()}])
     ancor.register(ctx)
     store = Store(config['store_path'])
     req = store.confirm(store.create_draft('wait', 'verified')['id'], 'fixture')
@@ -40,10 +43,12 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     args = dict(action='schedule', requirement_id=req['id'], reason='external release', due_at=time.time() + 1000)
     assert call('ancor_wake', {'action': 'list'}) == []
     context = call('ancor_get_context', {})
-    assert context['progression'][0]['sources'] == [{'kind': 'native_task', 'task_id': 'task', 'status': 'running'}]
+    assert context['progression'][0]['state'] == 'active'
+    assert context['progression'][0]['reason'] == 'running_heartbeat'
     assert context['liveness']['last_started'] is not None
     host = Host(ctx, store=store, board=SimpleNamespace())
-    host.tasks = [{'id': 'task', 'status': 'running'}]
+    heartbeat = context['progression'][0]['tasks'][0]['last_heartbeat_at']
+    host.tasks = [{'id': 'task', 'status': 'running', 'last_heartbeat_at': heartbeat}]
     assert host.snapshot()['progression'] == context['progression']
     assert 'error' not in call('ancor_wake', args)
     wake = call('ancor_wake', dict(action='schedule', requirement_id=req['id'], reason='external release 2', due_at=time.time() + 2000))
@@ -53,6 +58,42 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     replacement = call('ancor_wake', dict(action='replace', wake_id=wake['id'], reason='human still unavailable', due_at=time.time() + 2000))
     assert replacement['id'] != wake['id']
     assert call('ancor_wake', dict(action='cancel', wake_id=replacement['id']))['state'] == 'cancelled'
+
+
+def test_ack_rejects_triage_and_host_stalled(tmp_path, monkeypatch):
+    ctx, tools, store, req = registered(tmp_path, monkeypatch)
+    call = lambda name, args: json.loads(tools[name]['handler'](args))
+    monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [
+        {'id': 'task', 'status': 'triage'}])
+    Scheduling(store).sync_health(store.snapshot(), [{'id': 'task', 'status': 'triage'}], [])
+    stalled = next(e for e in store.pending_events() if e['kind'] == 'host.stalled')
+    assert 'host-owned' in call('ancor_get_context', {'ack_event_ids': [stalled['id']]})['error']
+    repeated = store.add_event('native.block_loop_detected', {'task_id': 'task'},
+                               source_key='native:test:triage')
+    assert 'triage' in call('ancor_get_context', {'ack_event_ids': [repeated['id']]})['error']
+    Scheduling(store).sync_health(store.snapshot(), [
+        {'id': 'task', 'status': 'running', 'last_heartbeat_at': time.time()}], [])
+    assert not [e for e in store.pending_events() if e['kind'] == 'host.stalled']
+
+
+def test_ack_requires_open_question_for_blocked_task(tmp_path, monkeypatch):
+    ctx, tools, store, req = registered(tmp_path, monkeypatch)
+    call = lambda name, args: json.loads(tools[name]['handler'](args))
+    monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [
+        {'id': 'task', 'status': 'blocked'}])
+    blocked = store.add_event('native.blocked', {'task_id': 'task'},
+                              source_key='native:test:blocked')
+    assert 'without an open question' in call(
+        'ancor_get_context', {'ack_event_ids': [blocked['id']]})['error']
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination',
+                             sender=lambda *args: {'success': True})
+    box.enqueue('label-question', 'question', 'Which label?', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='task')
+    box.deliver('label-question', actor='ancor-coordinator')
+    assert 'error' not in call('ancor_get_context', {'ack_event_ids': [blocked['id']]})
+    assert blocked['id'] not in [e['id'] for e in store.pending_events()]
 
 
 def test_failed_cli_never_counts_as_coordination(tmp_path):
@@ -83,9 +124,9 @@ def test_human_and_external_wait_durable_without_task(tmp_path):
     for reason in ['Human reply follow-up if unanswered', 'External release publication check']:
         scheduler.call(dict(action='schedule', requirement_id=req['id'], reason=reason, due_at=1000))
     restarted = Scheduling(Store(store.path), lambda: 999)
-    sources = restarted.observation(store.snapshot())['progression'][0]['sources']
-    assert len(sources) == 2
-    assert all(s['kind'] == 'scheduled_wake' for s in sources)
+    health = restarted.observation(store.snapshot())['progression'][0]
+    assert health['state'] == 'stalled' and health['reason'] == 'no_work'
+    assert len(health['timers']) == 2
     assert not store.pending_events()
     Scheduling(Store(store.path), lambda: 1000).scan()
     assert len([e for e in store.pending_events() if e['kind'] == 'wake.due']) == 2

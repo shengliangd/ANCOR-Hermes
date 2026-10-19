@@ -61,15 +61,24 @@ should be durable and explicit, not a reason to spin or repeatedly send it.
 
 ## Waiting and liveness
 
-Before ending a turn, inspect `progression` for every active requirement. Identify
-its real next event source: native work/dependency, a durable human question, or
-an explicit timed recheck. Missing-source warnings require a plan, not repeated
-self-wakes. Use `ancor_wake` schedule with requirement_id, a concrete reason, and
-future due_at (Unix seconds). List before scheduling; replace by wake_id when the
-plan changes, cancel obsolete wakes. Registration itself does not wake the coordinator.
-Due wakes enter the ordinary serialized inbox and require explicit acknowledgement.
-Invalidated/accepted requirements suppress obsolete wakes. A long wait may be
-legitimate: do not move it earlier just to keep the system busy.
+Before ending a turn, inspect `progression` for every active requirement. It
+reports real health: `active` requires a running task with a fresh heartbeat, or
+ready work; `waiting_on_human` requires a blocked task with a delivered,
+unanswered question. Everything else is `stalled`: `triage`, a stale heartbeat,
+a blocked task without an open question, a blocked task whose question was
+answered, no work, or acceptance pending. Triage is a failure to repair, never a
+steady state. A scheduled wake is a timer, never progress.
+
+Pending `host.stalled` is a host-owned condition event. It cannot be acknowledged;
+it clears only when the requirement actually recovers. Repair the missing work or
+ask a real question instead of unblocking, revising, or commenting to silence it.
+
+Use `ancor_wake` schedule with requirement_id, a concrete reason, and future due_at
+(Unix seconds) for an explicit timed recheck. List before scheduling; replace by
+wake_id when the plan changes, cancel obsolete wakes. Registration itself does not
+wake the coordinator. Due wakes enter the ordinary serialized inbox and require
+explicit acknowledgement. Invalidated/accepted requirements suppress obsolete wakes.
+A long wait may be legitimate: do not move it earlier just to keep the system busy.
 
 `host.liveness` is insurance while any requirement is active, not a work plan.
 Inspect current work, repair missing progression sources, then acknowledge it.
@@ -82,9 +91,10 @@ an overlapping coordinator. No active requirements means no periodic insurance c
 ## Human communication
 
 Use `ancor_notify` with a stable ID for questions and `accept:<requirement_id>`
-for accepted completion. On a user's reply, use its `respond` action to preserve
-the answer and enqueue coordination. Use the configured native user destination,
-never raw task-event subscriptions.
+for accepted completion. A question must name both its active `requirement_id` and
+the linked `task_id`; keep that task blocked while the question is open. On a user's
+reply, use its `respond` action to preserve the answer and enqueue coordination.
+Use the configured native user destination, never raw task-event subscriptions.
 Open each notification with its purpose: “需要你提供信息”, “需要你授权”,
 “需要你决定”, or “完成了一项需求”, followed by the requirement's short name.
 For requests, state the missing input or concrete action/decision, your recommendation

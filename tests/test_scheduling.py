@@ -15,10 +15,11 @@ def test_usage_simulation(tmp_path):
     req = store.confirm(store.create_draft('long wait', 'verified')['id'], 'test')
     store.ack_events([e['id'] for e in store.pending_events()])
     scheduler.scan()
-    assert scheduler.observation(store.snapshot())['progression'][0]['warning']
+    assert scheduler.observation(store.snapshot())['progression'][0]['state'] == 'stalled'
     wake = scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='external release tomorrow', due_at=90000))
     assert not store.pending_events()
-    assert not scheduler.observation(store.snapshot())['progression'][0]['warning']
+    stalled = scheduler.observation(store.snapshot())['progression'][0]
+    assert stalled['state'] == 'stalled' and stalled['timers']
     now[0] = 8200
     scheduler.scan()
     insurance = store.pending_events()
@@ -91,3 +92,47 @@ def test_running_coordinator_never_overlaps(tmp_path):
         assert asyncio.run(runner.tick()) == 'busy'
         assert scheduler.observation(store.snapshot())['liveness']['overdue']
     assert scheduler.observation(store.snapshot())['liveness']['last_started'] == 100
+
+
+def health_fixture(tmp_path):
+    store = Store(tmp_path / 'health.db')
+    scheduler = Scheduling(store, lambda: 10_000)
+    req = store.confirm(store.create_draft('health', 'verified')['id'], 'fixture')
+    store.ack_events([e['id'] for e in store.pending_events()])
+    return store, scheduler, req
+
+
+def test_health_distinguishes_triage_blocked_wait_and_stale_heartbeat(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    store.link_task(req['id'], 'task')
+    data = store.snapshot()
+    question = {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+                'task_id': 'task', 'state': 'sent', 'answer': None}
+    assert scheduler.health(data, [{'id': 'task', 'status': 'triage'}], [question])[0]['state'] == 'stalled'
+    assert scheduler.health(data, [{'id': 'task', 'status': 'blocked'}], [question])[0]['state'] == 'waiting_on_human'
+    blocked = scheduler.health(data, [{'id': 'task', 'status': 'blocked'}], [])[0]
+    assert blocked['state'] == 'stalled' and blocked['reason'] == 'blocked_without_wait'
+    assert scheduler.health(data, [{'id': 'task', 'status': 'running', 'last_heartbeat_at': 9_999}], [])[0]['state'] == 'active'
+    assert scheduler.health(data, [{'id': 'task', 'status': 'running', 'last_heartbeat_at': 1}], [])[0]['reason'] == 'stale_heartbeat'
+    assert scheduler.health(data, [{'id': 'task', 'status': 'ready'}], [])[0]['state'] == 'active'
+
+
+def test_wake_is_a_timer_not_a_progress_source(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='later', due_at=20_000))
+    result = scheduler.observation(store.snapshot())['progression'][0]
+    assert result['state'] == 'stalled' and result['reason'] == 'no_work'
+    assert len(result['timers']) == 1
+
+
+def test_stalled_event_lifecycle_follows_recovery(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    store.link_task(req['id'], 'task')
+    scheduler.sync_health(store.snapshot(), [{'id': 'task', 'status': 'triage'}], [])
+    assert len([e for e in store.pending_events() if e['kind'] == 'host.stalled']) == 1
+    scheduler.sync_health(store.snapshot(), [
+        {'id': 'task', 'status': 'running', 'last_heartbeat_at': 9_999}], [])
+    assert not [e for e in store.pending_events() if e['kind'] == 'host.stalled']
+    restarted = Scheduling(Store(store.path), lambda: 10_000)
+    restarted.sync_health(store.snapshot(), [{'id': 'task', 'status': 'triage'}], [])
+    assert len([e for e in store.pending_events() if e['kind'] == 'host.stalled']) == 1

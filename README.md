@@ -29,6 +29,16 @@ The interactor prepares and confirms requirements, then stops. It does not inspe
 
 Native Hermes owns worker dispatch and task lifecycle. The plugin owns requirement semantics and coordination admission. Idle polling uses no model tokens. Events are batched; unchanged unprocessed batches have a retry budget rather than a hot model loop.
 
+## Health states
+
+`progression` reports health per active requirement. `active` requires a running
+task with a fresh heartbeat, or ready work. `waiting_on_human` requires a blocked
+task with a delivered, unanswered question. Everything else is `stalled`: triage,
+stale heartbeat, blocked without an open question, blocked after its question was
+answered, no work, or acceptance pending. A scheduled wake is a timer, not
+progress. The host publishes a `host.stalled` condition event that cannot be
+acknowledged and clears only when real work recovers.
+
 ## Guarantee boundaries
 
 The coordinator lock serializes plugin-launched coordination, not all user chats. SQLite transitions are atomic; SQLite and native Kanban are not one transaction, so task metadata supports reconciliation after interrupted creation.

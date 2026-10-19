@@ -37,12 +37,13 @@ if sys.argv[2] == 'accept-crash':
 else:
     child = ('import json,sys; from pathlib import Path; from ancor.store import Store; '
              'p=json.loads(sys.argv[2].split("\\n",1)[1]); '
-             'Path(sys.argv[1]).write_text(json.dumps(p)); '
+             'Path(sys.argv[1]).exists() or Path(sys.argv[1]).write_text(json.dumps(p)); '
              's=Store(sys.argv[3]); s.ack_events([e["id"] for e in p["events"]])')
     host.coordinator.command = lambda p: [sys.executable, '-c', child, sys.argv[3], p, sys.argv[1]]
     assert asyncio.run(host.coordinator.tick()) == 'ran'
     host.coordinator.next_attempt = 0
-    for _ in range(5): assert asyncio.run(host.coordinator.tick()) == 'idle'
+    outcomes = [asyncio.run(host.coordinator.tick()) for _ in range(5)]
+    assert outcomes.count('ran') <= 1 and outcomes[-1] in {'idle', 'backoff'}
 '''
 
 
@@ -233,7 +234,7 @@ def test_interrupted_host_and_coordinator_resume_without_duplicate_flight(tmp_pa
                                 capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, result.stderr
         data = json.loads(output.read_text())
-        assert data['events'][0]['kind'] == 'host.recovery'
+        assert 'host.recovery' in [e['kind'] for e in data['events']]
         assert data['snapshot']['requirements'] == [req]
         assert len(store.snapshot()['requirements']) == 1
     finally:
@@ -260,7 +261,9 @@ def test_confirmed_demand_restart_requires_no_resubmit(tmp_path, acknowledged):
     assert result.returncode == 0, result.stderr
     data = json.loads(output.read_text())
     assert data['snapshot']['requirements'] == [req]
-    assert data['events'][0]['kind'] == ('host.recovery' if acknowledged else 'requirement.confirmed')
+    kinds = [e['kind'] for e in data['events']]
+    assert kinds[0] == ('host.stalled' if acknowledged else 'requirement.confirmed')
+    assert ('host.recovery' in kinds) == acknowledged
 
 
 def test_native_completion_written_during_downtime_replayed_once(tmp_path, monkeypatch):

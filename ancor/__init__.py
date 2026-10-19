@@ -44,6 +44,7 @@ def register(ctx, *, scan_runner=None):
     def response_event(row):
         return service.store.add_event('notification.response', {
             'notification_id': row['id'], 'body': row['answer'],
+            'requirement_id': row.get('requirement_id'), 'task_id': row.get('task_id'),
             'reference': row['answer_reference'],
             'source': 'interactor_transcription', 'authorization': False},
             source_key='notification.response:' + row['id'])
@@ -60,19 +61,48 @@ def register(ctx, *, scan_runner=None):
         from .scheduling import Scheduling
         return Scheduling(service.store).call(args)
 
+    def validate_acks(event_ids, snapshot, tasks, rows):
+        pending = {event['id']: event for event in snapshot['pending_events']}
+        task_by_id = {task['id']: task for task in tasks or ()}
+        links = {}
+        for link in snapshot['task_links']:
+            links.setdefault(link['task_id'], set()).add(link['requirement_id'])
+        for identifier in event_ids:
+            event = pending.get(identifier)
+            if event is None:
+                continue
+            if event['kind'] == 'host.stalled':
+                raise ValueError(f'event {identifier} is host-owned and clears only when the requirement recovers')
+            payload = event.get('payload') or {}
+            task_id = payload.get('task_id')
+            task = task_by_id.get(task_id, {})
+            if event['kind'] == 'native.block_loop_detected' and task.get('status') == 'triage':
+                raise ValueError(f'event {identifier} cannot be acknowledged while {task_id} is in triage')
+            if event['kind'] == 'native.blocked' and task.get('status') == 'blocked':
+                requirements = links.get(task_id, set())
+                waiting = any(row.get('kind') == 'question' and row.get('state') == 'sent'
+                              and row.get('answer') is None and row.get('task_id') == task_id
+                              and row.get('requirement_id') in requirements
+                              for row in rows or ())
+                if not waiting:
+                    raise ValueError(f'event {identifier} cannot be acknowledged while {task_id} is blocked without an open question')
+
     def get_context(args):
         try:
             extra = {'notifications': notifications()}
         except ValueError as exc:
             extra = {'notifications': [], 'notifications_error': str(exc)}
+        tasks = None
+        if coordinator:
+            try:
+                tasks = operations.board.list()
+            except Exception as exc:
+                extra['board_error'] = str(exc)
+        if coordinator and args.get('ack_event_ids'):
+            validate_acks(args['ack_event_ids'], service.store.snapshot(), tasks, extra['notifications'])
         from .scheduling import Scheduling
         data = service.get_context(args)
-        try:
-            tasks = operations.board.list() if coordinator else []
-        except Exception as exc:
-            tasks = []
-            extra['board_error'] = str(exc)
-        return {**data, **Scheduling(service.store).observation(data, tasks), **extra}
+        return {**data, **Scheduling(service.store).observation(data, tasks, extra['notifications']), **extra}
 
     def notify(args, **native):
         action = args['action']
@@ -83,13 +113,25 @@ def register(ctx, *, scan_runner=None):
         if action == 'send':
             if not coordinator:
                 raise PermissionError('coordinator profile required to send notifications')
+            requirement_id, task_id = args.get('requirement_id'), args.get('task_id')
             if args['kind'] == 'completion':
-                req = service.store.get_requirement(args['requirement_id'])
+                req = service.store.get_requirement(requirement_id)
                 if req['status'] != 'accepted':
                     raise ValueError('completion requires an accepted requirement')
                 if identifier != 'accept:' + req['id']:
                     raise ValueError('completion id must be accept:<requirement_id>')
-            box.enqueue(identifier, args['kind'], args['message'], actor=ctx.profile_name)
+            if args['kind'] == 'question':
+                if not task_id:
+                    raise ValueError('question requires requirement_id and task_id')
+                req = service.store.get_requirement(requirement_id)
+                if req['status'] != 'active':
+                    raise ValueError('question requires an active requirement')
+                links = {link['task_id'] for link in service.store.snapshot()['task_links']
+                         if link['requirement_id'] == req['id']}
+                if task_id not in links:
+                    raise ValueError('question task must be linked to the requirement')
+            box.enqueue(identifier, args['kind'], args['message'], actor=ctx.profile_name,
+                        requirement_id=requirement_id, task_id=task_id)
             return box.deliver(identifier, actor=ctx.profile_name)
         if action == 'respond':
             existing = box.get(identifier)
@@ -151,7 +193,7 @@ def register(ctx, *, scan_runner=None):
                           'id': {'type': 'string'},
                           'kind': {'type': 'string', 'enum': ['question', 'completion']},
                           'message': {'type': 'string'}, 'answer': {'type': 'string'},
-                          'requirement_id': {'type': 'string'}}, ['action']),
+                          'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'}}, ['action']),
         'ancor_requirement': ('Prepare an immutable draft and exact native clarify_args. Call native clarify separately; only its submitted exact confirmation activates the requirement. cancel and replace accept one or more requirement_ids atomically; respond records the exact human reply as advisory input, never new authorization.',
                               {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'link', 'cancel', 'replace', 'respond']},
                                'body': {'type': 'string'},

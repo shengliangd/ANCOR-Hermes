@@ -125,10 +125,11 @@ On the first scan that acquires the existing coordinator flock, the host reads
 current requirements, native tasks/events, acceptance evidence and the existing
 notification outbox. Pending events already trigger reconciliation. If the inbox
 is empty but active requirements, undelivered acceptances or unresolved notices
-remain, it records one durable `host.recovery` event. Acknowledging that event
-makes subsequent idle polls quiet; it is not recreated on every poll. A later
-host startup may reconcile still-unresolved work again. Drafts alone do not wake
-a model. A sent completion is neither recreated nor resent.
+remain, it records one durable `host.recovery` event. The derived `host.stalled`
+condition does not suppress this startup recovery. Acknowledging recovery makes
+subsequent idle polls quiet; it is not recreated on every poll. A later host
+startup may reconcile still-unresolved work again. Drafts alone do not wake a
+model. A sent completion is neither recreated nor resent.
 
 Acceptance criteria for recovery:
 - Confirmed work resumes without human resubmission, including an interrupted
@@ -145,6 +146,11 @@ Acceptance criteria for recovery:
 - No continuous idle model calls. Unhandled identical batches retain the existing
   three-attempt/hour cooldown; the newest event gets a reserved batch slot so new
   input cannot hide behind a full cooling head batch.
+- Progress is judged from real work: running with a fresh heartbeat, or a blocked
+  task with a delivered unanswered human question. Triage, stale heartbeat,
+  blocked without an open question, and blocked after its question was answered
+  are stalled. Scheduled wakes are timers. `host.stalled` is host-owned, is never
+  manually acknowledged, and clears only when the requirement recovers.
 
 These are durable wake/reconciliation guarantees, not guarantees that an arbitrary
 model successfully completes work. Recovery does not infer acceptance or delivery.

@@ -1,4 +1,4 @@
-"""Thin CLI adapter plus version-coupled native triage revision; no raw SQL.
+"""Thin CLI adapter, read-only native metadata/event bridges, and version-coupled triage revision; no raw SQL.
 
 CLI contract inspected in installed hermes_cli/kanban_parser.py and kanban.py.
 Call from a thread when used by an async gateway (CLI operations are blocking).
@@ -10,6 +10,7 @@ import subprocess
 
 class NativeBoard:
     def __init__(self, board, *, profile='ancor-coordinator', executable='hermes', run=subprocess.run, env=None):
+        self.board = board
         self.prefix = [executable, '-p', profile, 'kanban', '--board', board]
         self.run, self.env = run, env
 
@@ -43,7 +44,31 @@ class NativeBoard:
         return [rows[key] for key in sorted(rows)[:limit]]
 
     def list(self):
-        return self._call('list', '--archived')
+        tasks = self._call('list', '--archived')
+        try:
+            metadata = self.metadata()
+        except Exception:
+            return tasks
+        for task in tasks:
+            detail = metadata.get(task['id'])
+            if detail is not None:
+                task.update(last_heartbeat_at=detail.last_heartbeat_at,
+                            block_kind=detail.block_kind,
+                            block_recurrences=detail.block_recurrences)
+        return tasks
+
+    def metadata(self):
+        """Read fields omitted by native list JSON through its read-only API."""
+        import sqlite3
+        from pathlib import Path
+        from hermes_cli.kanban_db import kanban_db_path, list_tasks
+        path = kanban_db_path(board=self.board)
+        conn = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            return {task.id: task for task in list_tasks(conn, include_archived=True)}
+        finally:
+            conn.close()
 
     def show(self, task_id):
         return self._call('show', task_id)['task']

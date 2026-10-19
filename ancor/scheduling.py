@@ -6,6 +6,7 @@ from uuid import uuid4
 
 class Scheduling:
     INTERVAL = 7200
+    HEARTBEAT_STALE_SECONDS = 3600
 
     def __init__(self, store, clock=time.time):
         self.store, self.clock = store, clock
@@ -88,19 +89,118 @@ class Scheduling:
             db.execute('UPDATE coordination_clock SET last_started=?, generation=generation+1', (self.clock(),))
             db.execute("UPDATE events SET acknowledged=1 WHERE kind='host.liveness'")
 
-    def observation(self, data, tasks=()):
+    @staticmethod
+    def _fresh(timestamp, now, *, seconds):
+        return isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) and now - timestamp <= seconds
+
+    @staticmethod
+    def _question(notifications, requirement_id, task_id):
+        return [row for row in notifications or ()
+                if row.get('kind') == 'question'
+                and row.get('requirement_id') == requirement_id
+                and row.get('task_id') == task_id]
+
+    def _blocked_wait(self, notifications, requirement_id, task_id):
+        questions = self._question(notifications, requirement_id, task_id)
+        if any(row.get('state') == 'sent' and row.get('answer') is None for row in questions):
+            return 'waiting', None
+        if any(row.get('state') in {'pending', 'sending', 'uncertain'} for row in questions):
+            return 'stalled', 'question_delivery_unconfirmed'
+        if any(row.get('answer') is not None for row in questions):
+            return 'stalled', 'question_answered_not_resumed'
+        return 'stalled', 'blocked_without_wait'
+
+    def health(self, data, tasks, notifications, now=None):
+        """One requirement health result: active, waiting_on_human, or stalled."""
+        now = self.clock() if now is None else now
+        tasks = list(tasks or ())
+        by_id = {task['id']: task for task in tasks}
+        linked = {}
+        for link in data['task_links']:
+            linked.setdefault(link['requirement_id'], []).append(by_id.get(link['task_id'], {'id': link['task_id']}))
+        wakes = self.call({'action': 'list'})
+        results = []
+        for requirement in (r for r in data['requirements'] if r['status'] == 'active'):
+            rid = requirement['id']
+            items = linked.get(rid, [])
+            timers = [{'kind': 'scheduled_wake', **wake} for wake in wakes
+                      if wake['requirement_id'] == rid and wake['state'] in {'scheduled', 'queued'}]
+            base = {'requirement_id': rid, 'tasks': [
+                {key: task[key] for key in ('id', 'status', 'last_heartbeat_at', 'blocked_reason',
+                                            'block_kind', 'block_recurrences') if key in task}
+                for task in items], 'timers': timers}
+            triage = [task for task in items if task.get('status') == 'triage']
+            if triage:
+                results.append({**base, 'state': 'stalled', 'reason': 'triage',
+                                'waiting_on': None, 'task_ids': [task['id'] for task in triage]})
+                continue
+            blocked = [task for task in items if task.get('status') == 'blocked']
+            blocked_health = [(task, *self._blocked_wait(notifications, rid, task['id'])) for task in blocked]
+            invalid_blocked = [item for item in blocked_health if item[1] == 'stalled']
+            if invalid_blocked:
+                task, _, reason = invalid_blocked[0]
+                results.append({**base, 'state': 'stalled', 'reason': reason,
+                                'waiting_on': None, 'task_ids': [item[0]['id'] for item in invalid_blocked]})
+                continue
+            running = [task for task in items if task.get('status') == 'running']
+            fresh = [task for task in running if self._fresh(task.get('last_heartbeat_at'), now,
+                                                              seconds=self.HEARTBEAT_STALE_SECONDS)]
+            if fresh:
+                results.append({**base, 'state': 'active', 'reason': 'running_heartbeat',
+                                'waiting_on': None, 'task_ids': [task['id'] for task in fresh]})
+                continue
+            if running:
+                results.append({**base, 'state': 'stalled', 'reason': 'stale_heartbeat',
+                                'waiting_on': None, 'task_ids': [task['id'] for task in running]})
+                continue
+            ready = [task for task in items if task.get('status') == 'ready']
+            if ready:
+                results.append({**base, 'state': 'active', 'reason': 'ready',
+                                'waiting_on': None, 'task_ids': [task['id'] for task in ready]})
+                continue
+            waiting = [(task, reason) for task, state, reason in blocked_health if state == 'waiting']
+            if waiting:
+                questions = [row for task, _ in waiting for row in self._question(notifications, rid, task['id'])]
+                results.append({**base, 'state': 'waiting_on_human', 'reason': 'blocked_waiting_human',
+                                'waiting_on': {'question_ids': [row['id'] for row in questions]},
+                                'task_ids': [task['id'] for task, _ in waiting]})
+                continue
+            done = [task for task in items if task.get('status') == 'done']
+            if items and len(done) == len(items):
+                results.append({**base, 'state': 'stalled', 'reason': 'acceptance_pending',
+                                'waiting_on': None, 'task_ids': [task['id'] for task in done]})
+                continue
+            reason = 'no_work' if not items else 'no_active_task'
+            results.append({**base, 'state': 'stalled', 'reason': reason,
+                            'waiting_on': None, 'task_ids': []})
+        return results
+
+    def sync_health(self, data, tasks, notifications):
+        """Publish one host.stalled condition event per active requirement."""
+        states = self.health(data, tasks, notifications)
+        stalled = {item['requirement_id'] for item in states if item['state'] == 'stalled'}
+        with self.store._transaction() as db:
+            for rid in stalled:
+                event = self.store._add_event(db, 'host.stalled', {'requirement_id': rid}, 'stalled:' + rid)
+                db.execute('UPDATE events SET acknowledged=0 WHERE id=?', (event['id'],))
+            for row in db.execute("SELECT id, source_key FROM events "
+                                  "WHERE kind='host.stalled' AND acknowledged=0").fetchall():
+                if row['source_key'] not in {'stalled:' + rid for rid in stalled}:
+                    db.execute('UPDATE events SET acknowledged=1 WHERE id=?', (row['id'],))
+
+    def observation(self, data, tasks=(), notifications=None):
         wakes = self.call({'action': 'list'})
         with self.store._transaction() as db:
             state = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
         active = [r for r in data['requirements'] if r['status'] == 'active']
         anchor = max(state['active_since'] if state['active_since'] is not None else self.clock(), state['last_started'] or 0)
         deadline = anchor + self.INTERVAL if active else None
-        progression = []
-        by_id = {t['id']: t for t in tasks}
-        for req in active:
-            rid = req['id']
-            sources = [{'kind': 'scheduled_wake', **w} for w in wakes if w['requirement_id'] == rid and w['state'] in {'scheduled', 'queued'}]
-            sources += [{'kind': 'native_task', 'task_id': l['task_id'], 'status': by_id[l['task_id']]['status']} for l in data['task_links'] if l['requirement_id'] == rid and l['task_id'] in by_id and by_id[l['task_id']].get('status') in {'ready', 'running', 'todo'}]
-            sources += [{'kind': 'pending_event', 'event_id': e['id']} for e in data['pending_events'] if e['payload'].get('requirement_id') == rid]
-            progression.append({'requirement_id': rid, 'sources': sources, 'warning': None if sources else 'Missing explicit progression source; schedule a justified wake or arrange a real event source. Liveness insurance is not a plan.'})
+        if tasks is None:
+            progression = [{'requirement_id': req['id'], 'state': 'unknown', 'reason': 'board_unavailable',
+                            'waiting_on': None, 'task_ids': [],
+                            'timers': [{'kind': 'scheduled_wake', **wake} for wake in wakes
+                                       if wake['requirement_id'] == req['id'] and wake['state'] in {'scheduled', 'queued'}]}
+                           for req in active]
+        else:
+            progression = self.health(data, tasks, notifications)
         return {'scheduled_wakes': wakes, 'progression': progression, 'liveness': {**state, 'due_at': deadline, 'overdue': deadline is not None and self.clock() >= deadline}}

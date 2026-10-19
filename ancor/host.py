@@ -80,6 +80,8 @@ class Host:
     def scan(self):
         self.scheduling.scan()
         snapshot = self.store.snapshot()
+        from .notification import NotificationOutbox
+        notifications = NotificationOutbox.read_existing(self.store.path + '.notifications.db')
         known = {r['id']: r for r in snapshot['requirements']}
         # Invalidation is a durable coordination event, not an automatic stop.
         # Only the coordinator decides whether affected native tasks should be blocked.
@@ -95,6 +97,7 @@ class Host:
                 self.store.link_task(link['requirement_id'], task['id'])
                 tracked.add(task['id'])
         if not tracked:
+            self.scheduling.sync_health(snapshot, self.tasks, notifications)
             return
         if self.db_path is None:
             from hermes_cli.kanban_db import kanban_db_path
@@ -132,13 +135,15 @@ class Host:
                 cursors[task_id] = event['id']
             if events:
                 self.save(state)
+        self.scheduling.sync_health(self.store.snapshot(), self.tasks, notifications)
 
     def pending(self, limit):
         if self.startup:
             # Runs under the SAME inherited coordinator flock, after discovery.
             # A pending inbox already wakes the coordinator with this current snapshot.
             data = self.snapshot()
-            if (data['requirements'] or data['notifications'] or data['invalidated_tasks']) and not self.store.pending_events():
+            pending = [e for e in self.store.pending_events() if e['kind'] != 'host.stalled']
+            if (data['requirements'] or data['notifications'] or data['invalidated_tasks']) and not pending:
                 self.store.add_event('host.recovery', {
                     'reason': 'Reconcile durable state after host startup; inspect current context. '
                               'Reuse task keys and notification IDs; never resend sending/uncertain notices. '
@@ -148,20 +153,23 @@ class Host:
         # Reserve one slot for newest input: a full unchanged head batch must
         # not hide human replies/completions behind its hour-long cooldown.
         events = pending[:limit] if len(pending) <= limit else pending[:limit - 1] + pending[-1:]
-        # Reserve a slot for overdue insurance even behind a large input backlog.
-        overdue = next((e for e in pending if e['kind'] == 'host.liveness'), None)
-        if overdue and overdue not in events:
-            events = events[:limit - 1] + [overdue]
+        # Reserve slots for the two host-owned conditions even behind a large
+        # input backlog: stalled work is more important than ordinary events.
+        reserved = [e for kind in ('host.stalled', 'host.liveness')
+                    for e in [next((row for row in pending if row['kind'] == kind), None)] if e]
+        missing = [event for event in reserved if event not in events]
+        if missing:
+            events = events[:max(0, limit - len(missing))] + missing
+            events = events[:limit]
         if not events:
             return []
         signature = hashlib.sha256(json.dumps([e['id'] for e in events]).encode()).hexdigest()
         state = self.state()
         if state.get('batch') != signature:
             state.update(batch=signature, attempts=0, retry_at=0)
-        insurance = any(e['kind'] == 'host.liveness' for e in events)
-        if not insurance and self.clock() < state.get('retry_at', 0):
+        if self.clock() < state.get('retry_at', 0):
             return []
-        if not insurance and state.get('attempts', 0) >= 3:
+        if state.get('attempts', 0) >= 3:
             log.error('ANCOR unchanged pending batch exhausted three attempts; retry in one hour')
             state.update(attempts=0, retry_at=self.clock() + 3600)
             self.save(state)
@@ -215,14 +223,16 @@ class Host:
         requirements = [r for r in data['requirements'] if r['status'] == 'active' or
                         (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)]
         relevant = {r['id'] for r in requirements}
-        return {**self.scheduling.observation(data, self.tasks), 'requirements': requirements,
+        return {**self.scheduling.observation(data, self.tasks, notifications), 'requirements': requirements,
                 'invalidated_tasks': self.invalidated_tasks(data),
                 'acceptances': [e for e in self.store.acceptances()
                                 if e['payload']['requirement_id'] in relevant],
                 'notifications': [n for n in notifications if n['state'] != 'sent' or
                                   (n['kind'] == 'question' and n['answer'] is None)],
                 'task_links': data['task_links'],
-                'board': [{k: t[k] for k in ('id', 'title', 'status', 'assignee', 'blocked_reason') if k in t}
+                'board': [{k: t[k] for k in ('id', 'title', 'status', 'assignee', 'blocked_reason',
+                                             'last_heartbeat_at', 'block_kind', 'block_recurrences',
+                                             'created_at', 'started_at') if k in t}
                           for t in self.tasks]}
 
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +36,10 @@ class Board:
 
     def events(self, db_path, task_ids, *, after=0, limit=100):
         return [e for e in self.history if e['id'] > after and e['task_id'] in task_ids][:limit]
+
+
+def pending_native(store):
+    return [e for e in store.pending_events() if e['kind'].startswith('native.')]
 
 
 @pytest.mark.parametrize('kind', [
@@ -76,16 +81,16 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     assert store.pending_events()  # successful exit is NOT an ack
     restarted = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
     restarted.scan()
-    assert len(store.pending_events()) == 1
+    assert len(pending_native(store)) == 1
     assert restarted.state()['task_cursors'] == {'t1': 17}
     # Replay the durable inbox write after a crash before cursor persistence.
     restarted.save({'task_cursors': {}})
     restarted.scan()
-    assert len(store.pending_events()) == 1
+    assert len(pending_native(store)) == 1
     store.ack_events([e['id'] for e in store.pending_events()])
     restarted.save({'task_cursors': {}})
     restarted.scan()
-    assert not store.pending_events()  # replay must not resurrect handled work
+    assert not pending_native(store)  # replay must not resurrect handled work
     assert board.guards == []
 
 
@@ -233,18 +238,20 @@ def test_per_task_cursors_preserve_racing_and_newly_discovered_history(tmp_path)
     board.events = events
     host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
     host.scan()
-    assert {e['payload']['id'] for e in store.pending_events()} == {100, 102}
+    native_ids = lambda: {e['payload']['id'] for e in pending_native(store)}
+    assert native_ids() == {100, 102}
     host.scan()
-    assert {e['payload']['id'] for e in store.pending_events()} == {100, 101, 102}
+    assert native_ids() == {100, 101, 102}
     store.link_task(req['id'], 'new')
     board.history.append({'id': 2, 'task_id': 'new', 'kind': 'blocked'})
     Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db').scan()
-    assert {e['payload']['id'] for e in store.pending_events()} == {2, 100, 101, 102}
+    assert native_ids() == {2, 100, 101, 102}
 
 
 def test_bookkeeping_events_do_not_self_wake(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     board = Board()
+    board.tasks = [{'id': 'a', 'status': 'running', 'last_heartbeat_at': time.time()}]
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
     req = host.store.confirm(host.store.create_draft('x', 'y')['id'], 'human')
     host.store.link_task(req['id'], 'a')
@@ -259,7 +266,7 @@ def test_bookkeeping_events_do_not_self_wake(tmp_path):
     host.board.history = [{'id': i, 'task_id': 'a', 'kind': kind}
                           for i, kind in enumerate(kinds, 1)]
     host.scan()
-    assert [e['kind'] for e in host.store.pending_events()] == [
+    assert [e['kind'] for e in pending_native(host.store)] == [
         'native.' + k for k in actionable]
     assert host.state()['task_cursors']['a'] == len(kinds)
     host.store.ack_events([e['id'] for e in host.store.pending_events()])
@@ -275,7 +282,7 @@ def test_bookkeeping_events_do_not_self_wake(tmp_path):
     host.store.ack_events([e['id'] for e in recovery])
     assert asyncio.run(restarted.coordinator.tick()) == 'idle'
     assert restarted.state()['task_cursors']['a'] == len(kinds) + len(ignored)
-    assert not host.store.pending_events()
+    assert not pending_native(host.store)
 
 
 def test_scan_ingests_despite_individual_read_failure(tmp_path):
@@ -295,7 +302,7 @@ def test_scan_ingests_despite_individual_read_failure(tmp_path):
     board.events = events
     board.history = [{'id': 8, 'task_id': 'good', 'kind': 'blocked'}]
     host.scan()
-    assert [e['payload']['id'] for e in host.store.pending_events()] == [8]
+    assert [e['payload']['id'] for e in pending_native(host.store)] == [8]
     assert host.state()['task_cursors'] == {'good': 8}
     assert board.guards == []
 

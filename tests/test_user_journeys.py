@@ -275,7 +275,8 @@ def journey_blocker(j):
     j.call('board', action='unblock', task_id=tid, reason='Source resolved by coordinator')
     j.claim(tid)
     j.worker(tid, 'block', 'Human must choose report label', '--kind', 'needs_input')
-    j.call('notify', action='send', id='label-question', kind='question', message='Use label Quarterly?')
+    j.call('notify', action='send', id='label-question', kind='question', message='Use label Quarterly?',
+           requirement_id=req['id'], task_id=tid)
     answer = 'Yes, use Quarterly. Do not deploy.'
     from ancor.notification import NotificationOutbox
     response = NotificationOutbox(j.store.path + '.notifications.db', coordinator_profile='ancor-coordinator',

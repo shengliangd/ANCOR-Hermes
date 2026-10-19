@@ -65,7 +65,12 @@ class NotificationOutbox:
             db.execute('''CREATE TABLE IF NOT EXISTS human_notifications (
                 id TEXT PRIMARY KEY, kind TEXT NOT NULL, message TEXT NOT NULL,
                 target TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT,
-                error TEXT, answer TEXT, answer_reference TEXT)''')
+                error TEXT, answer TEXT, answer_reference TEXT,
+                requirement_id TEXT, task_id TEXT)''')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(human_notifications)')}
+            for column in ('requirement_id', 'task_id'):
+                if column not in columns:
+                    db.execute(f'ALTER TABLE human_notifications ADD COLUMN {column} TEXT')
 
     @contextmanager
     def _db(self):
@@ -117,7 +122,7 @@ class NotificationOutbox:
         finally:
             db.close()
 
-    def enqueue(self, identifier, kind, message, *, actor):
+    def enqueue(self, identifier, kind, message, *, actor, requirement_id=None, task_id=None):
         self._coordinator(actor)
         if kind not in ('question', 'completion'):
             raise ValueError('only questions and completion notices are supported')
@@ -127,10 +132,13 @@ class NotificationOutbox:
         if 'MEDIA:' in message:
             raise ValueError('notifications are text-only; MEDIA markers forbidden')
         with self._db() as db:
-            db.execute('INSERT OR IGNORE INTO human_notifications VALUES (?,?,?,?,?,NULL,NULL,NULL,NULL)',
-                       (identifier, kind, message, self.target, 'pending'))
+            db.execute('INSERT OR IGNORE INTO human_notifications '
+                       '(id, kind, message, target, state, requirement_id, task_id) '
+                       'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                       (identifier, kind, message, self.target, 'pending', requirement_id, task_id))
             row = self._row(db, identifier)
-            if (row['kind'], row['message'], row['target']) != (kind, message, self.target):
+            if (row['kind'], row['message'], row['target'], row['requirement_id'], row['task_id']) != (
+                    kind, message, self.target, requirement_id, task_id):
                 raise ValueError('notification identifier already has different content')
         return self.get(identifier)
 
