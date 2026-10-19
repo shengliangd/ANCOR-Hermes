@@ -3,6 +3,44 @@ from .board import NativeBoard
 from .service import Service
 
 
+def build_work_contract(*, objective, scope, task, inputs=(), dependencies=(),
+                        constraints=(), artifacts=(), verification=(),
+                        stop_conditions=(), report=()):
+    """Render a self-contained English contract for one bounded worker task."""
+    def bullets(values):
+        return '\n'.join(f'- {value}' for value in values) or '- None specified'
+
+    return f'''<work_contract>
+<identity>
+You are the execution owner for this bounded task. Produce an inspectable result
+within this contract; do not silently expand scope or authorization.
+</identity>
+<objective>{objective}</objective>
+<scope>{scope}\nTask: {task}</scope>
+<inputs>
+{bullets(inputs)}
+</inputs>
+<dependencies>
+{bullets(dependencies)}
+</dependencies>
+<constraints>
+{bullets(constraints)}
+</constraints>
+<expected_artifacts>
+{bullets(artifacts)}
+</expected_artifacts>
+<verification>
+{bullets(verification)}
+</verification>
+<stop_conditions>
+{bullets(stop_conditions)}
+</stop_conditions>
+<report>
+{bullets(report)}
+</report>
+</work_contract>'''
+
+
 class Operations:
     def __init__(self, ctx, store=None, board=None):
         self.ctx = ctx
@@ -80,8 +118,19 @@ class Operations:
                 if store.get_requirement(linked[parent])['status'] != 'active':
                     raise ValueError('parent requirement is not active')
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
+            body = build_work_contract(
+                objective=req['brief'], scope=req['brief'], task=args['body'],
+                constraints=[req['acceptance_criteria'],
+                              'Do not change authorization or requirement version.'],
+                artifacts=['Return actual artifacts and their exact locations.'],
+                verification=['Verify the result against the acceptance criteria.',
+                               'Report checks performed and any remaining limitations.'],
+                stop_conditions=['A required input is missing or the current state conflicts with this contract.',
+                                 'Verification fails and no bounded repair is available.',
+                                 'Execution would exceed scope or require new authorization.'],
+                report=['Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
             task = self.board.create(req['id'], 1, args['key'], title=args['title'],
-                                     body=req['brief'] + '\nAcceptance criteria:\n' + req['acceptance_criteria'] + '\nTask:\n' + args['body'],
+                                     body=body,
                                      assignee=worker_profile, parent_ids=parent_ids, hold=hold)
             actual = self.detail(task['id'])
             if actual['task']['assignee'] != worker_profile:
@@ -134,9 +183,18 @@ class Operations:
                 metadata = self.board.link(detail['task'])
                 if not metadata or metadata['requirement_id'] != req['id'] or metadata['revision'] != 1:
                     raise ValueError('native task association mismatch')
-                fields['body'] = (detail['task']['body'].split('\n', 1)[0] + '\n' + req['brief']
-                                  + '\nAcceptance criteria:\n' + req['acceptance_criteria']
-                                  + '\nTask:\n' + fields['body'])
+                link_line = detail['task']['body'].split('\n', 1)[0]
+                fields['body'] = link_line + '\n' + build_work_contract(
+                    objective=req['brief'], scope=req['brief'], task=fields['body'],
+                    constraints=[req['acceptance_criteria'],
+                                  'Do not change authorization or requirement version.'],
+                    artifacts=['Return actual artifacts and their exact locations.'],
+                    verification=['Verify the result against the acceptance criteria.',
+                                   'Report checks performed and any remaining limitations.'],
+                    stop_conditions=['A required input is missing or the current state conflicts with this contract.',
+                                     'Verification fails and no bounded repair is available.',
+                                     'Execution would exceed scope or require new authorization.'],
+                    report=['Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
             return self.board.edit(tid, **fields)
         text = None
         if action == 'block':

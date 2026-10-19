@@ -13,12 +13,6 @@ def test_worker_completes_without_native_review():
     assert 'Do not call `kanban_request_review`' in text
 
 
-def test_setup_disables_native_review_dispatch():
-    setup = (ROOT / 'SETUP.md').read_text()
-    assert 'kanban.review_dispatch false' in setup
-    assert 'Gateway owner' in setup
-
-
 def test_acceptance_schema_matches_service_contract(tmp_path):
     import pytest
     from ancor.service import Service

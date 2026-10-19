@@ -211,7 +211,7 @@ def test_edit_keeps_requirement_context_and_association(setup):
     edited = op.call(args)['task']
     assert edited['title'] == 'Refined' and edited['priority'] == 0
     assert NativeBoard.link(edited) == NativeBoard.link(task)
-    assert edited['body'].endswith('Task:\nNew task details')
+    assert 'Task: New task details' in edited['body']
     assert req['brief'] in edited['body'] and req['acceptance_criteria'] in edited['body']
     assert edited['assignee'] == 'ancor-worker'
     store.accept(req['id'], 'evidence')
