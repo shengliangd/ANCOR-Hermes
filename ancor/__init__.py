@@ -183,12 +183,29 @@ def register(ctx, *, scan_runner=None):
                              'reason': {'type': 'string'}}, ['requirement_id', 'action']),
     }
     if worker:
-        definitions = {'ancor_get_context': ('Read the global requirement snapshot without acknowledging events.', {}, [])}
+        # Workers use native Kanban's task-scoped tools.  The global ANCOR
+        # snapshot would expose unrelated requirements and pending events.
+        definitions = {}
     elif interactor:
+        definitions['ancor_requirement'] = (*definitions['ancor_requirement'][:1],
+            {**definitions['ancor_requirement'][1],
+             'action': {'type': 'string', 'enum': ['draft', 'confirm', 'respond']}},
+            definitions['ancor_requirement'][2])
+        definitions['ancor_notify'] = (*definitions['ancor_notify'][:1],
+            {**definitions['ancor_notify'][1],
+             'action': {'type': 'string', 'enum': ['list', 'respond']}},
+            definitions['ancor_notify'][2])
         definitions = {name: value for name, value in definitions.items()
                        if name in {'ancor_requirement', 'ancor_get_context', 'ancor_notify'}}
     elif coordinator:
-        pass
+        definitions['ancor_requirement'] = (*definitions['ancor_requirement'][:1],
+            {**definitions['ancor_requirement'][1],
+             'action': {'type': 'string', 'enum': ['cancel', 'replace', 'link']}},
+            definitions['ancor_requirement'][2])
+        definitions['ancor_notify'] = (*definitions['ancor_notify'][:1],
+            {**definitions['ancor_notify'][1],
+             'action': {'type': 'string', 'enum': ['send', 'list']}},
+            definitions['ancor_notify'][2])
     coordination_observed = False
     for name, (description, properties, required) in definitions.items():
         method = methods[name.removeprefix('ancor_')]

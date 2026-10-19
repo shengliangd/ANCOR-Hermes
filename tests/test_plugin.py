@@ -124,7 +124,7 @@ print('native agent clarify pre/post integration passed')
 def test_only_ancor_roles_have_business_tools():
     plugin = importlib.import_module('ancor')
     assert callable(getattr(plugin, 'register', None)), 'plugin registration missing'
-    for role, expected in [('ancor-interactor', True), ('ancor-coordinator', True), ('ancor-worker', True), ('default', False)]:
+    for role, expected in [('ancor-interactor', True), ('ancor-coordinator', True), ('ancor-worker', False), ('default', False)]:
         tools = {}
         ctx = SimpleNamespace(profile_name=role, get_config=lambda key, default=None: default,
                               register_tool=lambda **kw: tools.update({kw['name']: kw}),
@@ -134,11 +134,14 @@ def test_only_ancor_roles_have_business_tools():
         assert bool(tools) is expected
         if role == 'ancor-interactor':
             assert set(tools) == {'ancor_requirement', 'ancor_get_context', 'ancor_notify'}
+            assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['draft', 'confirm', 'respond']
+            assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['list', 'respond']
         elif role == 'ancor-coordinator':
             assert {'ancor_requirement', 'ancor_get_context', 'ancor_acceptance', 'ancor_board', 'ancor_wake', 'ancor_notify'} <= tools.keys()
+            assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['cancel', 'replace', 'link']
+            assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list']
         elif role == 'ancor-worker':
-            assert set(tools) == {'ancor_get_context'}
-            assert 'error' in json.loads(tools['ancor_get_context']['handler']({'ack_event_ids': [1]}))
+            assert not tools
 
 
 def confirmation(tmp_path):
