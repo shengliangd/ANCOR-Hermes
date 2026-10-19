@@ -16,8 +16,8 @@ def test_installed_native_cli_roundtrip_isolated(tmp_path):
     import site
     paths = [str(source), site.getusersitepackages(), *site.getsitepackages()]
     env = {'PATH': os.environ['PATH'], 'HOME': str(home), 'HERMES_HOME': str(home / '.hermes'), 'PYTHONPATH': os.pathsep.join(paths)}
-    # Preserve native delegated/task mutation fences, including in test children.
-    env.update({k: v for k, v in os.environ.items() if k.startswith(('HERMES_DELEGAT', 'HERMES_KANBAN_'))})
+    # This is an authorized isolated native probe. Do not inherit the parent
+    # agent's delegated-child mutation fences into the probe process.
     script = 'import argparse,sys; from hermes_cli.kanban_parser import build_parser; from hermes_cli.kanban import kanban_command; p=argparse.ArgumentParser(); build_parser(p.add_subparsers()); sys.exit(kanban_command(p.parse_args(sys.argv[1:])))'
     probe = subprocess.run([str(source / '.venv/bin/python'), '-c', 'from hermes_cli.kanban import kanban_command'], env=env, capture_output=True, text=True)
     if probe.returncode and 'ModuleNotFoundError' in probe.stderr:
