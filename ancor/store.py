@@ -187,7 +187,8 @@ class Store:
                             {'requirement_id': requirement_id, 'evidence': evidence})
             return self._get(db, 'requirements', requirement_id)
 
-    def cancel_many(self, requirement_ids, reason):
+    def cancel(self, requirement_ids, reason):
+        """Cancel one or more active requirements atomically."""
         self._text(reason)
         ids = list(dict.fromkeys(requirement_ids))
         if not ids or any(not isinstance(i, str) or not i.strip() for i in ids):
@@ -211,18 +212,6 @@ class Store:
                             {'requirement_id': requirement_id, 'reason': reason})
             return requirement
 
-    def cancel(self, requirement_id, reason):
-        """Cancel an active requirement and emit a durable coordinator input."""
-        self._text(reason)
-        with self._transaction() as db:
-            requirement = self._get(db, 'requirements', requirement_id)
-            if requirement['status'] != 'active':
-                raise ValueError('requirement is not active')
-            db.execute("UPDATE requirements SET status = 'cancelled' WHERE id = ?",
-                       (requirement_id,))
-            self._add_event(db, 'requirement.cancelled',
-                            {'requirement_id': requirement_id, 'reason': reason})
-            return self._get(db, 'requirements', requirement_id)
 
     def associate_task(self, task_id, requirement_id, reason):
         self._text(task_id); self._text(reason)

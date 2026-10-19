@@ -128,17 +128,23 @@ class StoreTests(unittest.TestCase):
 
     def test_cancel_is_durable_and_only_active_requirements_can_cancel(self):
         requirement = self.store.confirm(self.store.create_draft('brief', 'criteria')['id'], 'ref')
-        result = self.store.cancel(requirement['id'], 'user withdrew the request')
-        self.assertEqual(result['status'], 'cancelled')
+        result = self.store.cancel([requirement['id']], 'user withdrew the request')
+        self.assertEqual(result[0]['status'], 'cancelled')
         self.assertEqual(self.store.pending_events()[-1]['kind'], 'requirement.cancelled')
         self.assertEqual(self.store.pending_events()[-1]['payload']['reason'], 'user withdrew the request')
         with self.assertRaises(ValueError):
-            self.store.cancel(requirement['id'], 'duplicate cancellation')
+            self.store.cancel([requirement['id']], 'duplicate cancellation')
+
+    def test_cancel_accepts_one_id_and_returns_one_requirement(self):
+        requirement = self.store.confirm(self.store.create_draft('brief', 'criteria')['id'], 'ref')
+        result = self.store.cancel([requirement['id']], 'withdrawn')
+        self.assertEqual(result[0]['id'], requirement['id'])
+        self.assertEqual(result[0]['status'], 'cancelled')
 
     def test_batch_cancel_and_replacement(self):
         first = self.store.confirm(self.store.create_draft('one', 'criteria')['id'], 'ref1')
         second = self.store.confirm(self.store.create_draft('two', 'criteria')['id'], 'ref2')
-        cancelled = self.store.cancel_many([first['id'], second['id']], 'withdrawn together')
+        cancelled = self.store.cancel([first['id'], second['id']], 'withdrawn together')
         self.assertEqual([r['status'] for r in cancelled], ['cancelled', 'cancelled'])
         a = self.store.confirm(self.store.create_draft('a', 'criteria')['id'], 'ref3')
         b = self.store.confirm(self.store.create_draft('b', 'criteria')['id'], 'ref4')

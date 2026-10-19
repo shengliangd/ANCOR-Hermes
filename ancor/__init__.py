@@ -152,8 +152,8 @@ def register(ctx, *, scan_runner=None):
                           'kind': {'type': 'string', 'enum': ['question', 'completion']},
                           'message': {'type': 'string'}, 'answer': {'type': 'string'},
                           'requirement_id': {'type': 'string'}}, ['action']),
-        'ancor_requirement': ('Prepare an immutable draft and exact native clarify_args. Call native clarify separately; only its submitted exact confirmation activates the requirement. respond records the exact human reply in body as advisory interactor transcription, never new authorization.',
-                              {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'link', 'cancel', 'cancel_many', 'replace_many', 'respond']},
+        'ancor_requirement': ('Prepare an immutable draft and exact native clarify_args. Call native clarify separately; only its submitted exact confirmation activates the requirement. cancel and replace accept one or more requirement_ids atomically; respond records the exact human reply as advisory input, never new authorization.',
+                              {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'link', 'cancel', 'replace', 'respond']},
                                'body': {'type': 'string'},
                                'brief': {'type': 'string'}, 'acceptance_criteria': {'type': 'string'},
                                'replacement_of': {'type': 'string'}, 'draft_id': {'type': 'string'},
@@ -206,7 +206,7 @@ def register(ctx, *, scan_runner=None):
                             or (_name == 'ancor_wake' and args.get('action') != 'list')
                             or (_name == 'ancor_notify' and args.get('action') == 'send')
                             or (_name == 'ancor_board' and args.get('action') not in {'list', 'show'})
-                            or (_name == 'ancor_requirement' and args.get('action') in {'link', 'cancel'})
+                            or (_name == 'ancor_requirement' and args.get('action') in {'link', 'cancel', 'replace'})
                             or (_name == 'ancor_get_context' and bool(args.get('ack_event_ids'))))
                 # Cooperation marker, not a shell/process security sandbox.
                 if mutation and not coordinator:
