@@ -18,8 +18,9 @@ installed `hermes plugins install --help` before provisioning. The source form i
 file:///absolute/path/to/ANCOR-Hermes-native-config#ancor
 ```
 
-Install each role's `SOUL.md` in its profile home and the complete
-skills/ancor-coordination directory in the coordinator profile. Preserve unrelated
+Install each role's `SOUL.md` in its profile home, the complete
+`skills/ancor-coordination` directory in the coordinator profile, and the complete
+`skills/ancor-interactor` directory in the interactor profile. Preserve unrelated
 configuration, memory and routes. The worker instructions use read-only requirement
 context and safe checkpoints to stop obsolete work; this is cooperative behavior,
 not process isolation.

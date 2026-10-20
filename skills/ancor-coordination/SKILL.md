@@ -95,8 +95,9 @@ an overlapping coordinator. No active requirements means no periodic insurance c
 
 Use `ancor_notify` with a stable ID for questions and `accept:<requirement_id>`
 for accepted completion. A question must name both its active `requirement_id` and
-the linked `task_id`; keep that task blocked while the question is open. On a user's
-reply, use its `respond` action to preserve the answer and enqueue coordination.
+the linked `task_id`; keep that task blocked while the question is open. Human replies
+are transcribed by the interactor and arrive as `notification.response`; consume that
+durable event rather than waiting for or inferring an answer from chat or task comments.
 Use the configured native user destination, never raw task-event subscriptions.
 Open each notification with its purpose: “需要你提供信息”, “需要你授权”,
 “需要你决定”, or “完成了一项需求”, followed by the requirement's short name.

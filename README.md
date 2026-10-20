@@ -25,7 +25,8 @@ The interactor prepares and confirms requirements, then stops. It does not inspe
 - `ancor/host.py`: Gateway-owned event reconciliation and bounded retries.
 - `ancor/board.py`: native Kanban adapter; no native SQL writes.
 - `ancor/service.py`: requirement and user-response tools.
-- `roles/`: profile identities; `skills/ancor-coordination/`: coordinator procedure.
+- `roles/`: profile identities; `skills/ancor-coordination/`: coordinator procedure;
+  `skills/ancor-interactor/`: interactor procedure for handing human replies back to ANCOR.
 
 Native Hermes owns worker dispatch and task lifecycle. The plugin owns requirement semantics and coordination admission. Idle polling uses no model tokens. Events are batched; unchanged unprocessed batches have a retry budget rather than a hot model loop.
 
