@@ -58,6 +58,9 @@ waiting alone is not a reason for repeated coordination turns.
 Record useful decisions on tasks, then acknowledge only the supplied event IDs
 that have been handled. New events remain pending. An unresolved human question
 should be durable and explicit, not a reason to spin or repeatedly send it.
+Acknowledging a blocked event does not require a delivered question; delivery
+uncertainty remains visible as stalled health. Re-ask with a new notification ID
+only after confirming it is safe.
 
 ## Waiting and liveness
 

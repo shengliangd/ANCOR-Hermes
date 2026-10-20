@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import ancor
 from ancor.host import Host
-from ancor.notification import NotificationOutbox
+from ancor.notification import NotificationOutbox, SenderError
 from ancor.runtime import Coordinator
 from ancor.scheduling import Scheduling
 from ancor.store import Store
@@ -76,24 +76,49 @@ def test_ack_rejects_triage_and_host_stalled(tmp_path, monkeypatch):
     assert not [e for e in store.pending_events() if e['kind'] == 'host.stalled']
 
 
-def test_ack_requires_open_question_for_blocked_task(tmp_path, monkeypatch):
+def test_ack_does_not_depend_on_question_delivery(tmp_path, monkeypatch):
+    ctx, tools, store, req = registered(tmp_path, monkeypatch)
+    call = lambda name, args: json.loads(tools[name]['handler'](args))
+    tasks = [{'id': 'task', 'status': 'blocked'}]
+    monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: tasks)
+    blocked = store.add_event('native.blocked', {'task_id': 'task'},
+                              source_key='native:test:blocked')
+    assert 'error' not in call('ancor_get_context', {'ack_event_ids': [blocked['id']]})
+    context = call('ancor_get_context', {})
+    assert context['progression'][0]['state'] == 'stalled'
+    assert context['progression'][0]['reason'] == 'blocked_without_wait'
+
+    def timeout(*args):
+        raise SenderError('timeout', 'hermes')
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination',
+                             sender=timeout)
+    box.enqueue('label-question', 'question', 'Which label?', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='task')
+    assert box.deliver('label-question', actor='ancor-coordinator')['state'] == 'uncertain'
+
+    blocked_again = store.add_event('native.blocked', {'task_id': 'task'},
+                                    source_key='native:test:blocked-again')
+    assert 'error' not in call('ancor_get_context', {'ack_event_ids': [blocked_again['id']]})
+    context = call('ancor_get_context', {})
+    assert context['progression'][0]['state'] == 'stalled'
+    assert context['progression'][0]['reason'] == 'question_delivery_unconfirmed'
+    Scheduling(store).sync_health(store.snapshot(), tasks, context['notifications'])
+    assert any(e['kind'] == 'host.stalled' for e in store.pending_events())
+
+
+def test_ack_allows_blocked_task_from_invalidated_requirement(tmp_path, monkeypatch):
     ctx, tools, store, req = registered(tmp_path, monkeypatch)
     call = lambda name, args: json.loads(tools[name]['handler'](args))
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [
         {'id': 'task', 'status': 'blocked'}])
+    replacement = store.confirm(store.create_draft('replacement', 'verified', req['id'])['id'], 'fixture')
+    assert replacement['status'] == 'active'
+    assert store.get_requirement(req['id'])['status'] == 'invalidated'
     blocked = store.add_event('native.blocked', {'task_id': 'task'},
-                              source_key='native:test:blocked')
-    assert 'without an open question' in call(
-        'ancor_get_context', {'ack_event_ids': [blocked['id']]})['error']
-    box = NotificationOutbox(store.path + '.notifications.db',
-                             coordinator_profile='ancor-coordinator',
-                             target='test:destination',
-                             sender=lambda *args: {'success': True})
-    box.enqueue('label-question', 'question', 'Which label?', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='task')
-    box.deliver('label-question', actor='ancor-coordinator')
+                              source_key='native:test:obsolete')
     assert 'error' not in call('ancor_get_context', {'ack_event_ids': [blocked['id']]})
-    assert blocked['id'] not in [e['id'] for e in store.pending_events()]
 
 
 def test_failed_cli_never_counts_as_coordination(tmp_path):

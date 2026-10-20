@@ -61,12 +61,9 @@ def register(ctx, *, scan_runner=None):
         from .scheduling import Scheduling
         return Scheduling(service.store).call(args)
 
-    def validate_acks(event_ids, snapshot, tasks, rows):
+    def validate_acks(event_ids, snapshot, tasks):
         pending = {event['id']: event for event in snapshot['pending_events']}
         task_by_id = {task['id']: task for task in tasks or ()}
-        links = {}
-        for link in snapshot['task_links']:
-            links.setdefault(link['task_id'], set()).add(link['requirement_id'])
         for identifier in event_ids:
             event = pending.get(identifier)
             if event is None:
@@ -78,14 +75,6 @@ def register(ctx, *, scan_runner=None):
             task = task_by_id.get(task_id, {})
             if event['kind'] == 'native.block_loop_detected' and task.get('status') == 'triage':
                 raise ValueError(f'event {identifier} cannot be acknowledged while {task_id} is in triage')
-            if event['kind'] == 'native.blocked' and task.get('status') == 'blocked':
-                requirements = links.get(task_id, set())
-                waiting = any(row.get('kind') == 'question' and row.get('state') == 'sent'
-                              and row.get('answer') is None and row.get('task_id') == task_id
-                              and row.get('requirement_id') in requirements
-                              for row in rows or ())
-                if not waiting:
-                    raise ValueError(f'event {identifier} cannot be acknowledged while {task_id} is blocked without an open question')
 
     def get_context(args):
         try:
@@ -99,7 +88,7 @@ def register(ctx, *, scan_runner=None):
             except Exception as exc:
                 extra['board_error'] = str(exc)
         if coordinator and args.get('ack_event_ids'):
-            validate_acks(args['ack_event_ids'], service.store.snapshot(), tasks, extra['notifications'])
+            validate_acks(args['ack_event_ids'], service.store.snapshot(), tasks)
         from .scheduling import Scheduling
         data = service.get_context(args)
         return {**data, **Scheduling(service.store).observation(data, tasks, extra['notifications']), **extra}
