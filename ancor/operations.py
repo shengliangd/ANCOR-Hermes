@@ -175,8 +175,9 @@ class Operations:
             if req['status'] != 'active':
                 raise ValueError('requirement is not active')
             contract = self._contract(args.get('contract'))
-            for field in ('key', 'title', 'body'):
+            for field in ('key', 'title'):
                 store._text(args[field])
+            task_text = store._text(args.get('body') or contract['objective'])
             parent_ids, hold = args.get('parent_ids', []), args.get('hold', False)
             if not isinstance(parent_ids, list) or any(not isinstance(p, str) or not p.strip() for p in parent_ids):
                 raise ValueError('parent_ids must be a list of task IDs')
@@ -190,7 +191,7 @@ class Operations:
                     raise ValueError('parent requirement is not active')
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
             body = build_work_contract(
-                objective=contract['objective'], scope=contract['scope'], task=args['body'],
+                objective=contract['objective'], scope=contract['scope'], task=task_text,
                 inputs=contract['inputs'], dependencies=contract['dependencies'],
                 constraints=list(dict.fromkeys([req['acceptance_criteria'],
                                                  'Do not change authorization or requirement version.',

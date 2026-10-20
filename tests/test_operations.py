@@ -135,6 +135,13 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     assert store.get_requirement(req['id'])['status'] == 'active'
 
 
+def test_create_derives_task_text_from_contract_when_body_omitted(setup):
+    args = create_args(setup[3])
+    del args['body']
+    result = operations(setup).call(args)
+    assert 'Task: ' + contract()['objective'] in result['task']['body']
+
+
 def test_create_requires_a_complete_self_contained_contract(setup):
     op = operations(setup)
     args = create_args(setup[3])

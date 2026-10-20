@@ -14,6 +14,31 @@ class StoreTests(unittest.TestCase):
         self.path = Path(self.directory.name) / 'store.sqlite'
         self.store = Store(self.path)
 
+    def test_old_draft_schema_is_upgraded_without_losing_rows(self):
+        database = Path(self.directory.name) / 'old-store.sqlite'
+        db = sqlite3.connect(database)
+        try:
+            db.execute(
+                'CREATE TABLE drafts ('
+                'id TEXT PRIMARY KEY, brief TEXT NOT NULL, '
+                'acceptance_criteria TEXT NOT NULL, replacement_of TEXT)')
+            db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?)',
+                       ('old', 'previous brief', 'previous criteria', None))
+            db.commit()
+        finally:
+            db.close()
+
+        store = Store(database)
+        db = sqlite3.connect(database)
+        try:
+            columns = {row[1] for row in db.execute('PRAGMA table_info(drafts)')}
+        finally:
+            db.close()
+        self.assertIn('summary', columns)
+        self.assertIsNone(store.get_draft('old')['summary'])
+        draft = store.create_draft('new brief', 'new criteria', summary='short summary')
+        self.assertEqual(draft['summary'], 'short summary')
+
     def test_concurrent_confirmation_creates_one_requirement_and_event(self):
         draft = self.store.create_draft('brief', 'criteria')
         with ThreadPoolExecutor(max_workers=4) as pool:

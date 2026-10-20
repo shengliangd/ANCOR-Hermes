@@ -1,5 +1,6 @@
 """Action-level request validation, question policy and role-safe board access."""
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import ancor
@@ -154,3 +155,24 @@ def test_expanded_context_reports_paused_state_and_reason(tmp_path, monkeypatch)
     assert context['progression'][0]['state'] == 'paused'
     assert context['transitions'][0]['kind'] == 'requirement.paused'
     assert context['transitions'][0]['reason'] == 'User asked'
+
+
+def test_notification_tool_output_does_not_expose_transport_error_key(tmp_path, monkeypatch):
+    tasks = {'t1': {'id': 't1', 'status': 'blocked'}}
+    tools, store, req = registered(tmp_path, monkeypatch, 'ancor-interactor', tasks)
+    store.link_task(req['id'], 't1')
+    from ancor.notification import NotificationOutbox
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination')
+    box.enqueue('q1', 'question', 'Need the exact input', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='t1')
+    db = sqlite3.connect(store.path + '.notifications.db')
+    db.execute("UPDATE human_notifications SET error=? WHERE id='q1'",
+               (json.dumps({'reason_code': 'transport_unavailable'}),))
+    db.commit()
+    db.close()
+    listed = call(tools, 'ancor_notify', {'action': 'list', 'view': 'full'})
+    row = listed['notifications'][0]
+    assert row['delivery_error']
+    assert 'error' not in row

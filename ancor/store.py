@@ -38,6 +38,14 @@ class Store:
                     payload TEXT NOT NULL, source_key TEXT UNIQUE,
                     acknowledged INTEGER NOT NULL DEFAULT 0);
             ''')
+            self._ensure_columns(db, 'drafts', {'summary': 'TEXT'})
+
+    @staticmethod
+    def _ensure_columns(db, table, columns):
+        present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+        for column, kind in columns.items():
+            if column not in present:
+                db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
     @contextmanager
     def _transaction(self):

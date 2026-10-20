@@ -17,7 +17,8 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-NATIVE = Path('/home/user/.hermes/hermes-agent')
+NATIVE = Path(os.environ.get('ANCOR_NATIVE_HERMES', '/home/user/.hermes/hermes-agent'))
+NATIVE_PYTHON = Path(os.environ.get('ANCOR_NATIVE_PYTHON', str(NATIVE / '.venv/bin/python')))
 NATIVE_COMMAND_TIMEOUT = 15
 _REAL_SUBPROCESS_RUN = subprocess.run
 
@@ -64,7 +65,7 @@ def test_user_journey(tmp_path, journey):
     env = dict(os.environ, HOME=str(home), HERMES_HOME=str(home / '.hermes'),
                HERMES_KANBAN_HOME=str(home / 'board-root'))
     env['PYTHONPATH'] = os.pathsep.join([str(ROOT), str(NATIVE), site.getusersitepackages()])
-    result = subprocess.run([str(NATIVE / '.venv/bin/python'), str(Path(__file__).resolve()),
+    result = subprocess.run([str(NATIVE_PYTHON), str(Path(__file__).resolve()),
                              journey], cwd=ROOT, env=env, capture_output=True, text=True, timeout=240)
     assert result.returncode == 0, result.stdout + '\n' + result.stderr
     assert 'JOURNEY PASSED: ' + journey in result.stdout
@@ -336,7 +337,9 @@ def journey_replacement(j):
     new = j.confirm(draft)
     assert j.store.get_requirement(old['id'])['status'] == 'invalidated'
     assert j.status(old_task) == 'running', 'confirmation records invalidation, not automatic stop'
-    assert 'not active' in j.error('board', action='create', requirement_id=old['id'], key='forbidden', title='No', body='No')
+    inactive_error = j.error('board', action='create', requirement_id=old['id'], key='forbidden',
+                             title='No', body='No', contract=j.contract('forbidden'))
+    assert 'not active' in inactive_error, inactive_error
     j.complete(other_task)
     j.call('board', action='block', task_id=old_task, reason='Superseded; coordinator stop decision')
     new_task = j.create(new, 'replacement')
@@ -385,10 +388,12 @@ def journey_restart(j):
     restarted = j.host()
     restarted.scan()
     assert j.store.pending_events() == before
-    ids = [e['id'] for e in before]
+    ids = [e['id'] for e in before if e['kind'] != 'host.stalled']
     j.call('get_context', ack_event_ids=ids)
     j.host().scan()
-    assert not j.store.pending_events()
+    assert not [e for e in j.store.pending_events() if e['kind'] != 'host.stalled']
+    assert 'host-owned' in j.error('get_context', ack_event_ids=[
+        e['id'] for e in before if e['kind'] == 'host.stalled'])
     assert len(j.store.snapshot()['task_links']) == 1
 
 

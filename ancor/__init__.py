@@ -4,8 +4,9 @@ import json
 import logging
 import os
 
-from .views import (draft_summary, event_summaries, notification_selection,
-                    notification_summary, requirement_summary, transition_summary)
+from .views import (draft_summary, event_summaries, notification_detail,
+                    notification_selection, notification_summary,
+                    requirement_summary, transition_summary)
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ _ACTION_FIELDS = {
         'respond': ['id', 'answer'],
     },
     'ancor_board': {
-        'create': ['requirement_id', 'key', 'title', 'body', 'contract'],
+        'create': ['requirement_id', 'key', 'title', 'contract'],
         'list': [],
         'show': ['task_id'],
         'block': ['task_id', 'reason'],
@@ -351,7 +352,7 @@ def register(ctx, *, scan_runner=None):
             total = len(rows)
             rows = rows[-limit:]
             full = args.get('view') == 'full' or bool(identifier)
-            return {'notifications': rows if full else
+            return {'notifications': [notification_detail(row) for row in rows] if full else
                     [notification_summary(row) for row in rows],
                     'count': total, 'returned': len(rows),
                     'truncated': total > len(rows)}
@@ -399,11 +400,12 @@ def register(ctx, *, scan_runner=None):
                             f'{task.get("status")}')
             box.enqueue(identifier, args['kind'], args['message'], actor=ctx.profile_name,
                         requirement_id=requirement_id, task_id=task_id)
-            return box.get(identifier)
+            return notification_detail(box.get(identifier))
         if action == 'withdraw':
             if not coordinator:
                 raise PermissionError('coordinator profile required to withdraw questions')
-            return box.withdraw(identifier, actor=ctx.profile_name, reason=args['reason'])
+            return notification_detail(box.withdraw(identifier, actor=ctx.profile_name,
+                                                    reason=args['reason']))
         if action == 'respond':
             existing = box.get(identifier)
             # IDs come only from handler metadata, never model-supplied provenance.
@@ -417,7 +419,7 @@ def register(ctx, *, scan_runner=None):
             if not interactor:
                 raise PermissionError('interactor profile required to respond')
             row = box.respond(identifier, args['answer'], reference)
-            return {'notification': row, 'event': response_event(row)}
+            return {'notification': notification_detail(row), 'event': response_event(row)}
         raise ValueError('unknown notification action')
 
     def requirement(args, **_native):
@@ -530,7 +532,7 @@ def register(ctx, *, scan_runner=None):
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
             'ancor_board': (
-                'Read and coordinate linked native tasks. list returns compact summaries; show returns one full card. create requires a complete contract; edit with body requires the same contract. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, retire, and associate.',
+                'Read and coordinate linked native tasks. list returns compact summaries; show returns one full card. create requires a complete contract; body is optional and defaults to the contract objective; edit with body requires the same contract. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, retire, and associate.',
                 {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock',
                                                         'comment', 'link', 'unlink', 'edit', 'revise',
                                                         'retire', 'associate']},

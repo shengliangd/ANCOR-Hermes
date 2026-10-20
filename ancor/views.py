@@ -139,6 +139,15 @@ def notification_summary(row, message_limit=600, answer_limit=300):
     return summary
 
 
+def notification_detail(row):
+    """Expose one complete notification without the transport-error key Hermes
+    interprets as a failed tool result."""
+    detail = dict(row)
+    if 'error' in detail:
+        detail['delivery_error'] = detail.pop('error')
+    return detail
+
+
 def transition_summary(event):
     """Project retained pause/resume history without transport identity."""
     payload = event.get('payload') or {}

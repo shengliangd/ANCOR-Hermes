@@ -133,22 +133,44 @@ todo memory session_search connections computer_use`.
 | --- | --- | --- |
 | interactor | `ancor`, `clarify`, `delegation`, `cronjob` | native `kanban`; use `ancor_board list/show` for read-only progress |
 | coordinator | `ancor`, `kanban`, `delegation` | `clarify`, `cronjob`; use `ancor_notify` and `ancor_wake` |
-| worker | `ancor`, `kanban` | `clarify`, `cronjob`, `delegation` |
+| worker | `kanban` | `ancor`, `clarify`, `cronjob`, `delegation`; the native task card is its entire contract |
 
 Apply the same matrix to every platform that routes to a role; at minimum `cli`
 for coordinator/worker and both `cli` and `feishu` for interactor.
 
 ```sh
-ROLE_TOOLSETS="web browser terminal file code_execution vision image_gen tts skills todo memory session_search connections computer_use ancor"
-hermes -p ancor-coordinator tools enable $ROLE_TOOLSETS kanban delegation --platform cli
+BASE_TOOLSETS="web browser terminal file code_execution vision image_gen tts skills todo memory session_search connections computer_use"
+hermes -p ancor-coordinator tools enable $BASE_TOOLSETS ancor kanban delegation --platform cli
 hermes -p ancor-coordinator tools disable clarify cronjob --platform cli
-hermes -p ancor-worker tools enable $ROLE_TOOLSETS kanban --platform cli
+hermes -p ancor-worker tools enable $BASE_TOOLSETS kanban --platform cli
 hermes -p ancor-worker tools disable clarify cronjob delegation --platform cli
-hermes -p ancor-interactor tools enable $ROLE_TOOLSETS clarify delegation cronjob --platform feishu
+hermes -p ancor-interactor tools enable $BASE_TOOLSETS ancor clarify delegation cronjob --platform feishu
 hermes -p ancor-interactor tools disable kanban --platform feishu
-hermes -p ancor-interactor tools enable $ROLE_TOOLSETS clarify delegation cronjob --platform cli
+hermes -p ancor-interactor tools enable $BASE_TOOLSETS ancor clarify delegation cronjob --platform cli
 hermes -p ancor-interactor tools disable kanban --platform cli
 ```
+
+The worker does not register the `ancor` toolset: it must not read the requirement
+store or use ANCOR business tools. `tools list` for the worker should show `kanban`
+and no `ancor` entry.
+
+### Unattended approvals
+
+The Gateway starts coordinator and worker runs with `-q`, so no human is present to
+answer a dangerous-command approval prompt. Make that policy explicit for these two
+profiles; otherwise a verification command can wait for the approval timeout and
+fail closed:
+
+```sh
+hermes -p ancor-coordinator config set approvals.single_query_mode approve
+hermes -p ancor-worker config set approvals.single_query_mode approve
+```
+
+This changes only command-approval behavior for unattended `-q` turns. It does not
+grant requirement authorization, widen a task contract, or bypass hardline denies.
+If local policy requires `deny`, add the specific verification commands to the
+top-level `command_allowlist` instead, and test the actual worker flow end to end.
+Do not use `approvals.mode off` or `--yolo` as a substitute for a bounded profile.
 
 The coordinator and interactor may use native `delegate_task` for bounded
 analysis; the worker may not delegate. A child inherits the parent's tools and
@@ -213,7 +235,10 @@ Create the dedicated board through native board commands; do not change the
 installation-wide current board. Turn off creator auto-subscription in the ANCOR
 profiles. Do not add user-facing task subscriptions: questions and delivery are
 coordinator decisions, not direct worker event notifications. Audit existing ANCOR
-subscriptions before reusing an old board. Existing business state is not migrated.
+subscriptions before reusing an old board. This setup flow does not copy business
+state automatically. An existing requirements database can be reused in place:
+`Store` applies only additive schema migrations and does not rewrite requirement,
+event or notification status.
 
 Disable automatic root decomposition for this workflow: the coordinator creates only
 execution tasks, progressively, through the plugin board tool. Native dispatch
