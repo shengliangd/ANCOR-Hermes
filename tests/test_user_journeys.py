@@ -272,7 +272,7 @@ def journey_rolling(j):
     assert edited['task']['title'] == 'Execute revised B'
     assert edited['task']['priority'] == 7
     assert edited['task']['body'].split('\n', 1)[0] == metadata
-    assert req['acceptance_criteria'] in edited['task']['body']
+    assert req['acceptance_criteria'] not in edited['task']['body']
     linked = j.call('board', action='link', parent_id=a, child_id=b)
     assert a in linked['parents']
     assert j.status(b) == 'blocked'

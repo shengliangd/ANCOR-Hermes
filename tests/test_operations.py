@@ -128,7 +128,8 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     result = op.call(create_args(req))
     assert result['task']['assignee'] == 'ancor-worker'
     assert contract()['objective'] in result['task']['body']
-    assert req['acceptance_criteria'] in result['task']['body']
+    assert 'Keep exact values' in result['task']['body']
+    assert req['acceptance_criteria'] not in result['task']['body']
     assert op.call(create_args(req))['task']['id'] == result['task']['id']
     assert len(board.tasks) == 1
     assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': result['task']['id']}]
@@ -259,7 +260,8 @@ def test_edit_keeps_requirement_context_and_association(setup):
     assert edited['title'] == 'Refined' and edited['priority'] == 0
     assert NativeBoard.link(edited) == NativeBoard.link(task)
     assert 'Task: New task details' in edited['body']
-    assert contract()['objective'] in edited['body'] and req['acceptance_criteria'] in edited['body']
+    assert contract()['objective'] in edited['body'] and 'Keep exact values' in edited['body']
+    assert req['acceptance_criteria'] not in edited['body']
     assert edited['assignee'] == 'ancor-worker'
     store.accept(req['id'], 'evidence')
     with pytest.raises(ValueError, match='active'):

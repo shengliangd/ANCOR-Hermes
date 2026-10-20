@@ -34,6 +34,10 @@ requirement text that will be stored in ANCOR.
 
 Native Hermes owns worker dispatch and task lifecycle. The plugin owns requirement semantics and coordination admission. Idle polling uses no model tokens. Events are batched; unchanged unprocessed batches have a retry budget rather than a hot model loop.
 
+Worker cards carry a contract scoped to their bounded outcome. The full requirement
+brief and acceptance criteria stay in the requirement store and are used during
+coordination and final acceptance; they are not copied into every execution card.
+
 Human notifications are durably enqueued by the coordinator and delivered by the
 Gateway owner through Hermes' generic send interface. Enqueue returns `pending`;
 it is not a delivery receipt. The Gateway keeps one background delivery loop, so

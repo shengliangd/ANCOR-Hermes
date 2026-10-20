@@ -193,8 +193,7 @@ class Operations:
             body = build_work_contract(
                 objective=contract['objective'], scope=contract['scope'], task=task_text,
                 inputs=contract['inputs'], dependencies=contract['dependencies'],
-                constraints=list(dict.fromkeys([req['acceptance_criteria'],
-                                                 'Do not change authorization or requirement version.',
+                constraints=list(dict.fromkeys(['Do not change authorization or requirement version.',
                                                  *contract['constraints']])),
                 artifacts=contract['artifacts'], verification=contract['verification'],
                 stop_conditions=contract['stop_conditions'],
@@ -270,8 +269,7 @@ class Operations:
                 fields['body'] = link_line + '\n' + build_work_contract(
                     objective=contract['objective'], scope=contract['scope'], task=fields['body'],
                     inputs=contract['inputs'], dependencies=contract['dependencies'],
-                    constraints=list(dict.fromkeys([req['acceptance_criteria'],
-                                                     'Do not change authorization or requirement version.',
+                    constraints=list(dict.fromkeys(['Do not change authorization or requirement version.',
                                                      *contract['constraints']])),
                     artifacts=contract['artifacts'], verification=contract['verification'],
                     stop_conditions=contract['stop_conditions'],

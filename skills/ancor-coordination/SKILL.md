@@ -44,18 +44,18 @@ The plan is a working hypothesis, not a commitment to the first card you write. 
 
 Plan the requirement at a useful granularity, then start the next useful bounded outcome. On a new confirmed requirement this often yields more than one card; a single card is appropriate only when the requirement truly is one coherent outcome. Acknowledging `requirement.confirmed` means the requirement now has a credible execution shape, not merely that some card exists.
 
-Before treating a new requirement as planned, trace each acceptance criterion to a card, a dependency, or an explicit unknown or out-of-scope note. If every criterion lands in the same card, ask whether that card is too broad. If a criterion has no card and no gate, the plan is incomplete. Every `ancor_board create` call must include a complete `contract`:
+Before treating a new requirement as planned, trace each acceptance criterion to a card, a dependency, or an explicit unknown or out-of-scope note. Tracing is a planning check, not an instruction to copy the full criteria text into every card. If every criterion lands in the same card, ask whether that card is too broad. If a criterion has no card and no gate, the plan is incomplete. Every `ancor_board create` call must include a complete `contract`:
 
 - `objective`: the concrete result this card produces.
 - `scope`: what is included and what is explicitly excluded.
-- `inputs`: exact values, paths, references, and context the worker needs.
+- `inputs`: exact values, paths, references, and the smallest requirement excerpt this card needs.
 - `dependencies`: human-readable prerequisites; `parent_ids` remains the enforcing native graph.
 - `artifacts`: the inspectable outputs and their expected locations or forms.
-- `verification`: checks the worker must run and the evidence it must return.
-- `constraints`: acceptance-relevant limits, exact values, compatibility, and authorization boundaries.
+- `verification`: card-level checks the worker must run and the evidence it must return; requirement-wide acceptance belongs to the coordinator's final verification.
+- `constraints`: shared hard limits that genuinely apply to this card, plus card-specific exact values, compatibility, and authorization boundaries.
 - `stop_conditions`: missing input, conflict, failed verification, scope expansion, or other reasons to stop and escalate.
 
-Keep the card self-contained. Workers must not need to read the full requirement store. Use stable task keys, hold cards while arranging dependencies, and parallelize only work that does not share conflicting files, services, accounts, or capacity.
+Keep the card self-contained without duplicating the requirement. A card should not contain another card's acceptance criteria. Include only the context required to execute its own outcome; the requirement store remains authoritative for the full brief and acceptance criteria. Workers must not need to read the full requirement store. Use stable task keys, hold cards while arranging dependencies, and parallelize only work that does not share conflicting files, services, accounts, or capacity.
 
 Write the card around the outcome and its evidence, not around unverified assumptions. A card states what must be true and what the worker must produce; it does not predict the environment. If a dependency may be unavailable, make obtaining or verifying it part of the work rather than a stop condition. A stop condition marks a genuine external boundary, not the first failed attempt.
 

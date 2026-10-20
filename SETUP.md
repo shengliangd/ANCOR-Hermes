@@ -24,7 +24,8 @@ Install each role's `SOUL.md` in its profile home, the complete
 `skills/ancor-interactor` directory in the interactor profile, and the complete
 `skills/ancor-worker` directory in the worker profile. Preserve unrelated
 configuration, memory and routes. Workers receive no ANCOR business tools; their
-native task card is the complete execution contract. This is cooperative behavior,
+native task card is the complete execution contract for that bounded task, not a
+copy of the whole requirement. This is cooperative behavior,
 not process isolation.
 
 ## Disable automatic self-improvement
@@ -133,7 +134,7 @@ todo memory session_search connections computer_use`.
 | --- | --- | --- |
 | interactor | `ancor`, `clarify`, `delegation`, `cronjob` | native `kanban`; use `ancor_board list/show` for read-only progress |
 | coordinator | `ancor`, `kanban`, `delegation` | `clarify`, `cronjob`; use `ancor_notify` and `ancor_wake` |
-| worker | `kanban` | `ancor`, `clarify`, `cronjob`, `delegation`; the native task card is its entire contract |
+| worker | `kanban` | `ancor`, `clarify`, `cronjob`, `delegation`; the native task card is its entire bounded-task contract |
 
 Apply the same matrix to every platform that routes to a role; at minimum `cli`
 for coordinator/worker and both `cli` and `feishu` for interactor.
