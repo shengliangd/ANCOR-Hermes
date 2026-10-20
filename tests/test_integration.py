@@ -31,12 +31,8 @@ ancor.register(ctx)
 def call(name, args):
     return json.loads(ctx.dispatch_tool(name, args))
 entry = registry.get_entry('ancor_board', scope=manager.scope_key)
-assert entry is None
-ctx.role = 'ancor-coordinator'
-ancor.register(ctx)
-entry = registry.get_entry('ancor_board', scope=manager.scope_key)
 assert entry
-draft = call('ancor_requirement', {'action':'draft', 'brief':'exact brief', 'acceptance_criteria':'criteria'})
+draft = call('ancor_requirement', {'action':'draft', 'summary':'High-level summary', 'brief':'exact brief', 'acceptance_criteria':'criteria'})
 assert draft['clarify_args']
 assert call('ancor_requirement', {'action':'confirm', 'draft_id':draft['id']})['id'] == draft['id']
 store = Store(ctx.get_config('store_path'))
@@ -48,6 +44,10 @@ event = call('ancor_requirement', {'action':'respond', 'requirement_id':req['id'
 assert event['payload']['body'] == text and event['payload']['authorization'] is False
 assert event['payload']['source'] == 'interactor_transcription'
 assert store.get_requirement(req['id'])['status'] == 'active'
+ctx.role = 'ancor-coordinator'
+ancor.register(ctx)
+entry = registry.get_entry('ancor_board', scope=manager.scope_key)
+assert entry
 # Context now observes native tasks too; install the subprocess fixture before
 # its first read so Operations does not cache an unmocked NativeBoard.
 # Replace only the native CLI subprocess boundary, retain NativeBoard and Operations.
@@ -72,7 +72,6 @@ store.link_task(req['id'], 'one')
 store.link_task(req['id'], 'two')
 assert len(call('ancor_board', {'action':'list'})['tasks']) == 2
 assert call('ancor_board', {'action':'show', 'task_id':'one'})['task']['id'] == 'one'
-assert 'error' not in call('ancor_requirement', {'action':'link', 'requirement_id':req['id'], 'task_id':'one'})
 evidence = {'criteria':'criteria', 'verification':['checked'], 'artifacts':['result'], 'task_ids':['one']}
 args = {'requirement_id':req['id'], 'action':'accept', 'evidence':evidence}
 assert 'all linked native tasks' in call('ancor_acceptance', args)['error']

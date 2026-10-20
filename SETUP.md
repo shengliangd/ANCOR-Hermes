@@ -11,18 +11,20 @@ models and separately provisioned credentials. Keep bot credentials with the
 Gateway owner; do not copy the default `.env` wholesale.
 
 Install the `ancor` subdirectory using native plugin installation, pinned to the
-reviewed commit, into the Gateway owner and both role profiles. Inspect the
-installed `hermes plugins install --help` before provisioning. The source form is:
+reviewed commit, into the Gateway owner and every profile that runs an ANCOR role
+(installed once when the owner is also a role profile). Inspect the installed
+`hermes plugins install --help` before provisioning. The source form is:
 
 ```text
 file:///absolute/path/to/ANCOR-Hermes-native-config#ancor
 ```
 
 Install each role's `SOUL.md` in its profile home, the complete
-`skills/ancor-coordination` directory in the coordinator profile, and the complete
-`skills/ancor-interactor` directory in the interactor profile. Preserve unrelated
-configuration, memory and routes. The worker instructions use read-only requirement
-context and safe checkpoints to stop obsolete work; this is cooperative behavior,
+`skills/ancor-coordination` directory in the coordinator profile, the complete
+`skills/ancor-interactor` directory in the interactor profile, and the complete
+`skills/ancor-worker` directory in the worker profile. Preserve unrelated
+configuration, memory and routes. Workers receive no ANCOR business tools; their
+native task card is the complete execution contract. This is cooperative behavior,
 not process isolation.
 
 ## Disable automatic self-improvement
@@ -70,7 +72,7 @@ plugin doctor before starting:
 
 For an isolated transport test only, set `sender_executable` to the absolute path
 of the approved test executable through native config, e.g.
-`hermes -p ancor-interactor config set plugins.entries.ancor.settings.sender_executable /absolute/isolated/bin/hermes`.
+`hermes -p ancor-coordinator config set plugins.entries.ancor.settings.sender_executable /absolute/isolated/bin/hermes`.
 It must implement the native `send --file - --json` contract. A PATH-only override
 is insufficient when Hermes bootstrap prepends its own launcher. Do not configure
 the test executable in a live profile; leave `hermes` for normal native delivery.
@@ -79,16 +81,96 @@ Failed sends retain safe structured diagnostics in the outbox `error` field
 or exception text. Legacy errors remain readable. `uncertain`/`sending` entries
 are not retried automatically: reconcile transport evidence before any retry.
 
+### Coordinator notification channel
+
+Background questions and completion notices fail closed unless the coordinator
+profile has both values below. The coordinator is the only role that sends them;
+the interactor reads the resulting outbox and relays answers.
+
+```sh
+hermes -p ancor-coordinator config set plugins.entries.ancor.settings.human_target 'telegram:-1001234567890'
+hermes -p ancor-coordinator config set plugins.entries.ancor.settings.transport_profile default
+```
+
+Use the exact destination syntax accepted by `hermes send --to` for the selected
+platform, for example `telegram:<chat_id>`, `discord:#ops`,
+`slack:C0123ABCD` or `feishu:oc_<chat_id>`. The destination must include a
+non-empty platform and destination separated by `:`.
+
+`transport_profile` must name the profile whose native `.env`/`config.yaml`
+actually contains that channel's credentials and for which `hermes send` works.
+If the bot credentials live only with the Gateway owner, set that owner's profile
+name here; do not copy the default `.env` into role profiles. Pointing at a
+profile without credentials, or omitting either setting, leaves notification
+delivery unavailable.
+
+Verify the exact transport path used by the outbox before enabling the
+coordinator:
+
+```sh
+printf 'ANCOR channel test' | hermes --profile default send --to 'telegram:-1001234567890' --file - --json
+```
+
+Replace the profile and destination with the configured values. The JSON receipt
+must contain `"success": true` and no `error` or `skipped` field. The plugin invokes
+exactly `hermes --profile <transport_profile> send --to <human_target> --file - --json`;
+`sent` means the native transport accepted the message, not that a human read or
+answered it.
+
 Enable the plugin/toolset in the selected profiles. The owner registers lifecycle
-infrastructure, not business tools. The interactor receives requirement and user-response tools; the coordinator receives
-global context, board, wake and acceptance tools; the worker receives read-only
-requirement context.
+infrastructure, not business tools. The interactor exclusively receives requirement
+draft/confirm/cancel/respond, read-only board/progress context and notification
+reply tools. Its Kanban read path is `ancor_board list` / `ancor_board show`; do not
+grant that profile native Kanban write tools. The coordinator receives full context,
+board, wake, acceptance and notification send tools; it has no requirement-lifecycle
+tool. The worker receives no ANCOR business tools.
+
+### Gateway owner and API server
 
 The current lifecycle host is the owner's native `api_server` platform connection.
-Configure that listener through native Hermes settings and keep the Gateway
-running. Named-profile request routing alone does not start owner lifecycle
-handlers. No extra standalone scheduler or foreground coordinator session is
-required. Native Kanban dispatch must be enabled and able to run `ancor-worker`.
+Configure it in the profile that actually serves the Gateway; named-profile
+request routing alone does not start owner lifecycle handlers. For a conventional
+installation the owner is `default`; substitute the real owner name everywhere.
+
+```sh
+OWNER=default
+hermes -p "$OWNER" config set plugins.entries.ancor.settings.owner_profile "$OWNER"
+hermes -p "$OWNER" config set plugins.entries.ancor.settings.gateway_owner true
+hermes -p "$OWNER" config set plugins.entries.ancor.settings.poll_interval 15
+hermes -p "$OWNER" config set platforms.api_server.enabled true
+```
+
+Set a strong `API_SERVER_KEY` (at least 16 characters, not a placeholder) in the
+owner profile's environment; `hermes -p "$OWNER" config env-path` prints the file.
+The adapter refuses to start without it even on a loopback bind. Optional listener
+overrides are `platforms.api_server.extra.host` and
+`platforms.api_server.extra.port` (defaults `127.0.0.1:8642`).
+
+Restart the serving Gateway, then check that the owner's `api_server` listener is
+present:
+
+```sh
+hermes -p "$OWNER" gateway restart
+hermes -p "$OWNER" gateway status
+```
+
+In a multiplex Gateway, per-profile URLs appear as `/p/<profile>/v1`; an absent
+`api_server` entry means the host cannot invoke ANCOR, usually because the key was
+rejected or the adapter is disabled. No extra standalone scheduler or foreground
+coordinator session is required.
+
+Before calling the Gateway ready, verify all of the following:
+
+- `owner_profile` names the profile that serves the Gateway, and only that profile
+  has `gateway_owner=true`.
+- That profile has `api_server` enabled and connected, with `poll_interval >= 15`.
+- The `ancor` plugin and the correct role toolsets are enabled in the owner and in
+  all three role profiles.
+- Native Kanban dispatch is running: either `kanban.dispatch_in_gateway true` in
+  the owner, or one separate `hermes kanban daemon`. With review dispatch disabled,
+  it must still be able to spawn `ancor-worker` for ordinary tasks.
+- The selected user conversation routes to `ancor-interactor`, so native `clarify`
+  reaches the user and the interactor can read the board for progress reporting.
 
 Create the dedicated board through native board commands; do not change the
 installation-wide current board. Turn off creator auto-subscription in the ANCOR
@@ -120,12 +202,19 @@ replan affected work; event ingestion itself does not block tasks. New work cann
 be created for an invalidated requirement. There is no global requirement that all
 old workers stop before unrelated work can proceed.
 
+Pause and resume use the same exact native `clarify` confirmation path as drafts
+and cancellations. A paused requirement is not active: it suppresses scheduled
+wakes, is reported as `paused` rather than `stalled`, and cannot create new work.
+Its coordinator blocks linked running or ready tasks and waits for quiescence;
+resume reactivates the requirement and requires the coordinator to re-evaluate
+existing work before unblocking it. No additional configuration is required.
+
 ## Restart recovery contract
 
 On the first scan that acquires the existing coordinator flock, the host reads
 current requirements, native tasks/events, acceptance evidence and the existing
 notification outbox. Pending events already trigger reconciliation. If the inbox
-is empty but active requirements, undelivered acceptances or unresolved notices
+is empty but active or paused requirements, undelivered acceptances or unresolved notices
 remain, it records one durable `host.recovery` event. The derived `host.stalled`
 condition does not suppress this startup recovery. Acknowledging recovery makes
 subsequent idle polls quiet; it is not recreated on every poll. A later host
@@ -163,8 +252,9 @@ history reads use the installed read-only API. They are not actual-model E2E.
 
 1. Run `env -u PYTHONPATH python -m pytest tests -q` in the source checkout.
 2. Verify native plugin discovery/registration under disposable profile homes.
-3. Verify exact-draft confirmation via native tool execution; cancellation,
-   timeout, changed questions and replay must not activate a requirement.
+3. Verify exact-draft and exact-cancellation confirmation via native tool execution;
+   cancellation, timeout, changed questions and replay must not activate or cancel a
+   requirement.
 4. Verify real native Kanban creation, idempotent retry, blocking and readback.
 5. Verify one coordinator across processes, cancellation/restart ownership,
    event replay and no idle model calls.

@@ -220,7 +220,8 @@ class Host:
         notifications = NotificationOutbox.read_existing(self.store.path + '.notifications.db')
         delivered = {n['id'] for n in notifications
                      if n['state'] == 'sent' and n['kind'] == 'completion'}
-        requirements = [r for r in data['requirements'] if r['status'] == 'active' or
+        requirements = [r for r in data['requirements']
+                        if r['status'] in {'active', 'paused'} or
                         (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)]
         relevant = {r['id'] for r in requirements}
         return {**self.scheduling.observation(data, self.tasks, notifications), 'requirements': requirements,

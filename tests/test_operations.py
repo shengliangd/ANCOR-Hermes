@@ -87,8 +87,20 @@ def operations(setup):
     return importlib.import_module('ancor.operations').Operations(*setup[:3])
 
 
+def contract(**extra):
+    value = dict(objective='Implement the requested result', scope='Only the named artifact',
+                 inputs=['/tmp/input.txt'], dependencies=[], artifacts=['/tmp/result.txt'],
+                 verification=['Run the exact acceptance check'], constraints=['Keep exact values'],
+                 stop_conditions=['Required input is missing'])
+    value.update(extra)
+    return value
+
+
 def create_args(req, **extra):
-    return dict(action='create', requirement_id=req['id'], key='first', title='Implement', body='Work details', **extra)
+    value = dict(action='create', requirement_id=req['id'], key='first', title='Implement',
+                 body='Work details', contract=contract())
+    value.update(extra)
+    return value
 
 
 def test_create_with_atomic_parents_and_hold(setup):
@@ -115,12 +127,39 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     op = operations(setup)
     result = op.call(create_args(req))
     assert result['task']['assignee'] == 'ancor-worker'
-    assert req['brief'] in result['task']['body']
+    assert contract()['objective'] in result['task']['body']
     assert req['acceptance_criteria'] in result['task']['body']
     assert op.call(create_args(req))['task']['id'] == result['task']['id']
     assert len(board.tasks) == 1
     assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': result['task']['id']}]
     assert store.get_requirement(req['id'])['status'] == 'active'
+
+
+def test_create_requires_a_complete_self_contained_contract(setup):
+    op = operations(setup)
+    args = create_args(setup[3])
+    del args['contract']
+    with pytest.raises(ValueError, match='contract'):
+        op.call(args)
+    args = create_args(setup[3], contract=contract(artifacts=[]))
+    with pytest.raises(ValueError, match='artifacts'):
+        op.call(args)
+    args = create_args(setup[3], contract=contract(verification=['  ']))
+    with pytest.raises(ValueError, match='verification'):
+        op.call(args)
+    assert not setup[2].tasks
+
+
+def test_create_renders_structured_contract(setup):
+    result = operations(setup).call(create_args(
+        setup[3], contract=contract(inputs=['exact input'], dependencies=['Task A done'],
+                                    artifacts=['artifact path'], verification=['check result'],
+                                    constraints=['preserve casing'], stop_conditions=['missing approval'])))
+    body = result['task']['body']
+    for value in ('Implement the requested result', 'Only the named artifact', 'exact input',
+                  'Task A done', 'artifact path', 'check result', 'preserve casing',
+                  'missing approval'):
+        assert value in body
 
 
 def test_scoped_dependencies_across_active_requirements(setup):
@@ -207,16 +246,27 @@ def test_edit_keeps_requirement_context_and_association(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     task = op.call(create_args(req))['task'].copy()
-    args = dict(action='edit', task_id=task['id'], title='Refined', body='New task details', priority=0)
+    args = dict(action='edit', task_id=task['id'], title='Refined', body='New task details', priority=0,
+                contract=contract())
     edited = op.call(args)['task']
     assert edited['title'] == 'Refined' and edited['priority'] == 0
     assert NativeBoard.link(edited) == NativeBoard.link(task)
     assert 'Task: New task details' in edited['body']
-    assert req['brief'] in edited['body'] and req['acceptance_criteria'] in edited['body']
+    assert contract()['objective'] in edited['body'] and req['acceptance_criteria'] in edited['body']
     assert edited['assignee'] == 'ancor-worker'
     store.accept(req['id'], 'evidence')
     with pytest.raises(ValueError, match='active'):
         op.call(args)
+
+
+def test_edit_body_requires_a_full_contract(setup):
+    op = operations(setup)
+    task = op.call(create_args(setup[3]))['task']
+    with pytest.raises(ValueError, match='contract'):
+        op.call(dict(action='edit', task_id=task['id'], body='Changed'))
+    edited = op.call(dict(action='edit', task_id=task['id'], body='Changed',
+                          contract=contract(objective='Replacement objective')))['task']
+    assert 'Replacement objective' in edited['body'] and 'Task: Changed' in edited['body']
 
 
 @pytest.mark.parametrize('priority', [True, 1.5, '3', None])
@@ -243,6 +293,18 @@ def test_new_mutations_are_coordinator_only(setup, action):
     assert setup[2].calls == []
 
 
+def test_interactor_board_access_is_read_only(setup):
+    ctx, store, board, req = setup
+    coordinator = operations(setup)
+    tid = coordinator.call(create_args(req))['task']['id']
+    ctx.profile_name = 'ancor-interactor'
+    op = operations(setup)
+    assert op.call({'action': 'list'})['tasks'][0]['id'] == tid
+    assert op.call({'action': 'show', 'task_id': tid})['task']['id'] == tid
+    with pytest.raises(PermissionError, match='coordinator'):
+        op.call(dict(action='block', task_id=tid, reason='No'))
+
+
 @pytest.mark.parametrize('changes', [{}, {'title': ''}, {'body': ''}])
 def test_empty_edits_do_not_mutate(setup, changes):
     op = operations(setup)
@@ -258,7 +320,7 @@ def test_scoped_read_and_mutations(setup):
     op = operations(setup)
     task = op.call(create_args(req))['task']
     tid = task['id']
-    assert op.call({'action': 'list'})['tasks'][0]['task']['id'] == tid
+    assert op.call({'action': 'list'})['tasks'][0]['id'] == tid
     assert 'runs' in op.call({'action': 'show', 'task_id': tid})
     assert op.call({'action': 'block', 'task_id': tid, 'reason': 'Need answer'})['task']['status'] == 'blocked'
     answer = op.call({'action': 'comment', 'task_id': tid, 'body': 'User answered: use blue'})
@@ -341,10 +403,9 @@ def test_reads_use_persisted_links_without_reconciliation(setup, monkeypatch, ac
     def forbidden(*args, **kwargs):
         pytest.fail('foreground reads must not reconcile native task links')
 
-    monkeypatch.setattr(board, 'list', forbidden)
     monkeypatch.setattr(store, 'link_task', forbidden)
     if action == 'list':
-        assert [item['task']['id'] for item in op.call({'action': action})['tasks']] == [linked['id']]
+        assert [item['id'] for item in op.call({'action': action})['tasks']] == [linked['id']]
     else:
         assert op.call({'action': action, 'task_id': linked['id']})['task']['id'] == linked['id']
         with pytest.raises(ValueError, match='unlinked'):

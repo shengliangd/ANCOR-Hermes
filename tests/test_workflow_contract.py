@@ -13,6 +13,37 @@ def test_worker_completes_without_native_review():
     assert 'Do not call `kanban_request_review`' in text
 
 
+def test_interactor_can_read_but_not_mutate_the_board():
+    text = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
+    skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
+    assert 'may read the task board' in text
+    assert '`ancor_board list`' in skill and '`ancor_board show`' in skill
+    assert 'must not mutate the board' in text
+    assert '`ancor_notify respond`' in skill
+    assert '`ancor_requirement respond`' in skill
+    assert 'action=pause' in skill and 'action=resume' in skill
+    assert 'high-level `summary`' in skill
+    assert 'high-level points first' in skill
+
+
+def test_coordinator_skill_has_no_user_conversation_flow():
+    skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
+    assert '## User conversation' not in skill
+    assert 'never create or confirm requirements' in skill
+    assert '`ancor_board create`' in skill and 'complete `contract`' in skill
+    assert 'worker completion is evidence' in skill.lower()
+    assert '`requirement.paused`' in skill and '`requirement.resumed`' in skill
+
+
+def test_worker_skill_covers_card_execution_and_blocking():
+    skill = (ROOT / 'skills/ancor-worker/SKILL.md').read_text()
+    assert '`<work_contract>`' in skill
+    assert '`kanban_complete`' in skill
+    assert '`kanban_block`' in skill
+    assert '`kanban_request_review`' in skill
+    assert 'Triage is a failure state' in skill
+
+
 def test_acceptance_schema_matches_service_contract(tmp_path):
     import pytest
     from ancor.service import Service

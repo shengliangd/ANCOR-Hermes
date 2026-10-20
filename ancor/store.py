@@ -16,7 +16,15 @@ class Store:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS drafts (
                     id TEXT PRIMARY KEY, brief TEXT NOT NULL,
-                    acceptance_criteria TEXT NOT NULL, replacement_of TEXT);
+                    acceptance_criteria TEXT NOT NULL, replacement_of TEXT,
+                    summary TEXT);
+                CREATE TABLE IF NOT EXISTS cancellations (
+                    id TEXT PRIMARY KEY, requirement_ids TEXT NOT NULL,
+                    reason TEXT, summary TEXT, confirmation_reference TEXT);
+                CREATE TABLE IF NOT EXISTS requirement_commands (
+                    id TEXT PRIMARY KEY, action TEXT NOT NULL,
+                    requirement_id TEXT NOT NULL, reason TEXT, summary TEXT,
+                    confirmation_reference TEXT);
                 CREATE TABLE IF NOT EXISTS requirements (
                     id TEXT PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL,
                     brief TEXT NOT NULL, acceptance_criteria TEXT NOT NULL,
@@ -67,9 +75,10 @@ class Store:
             raise KeyError(identifier)
         return dict(row)
 
-    def create_draft(self, brief, acceptance_criteria, replacement_of=None):
+    def create_draft(self, brief, acceptance_criteria, replacement_of=None, summary=None):
         self._text(brief)
         self._text(acceptance_criteria)
+        summary = self._optional_text(summary)
         if isinstance(replacement_of, list):
             if not replacement_of or any(not isinstance(i, str) or not i.strip() for i in replacement_of):
                 raise ValueError('replacement_of list must contain nonempty IDs')
@@ -78,13 +87,94 @@ class Store:
             replacement_of = self._optional_text(replacement_of)
         identifier = uuid4().hex
         with self._transaction() as db:
-            db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?)',
-                       (identifier, brief, acceptance_criteria, replacement_of))
+            db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?, ?)',
+                       (identifier, brief, acceptance_criteria, replacement_of, summary))
             return self._get(db, 'drafts', identifier)
 
     def get_draft(self, draft_id):
         with self._transaction() as db:
             return self._get(db, 'drafts', draft_id)
+
+    @staticmethod
+    def _cancellation(row):
+        cancellation = dict(row)
+        cancellation['requirement_ids'] = json.loads(cancellation['requirement_ids'])
+        return cancellation
+
+    def create_cancellation(self, requirement_ids, reason=None, summary=None):
+        """Create an immutable cancellation proposal without changing requirements."""
+        ids = list(dict.fromkeys(requirement_ids))
+        if not ids or any(not isinstance(i, str) or not i.strip() for i in ids):
+            raise ValueError('requirement_ids must contain nonempty IDs')
+        reason = self._optional_text(reason)
+        summary = self._optional_text(summary)
+        identifier = uuid4().hex
+        with self._transaction() as db:
+            rows = [self._get(db, 'requirements', i) for i in ids]
+            if any(row['status'] not in {'active', 'paused'} for row in rows):
+                raise ValueError('all requirements must be active or paused')
+            db.execute('INSERT INTO cancellations VALUES (?, ?, ?, ?, NULL)',
+                       (identifier, json.dumps(ids), reason, summary))
+            return self._cancellation(self._get(db, 'cancellations', identifier))
+
+    def get_cancellation(self, cancellation_id):
+        with self._transaction() as db:
+            return self._cancellation(self._get(db, 'cancellations', cancellation_id))
+
+    def create_requirement_command(self, action, requirement_id, reason, summary):
+        """Create an immutable pause/resume proposal without changing status."""
+        if action not in {'pause', 'resume'}:
+            raise ValueError('unknown requirement command')
+        reason = self._text(reason)
+        summary = self._text(summary)
+        required = 'active' if action == 'pause' else 'paused'
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            if requirement['status'] != required:
+                raise ValueError(f'{action} requires a {required} requirement')
+            existing = db.execute(
+                'SELECT * FROM requirement_commands WHERE action=? AND requirement_id=? '
+                'AND reason=? AND summary=? AND confirmation_reference IS NULL '
+                'ORDER BY rowid LIMIT 1',
+                (action, requirement_id, reason, summary)).fetchone()
+            if existing:
+                return dict(existing)
+            identifier = uuid4().hex
+            db.execute('INSERT INTO requirement_commands VALUES (?, ?, ?, ?, ?, NULL)',
+                       (identifier, action, requirement_id, reason, summary))
+            return dict(db.execute('SELECT * FROM requirement_commands WHERE id=?',
+                                   (identifier,)).fetchone())
+
+    def get_requirement_command(self, command_id):
+        with self._transaction() as db:
+            return self._get(db, 'requirement_commands', command_id)
+
+    def confirm_requirement_command(self, command_id, confirmation_reference):
+        """Consume one exact pause/resume confirmation atomically and idempotently."""
+        self._text(confirmation_reference)
+        with self._transaction() as db:
+            command = self._get(db, 'requirement_commands', command_id)
+            requirement = self._get(db, 'requirements', command['requirement_id'])
+            if command['confirmation_reference'] is not None:
+                return requirement
+            action = command['action']
+            target = 'paused' if action == 'pause' else 'active'
+            if requirement['status'] != target:
+                required = 'active' if action == 'pause' else 'paused'
+                if requirement['status'] != required:
+                    raise ValueError(f'{action} requires a {required} requirement')
+                db.execute('UPDATE requirements SET status=? WHERE id=?',
+                           (target, requirement['id']))
+                self._add_event(
+                    db, 'requirement.' + ('paused' if action == 'pause' else 'resumed'), {
+                        'requirement_id': requirement['id'], 'command_id': command_id,
+                        'reason': command['reason'], 'summary': command['summary'],
+                        'confirmation_reference': confirmation_reference},
+                    source_key='requirement.' + action + ':' + command_id)
+                requirement = self._get(db, 'requirements', requirement['id'])
+            db.execute('UPDATE requirement_commands SET confirmation_reference=? WHERE id=?',
+                       (confirmation_reference, command_id))
+            return requirement
 
     def get_requirement(self, requirement_id):
         with self._transaction() as db:
@@ -136,8 +226,8 @@ class Store:
             if draft['replacement_of'] and draft['replacement_of'].startswith('['):
                 replacement_ids = json.loads(draft['replacement_of'])
             bases = [self._get(db, 'requirements', i) for i in replacement_ids]
-            if any(base['status'] != 'active' for base in bases):
-                raise ValueError('all replacement bases must be active')
+            if any(base['status'] not in {'active', 'paused'} for base in bases):
+                raise ValueError('all replacement bases must be active or paused')
             for base in bases:
                 db.execute("UPDATE requirements SET status = 'invalidated' WHERE id = ?", (base['id'],))
             identifier = uuid4().hex
@@ -175,6 +265,17 @@ class Store:
             return [self._event(row) for row in db.execute(
                 "SELECT * FROM events WHERE kind = 'requirement.accepted' ORDER BY id")]
 
+    def requirement_transitions(self, requirement_id=None):
+        """Retain pause/resume history even after its coordination event is handled."""
+        with self._transaction() as db:
+            events = [self._event(row) for row in db.execute(
+                "SELECT * FROM events WHERE kind IN "
+                "('requirement.paused', 'requirement.resumed') ORDER BY id")]
+        if requirement_id is not None:
+            events = [event for event in events
+                      if event['payload'].get('requirement_id') == requirement_id]
+        return events
+
     def accept(self, requirement_id, evidence):
         self._text(evidence)
         with self._transaction() as db:
@@ -187,20 +288,38 @@ class Store:
                             {'requirement_id': requirement_id, 'evidence': evidence})
             return self._get(db, 'requirements', requirement_id)
 
-    def cancel(self, requirement_ids, reason):
-        """Cancel one or more active requirements atomically."""
-        self._text(reason)
+    def _cancel(self, db, requirement_ids, reason):
         ids = list(dict.fromkeys(requirement_ids))
         if not ids or any(not isinstance(i, str) or not i.strip() for i in ids):
             raise ValueError('requirement_ids must contain nonempty IDs')
+        rows = [self._get(db, 'requirements', i) for i in ids]
+        if any(row['status'] not in {'active', 'paused'} for row in rows):
+            raise ValueError('all requirements must be active or paused')
+        for row in rows:
+            db.execute("UPDATE requirements SET status = 'cancelled' WHERE id = ?", (row['id'],))
+            self._add_event(db, 'requirement.cancelled', {
+                'requirement_id': row['id'], 'reason': reason,
+                'batch_requirement_ids': ids})
+        return [self._get(db, 'requirements', i) for i in ids]
+
+    def cancel(self, requirement_ids, reason):
+        """Cancel one or more active requirements atomically."""
+        self._text(reason)
         with self._transaction() as db:
-            rows = [self._get(db, 'requirements', i) for i in ids]
-            if any(row['status'] != 'active' for row in rows):
-                raise ValueError('all requirements must be active')
-            for row in rows:
-                db.execute("UPDATE requirements SET status = 'cancelled' WHERE id = ?", (row['id'],))
-                self._add_event(db, 'requirement.cancelled', {'requirement_id': row['id'], 'reason': reason, 'batch_requirement_ids': ids})
-            return [self._get(db, 'requirements', i) for i in ids]
+            return self._cancel(db, requirement_ids, reason)
+
+    def confirm_cancellation(self, cancellation_id, confirmation_reference):
+        """Consume one exact cancellation confirmation idempotently and atomically."""
+        self._text(confirmation_reference)
+        with self._transaction() as db:
+            cancellation = self._get(db, 'cancellations', cancellation_id)
+            ids = json.loads(cancellation['requirement_ids'])
+            if cancellation['confirmation_reference'] is not None:
+                return [self._get(db, 'requirements', i) for i in ids]
+            rows = self._cancel(db, ids, cancellation['reason'] or 'User confirmed cancellation')
+            db.execute('UPDATE cancellations SET confirmation_reference = ? WHERE id = ?',
+                       (confirmation_reference, cancellation_id))
+            return rows
 
     def reject(self, requirement_id, reason):
         self._text(reason)

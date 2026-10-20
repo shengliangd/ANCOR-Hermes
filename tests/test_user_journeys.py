@@ -129,12 +129,14 @@ class Journey:
         return value
 
     def error(self, tool, **args):
-        value = json.loads(self.ctx.dispatch_tool('ancor_' + tool, args))
+        context = self.coord if tool in {'board', 'acceptance', 'wake'} else self.ctx
+        value = json.loads(context.dispatch_tool('ancor_' + tool, args))
         assert 'error' in value, (tool, args, value)
         return value['error']
 
     def draft(self, brief='Deliver report', criteria='Report has exact requested values', replacement_of=None):
-        args = dict(action='draft', brief=brief, acceptance_criteria=criteria)
+        args = dict(action='draft', summary='Deliver the requested result',
+                    brief=brief, acceptance_criteria=criteria)
         if replacement_of:
             args['replacement_of'] = replacement_of
         return self.call('requirement', **args)
@@ -164,10 +166,19 @@ class Journey:
 
     def create(self, req, key):
         detail = self.call('board', action='create', requirement_id=req['id'], key=key,
-                           title='Execute ' + key, body='Produce and verify ' + key)
+                           title='Execute ' + key, body='Produce and verify ' + key,
+                           contract=self.contract(key))
         assert detail['task']['assignee'] == 'ancor-worker'
         assert not detail['task'].get('goal_mode', False), 'offline journey must not invoke goal_judge'
         return detail['task']['id']
+
+    @staticmethod
+    def contract(key):
+        return dict(objective='Execute ' + key, scope='Only ' + key,
+                    inputs=['confirmed requirement'], dependencies=[], artifacts=[key + ' artifact'],
+                    verification=['Verify ' + key],
+                    constraints=['Preserve exact values'],
+                    stop_conditions=['Required input or decision is missing'])
 
     def status(self, tid):
         return self.board.show(tid)['status']
@@ -235,12 +246,14 @@ def journey_rolling(j):
     req = j.requirement()
     a = j.create(req, 'A')
     detail = j.call('board', action='create', requirement_id=req['id'], key='B',
-                    title='Execute B', body='Depends on A', parent_ids=[a], hold=True)
+                    title='Execute B', body='Depends on A', parent_ids=[a], hold=True,
+                    contract=j.contract('B'))
     b = detail['task']['id']
     assert a in detail['parents'] and j.status(b) == 'blocked'
     metadata = j.board.show(b)['body'].split('\n', 1)[0]
     edited = j.call('board', action='edit', task_id=b, title='Execute revised B',
-                    body='Produce and verify revised B', priority=7)
+                    body='Produce and verify revised B', priority=7,
+                    contract=j.contract('B'))
     assert edited['task']['title'] == 'Execute revised B'
     assert edited['task']['priority'] == 7
     assert edited['task']['body'].split('\n', 1)[0] == metadata
@@ -272,9 +285,6 @@ def journey_blocker(j):
     assert any(e['kind'] == 'native.blocked' for e in j.store.pending_events())
     assert not j.sent, 'worker blocker must not automatically notify the human'
     j.call('board', action='comment', task_id=tid, body='Coordinator resolved source: use approved fixture')
-    j.call('board', action='unblock', task_id=tid, reason='Source resolved by coordinator')
-    j.claim(tid)
-    j.worker(tid, 'block', 'Human must choose report label', '--kind', 'needs_input')
     j.call('notify', action='send', id='label-question', kind='question', message='Use label Quarterly?',
            requirement_id=req['id'], task_id=tid)
     answer = 'Yes, use Quarterly. Do not deploy.'
@@ -290,6 +300,9 @@ def journey_blocker(j):
         source_key='notification.response:' + response['id'])
     assert event['payload']['authorization'] is False
     j.call('board', action='comment', task_id=tid, body=answer)
+    j.call('board', action='unblock', task_id=tid, reason='Source and label resolved')
+    j.claim(tid)
+    j.worker(tid, 'block', 'Worker hit another blocker after resuming', '--kind', 'needs_input')
     assert j.status(tid) == 'triage', 'native repeat-block protection must remain intact'
     j.call('board', action='revise', task_id=tid, reason='Coordinator reviewed repeated blocker; human supplied label')
     j.complete(tid)

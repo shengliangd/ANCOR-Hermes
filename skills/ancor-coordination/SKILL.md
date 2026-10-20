@@ -1,113 +1,63 @@
 ---
 name: ancor-coordination
-description: Use when confirming ANCOR requirements or coordinating work.
+description: Use for background ANCOR coordination: planning bounded worker cards, maintaining dependencies, resolving blockers, recovering interrupted work, verifying artifacts, accepting requirements, and creating durable human outcomes.
 ---
 
 # ANCOR coordination
 
-## User conversation
+You coordinate confirmed requirements. You do not receive ordinary user conversations, do not speak as the interactor, and never create or confirm requirements. The interactor owns human dialogue; workers own bounded execution.
 
-Do light work yourself. For substantial work, use `ancor_requirement` to draft a
-brief and acceptance criteria. Explain scope, constraints and relevant tradeoffs;
-present the complete draft in the current conversation, then call native `clarify`
-with the exact returned `clarify_args`.
-Check `ancor_get_context` to verify activation before saying work was handed off.
+## Start from durable state
 
-For a change, draft the complete replacement with `replacement_of` set to the
-current requirement ID. Confirmation invalidates that requirement and creates a
-new one. A stale proposal needs a fresh draft and confirmation. Do not create
-requirement or change cards in Kanban.
+Begin with `ancor_get_context` as a compact overview. Requirement previews and the task list are intentionally summarized: expand the target requirement with `ancor_get_context(requirement_id=...)`, read one complete event with `ancor_get_context(event_id=...)`, inspect a specific card with `ancor_board show`, and read one open question with `ancor_notify list(id=..., open_only=true)`, scoping longer histories by `requirement_id` or `task_id`, before acting. Preview fields are never authoritative; expand before transcribing or deciding. Consider all active and paused requirements, pending events, current tasks, comments, runs, artifacts, and open notifications, not just the current batch. A task may support multiple requirements; use `ancor_board associate` instead of rewriting its card.
 
-## Background coordination
+## Plan incremental work
 
-Start from `ancor_get_context` and the board. Pending events help direct attention;
-consider all current requirements, ongoing work and conflicts, not just the batch.
-On `host.recovery`, reconcile the current durable snapshot rather than replaying
-old decisions: reuse existing task keys, inspect acceptance evidence and the
-outbox, and finish missing handoffs. An accepted requirement without a notice
-needs a real coordinator-authored completion, not another acceptance. Reuse the exact
-stored message for a pending notification. Never resend `sending`/`uncertain`
-notifications or replace their IDs; reconcile transport evidence first. Sent
-completions are finished. Acknowledge recovery once handled or durably waiting;
-waiting alone is not a reason for repeated coordination turns.
+Create only the next useful bounded outcome. Every `ancor_board create` call must include a complete `contract`:
 
-- Resolve blockers and execution errors before asking the user. Inspect attempts
-  and evidence; clarify task context, unblock safely or create focused support work.
-- Plan incrementally through `ancor_board`. The coordinator performs decomposition;
-  Kanban only stores dependencies and dispatches execution. Supply `parent_ids`
-  during creation to establish dependencies atomically. Use `hold=true` while
-  arranging a graph, then unblock when ready; do not expose a ready task before
-  adding its prerequisites. For replacement dependencies, hold the child or add
-  the new prerequisite before unlinking the obsolete one. Reuse stable task keys.
-- Use `edit` for task title/body/priority within confirmed scope, and `link`/`unlink`
-  for dependencies. A repeat-blocked task may enter triage: inspect the cause,
-  record a remedy and use explicit `revise`, not repeated unblock attempts.
-  Abandoned blocked work can be explicitly `retire`d after quiescence with a reason;
-  history stays intact and retirement is not fabricated completion.
-- Parallelize independent work. Before creation, consider shared files, services,
-  accounts and capacity across requirements. Sequence conflicting work and ask
-  the user to resolve contradictory requirements.
-- On invalidation, stop obsolete execution. A blocked task is not a stopped
-  process. Establish quiescence before replacement work can conflict; preserve
-  artifacts and never relabel old evidence as new-version acceptance.
-- Inspect completed artifacts and run acceptance checks against the exact current
-  criteria. Record `ancor_acceptance` only after verification. If a criterion fails,
-  reject with evidence and create bounded repair work; the requirement stays open.
+- `objective`: the concrete result this card produces.
+- `scope`: what is included and what is explicitly excluded.
+- `inputs`: exact values, paths, references, and context the worker needs.
+- `dependencies`: human-readable prerequisites; `parent_ids` remains the enforcing native graph.
+- `artifacts`: the inspectable outputs and their expected locations or forms.
+- `verification`: checks the worker must run and the evidence it must return.
+- `constraints`: acceptance-relevant limits, exact values, compatibility, and authorization boundaries.
+- `stop_conditions`: missing input, conflict, failed verification, scope expansion, or other reasons to stop and escalate.
 
+Keep the card self-contained. Workers must not need to read the full requirement store. Use stable task keys, hold cards while arranging dependencies, and parallelize only work that does not share conflicting files, services, accounts, or capacity.
 
-Record useful decisions on tasks, then acknowledge only the supplied event IDs
-that have been handled. New events remain pending. An unresolved human question
-should be durable and explicit, not a reason to spin or repeatedly send it.
-Acknowledging a blocked event does not require a delivered question; delivery
-uncertainty remains visible as stalled health. Re-ask with a new notification ID
-only after confirming it is safe.
+Write the card around the outcome and its evidence, not around unverified assumptions. A card states what must be true and what the worker must produce; it does not predict the environment. If a dependency may be unavailable, make obtaining or verifying it part of the work rather than a stop condition. A stop condition marks a genuine external boundary, not the first failed attempt.
 
-## Waiting and liveness
+For a body change, resupply the full contract; for title or priority changes, leave the body untouched. Use `revise` only for a genuine triage failure after inspecting the cause. Retire abandoned blocked work only after quiescence, with a reason, and never present retirement as completion.
 
-Before ending a turn, inspect `progression` for every active requirement. It
-reports real health: `active` requires a running task with a fresh heartbeat, or
-ready work; `waiting_on_human` requires a blocked task with a delivered,
-unanswered question. Everything else is `stalled`: `triage`, a stale heartbeat,
-a blocked task without an open question, a blocked task whose question was
-answered, no work, or acceptance pending. Triage is a failure to repair, never a
-steady state. A scheduled wake is a timer, never progress.
+## Resolve work and blockers
 
-Pending `host.stalled` is a host-owned condition event. It cannot be acknowledged;
-it clears only when the requirement actually recovers. Repair the missing work or
-ask a real question instead of unblocking, revising, or commenting to silence it.
+Own recoverable blockers before asking the human. Treat a worker's blocker report as evidence, not a verdict: separate what happened in that attempt from the conclusion drawn about what is possible. A local failure describes the environment or route tried, not a global limit. Use the access you already have, within confirmed scope, to inspect evidence, repair the card or context, try a compatible route, or create a focused probe or setup task. Escalate only when the next useful action needs authority, private access, credentials, spending, or a scope decision that you do not have. A question must state what you tried and the smallest human-only gap; do not ask for discovery or setup you can do yourself.
 
-Use `ancor_wake` schedule with requirement_id, a concrete reason, and future due_at
-(Unix seconds) for an explicit timed recheck. List before scheduling; replace by
-wake_id when the plan changes, cancel obsolete wakes. Registration itself does not
-wake the coordinator. Due wakes enter the ordinary serialized inbox and require
-explicit acknowledgement. Invalidated/accepted requirements suppress obsolete wakes.
-A long wait may be legitimate: do not move it earlier just to keep the system busy.
+When human input is genuinely required, first put the linked task in `blocked` (never ask from a running or `triage` card), then use `ancor_notify` with `kind=question`, an active `requirement_id`, and that `task_id`. Keep the task blocked while the question is open. Only one open question may exist per requirement and task; reuse the same notification ID when retrying, never create a `-r2` variant. The message must state the purpose ("need information", "need authorization", or "need a decision"), the missing input or concrete choice, your recommendation, and how to reply. Use neutral system language, never the user's voice.
 
-`host.liveness` is insurance while any requirement is active, not a work plan.
-Inspect current work, repair missing progression sources, then acknowledge it.
-The coordinator's first ANCOR tool call records actual coordination and resets
-the two-hour deadline once per child session; process creation, queued events and
-failed CLI startup do not. Scanner outages, launch failures, or an existing stuck
-coordinator can make it overdue: report the infrastructure problem, never start
-an overlapping coordinator. No active requirements means no periodic insurance calls.
+A human reply arrives as a durable notification response. Consume that event; never infer an answer from chat or task comments. A reply can clarify execution but cannot silently authorize a requirement change or a new consequential action.
 
-## Human communication
+## Invalidation and recovery
 
-Use `ancor_notify` with a stable ID for questions and `accept:<requirement_id>`
-for accepted completion. A question must name both its active `requirement_id` and
-the linked `task_id`; keep that task blocked while the question is open. Human replies
-are transcribed by the interactor and arrive as `notification.response`; consume that
-durable event rather than waiting for or inferring an answer from chat or task comments.
-Use the configured native user destination, never raw task-event subscriptions.
-Open each notification with its purpose: “需要你提供信息”, “需要你授权”,
-“需要你决定”, or “完成了一项需求”, followed by the requirement's short name.
-For requests, state the missing input or concrete action/decision, your recommendation
-and how to reply. For completion, state the result and where to find it.
-Explain what matters, what is needed and your recommendation. Keep routine
-progress quiet; do not dump IDs or logs unless useful. Confirm transport success
-before treating a question or completion notice as delivered. If delivery is
-unavailable, retain the pending outcome and report the infrastructure issue.
+## Pause and resume
 
-A reply can clarify execution but cannot silently authorize a requirement change
-or a new consequential external action. Preserve its requirement context and
-wake coordination.
+`requirement.paused` is a human decision already confirmed through the interactor. Stop creating or associating new work for that requirement. Block linked `running` or `ready` tasks with a reason that references the pause, preserve their artifacts and evidence, and wait for quiescence; never kill a worker or rewrite the requirement. A paused requirement is not stalled and does not drive liveness. Leave existing triage for review after resume rather than revising it while paused.
+
+`requirement.resumed` reactivates coordination. Re-read the requirement, linked tasks, comments, runs and evidence. Unblock or replan only work whose pause-related blocker is actually resolved and whose contract still fits the active requirement; do not blindly unblock every task that was blocked before the pause.
+
+On a confirmed replacement, stop obsolete execution, preserve artifacts, and establish quiescence before allowing replacement work to conflict. A blocked task is not necessarily a stopped process. Never relabel old evidence as acceptance for a new requirement.
+
+On `host.recovery`, reconcile the current durable snapshot. Reuse existing task keys, inspect acceptance evidence and the notification outbox, and finish missing handoffs. Pending notices stay pending; `sending` or `uncertain` delivery requires transport evidence and operator reconciliation, never a blind retry or replacement ID.
+
+## Verify and accept
+
+A worker completion is evidence, not requirement acceptance. Inspect the actual artifacts and run the exact acceptance checks. Record `ancor_acceptance` only after independent verification, binding the exact stored criteria, verification results, artifact locations, and linked task IDs. If a criterion fails, reject with evidence and create bounded repair work while the requirement stays active.
+
+After acceptance, create the durable completion outcome with `ancor_notify`, using ID `accept:<requirement_id>`. It must state the verified result and where to find it. The interactor presents or interprets it; the coordinator does not conduct a user dialogue.
+
+## Health, wakes, and events
+
+Before ending a turn, inspect `progression` for every active or paused requirement. `active` requires a running task with a fresh heartbeat or ready work. `waiting_on_human` requires a blocked task with a delivered, unanswered question; it is a transport state, not evidence that the blocker was correctly classified. `paused` is a deliberate resting state, not stalled and not liveness. Triage, stale heartbeats, blocked tasks without an open question, blocked tasks after their question was answered, no work, and pending acceptance are stalled only for active requirements.
+
+Use `ancor_wake` only for a concrete future recheck. A scheduled wake is a timer, never progress. `host.stalled` is host-owned and cannot be acknowledged; repair the real cause. Event payloads are previews; expand a decision-critical payload with `event_id` before acting. Acknowledge only event IDs actually handled, and remember that acknowledging an event does not prove notification delivery.

@@ -1,11 +1,27 @@
 """Coordinator operations over the native CLI."""
 from .board import NativeBoard
 from .service import Service
+from .views import task_summary
 
 
-def build_work_contract(*, objective, scope, task, inputs=(), dependencies=(),
-                        constraints=(), artifacts=(), verification=(),
-                        stop_conditions=(), report=()):
+_STATUS_ORDER = {
+    'running': 0, 'ready': 1, 'blocked': 2, 'triage': 3, 'todo': 4,
+    'review': 5, 'done': 6, 'cancelled': 7,
+}
+
+
+def _recency(task):
+    for key in ('updated_at', 'last_heartbeat_at', 'completed_at',
+                'started_at', 'created_at'):
+        value = task.get(key)
+        if isinstance(value, (int, float)):
+            return value
+    return 0
+
+
+def build_work_contract(*, objective, scope, task, inputs, dependencies,
+                        constraints, artifacts, verification, stop_conditions,
+                        report=()):
     """Render a self-contained English contract for one bounded worker task."""
     def bullets(values):
         return '\n'.join(f'- {value}' for value in values) or '- None specified'
@@ -61,6 +77,58 @@ class Operations:
         # comments, attempt summaries, events and dependency context as well.
         return self.board._call('show', task_id)
 
+    def tasks(self, *, requirement_id=None, status=None, include_archived=False):
+        """Return compact linked-task summaries without loading each card history."""
+        store = self.service.store
+        links = {link['task_id']: link['requirement_id']
+                 for link in store.snapshot()['task_links']}
+        items = []
+        for task in self.board.list():
+            linked_requirement = links.get(task['id'])
+            if linked_requirement is None:
+                continue
+            if requirement_id is not None and linked_requirement != requirement_id:
+                continue
+            if status is not None and task.get('status') != status:
+                continue
+            archived = bool(task.get('archived_at') or task.get('archived'))
+            if archived and not include_archived:
+                continue
+            items.append(task_summary(task, linked_requirement))
+        items.sort(key=lambda task: (
+            bool(task.get('archived_at') or task.get('archived')),
+            _STATUS_ORDER.get(task.get('status'), 50),
+            -_recency(task), task['id']))
+        return items
+
+    @staticmethod
+    def _contract(contract):
+        if not isinstance(contract, dict):
+            raise ValueError('contract is required')
+        allowed = {'objective', 'scope', 'inputs', 'dependencies', 'artifacts',
+                   'verification', 'constraints', 'stop_conditions', 'report'}
+        required = allowed - {'report'}
+        if set(contract) - allowed:
+            raise ValueError('contract contains unknown fields')
+        if required - set(contract):
+            raise ValueError('contract is missing required fields')
+        for field in ('objective', 'scope'):
+            value = contract[field]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f'contract {field} must be nonempty text')
+        for field in ('inputs', 'dependencies', 'artifacts', 'verification',
+                      'constraints', 'stop_conditions', 'report'):
+            if field not in contract and field == 'report':
+                continue
+            values = contract.get(field)
+            if not isinstance(values, list) or any(
+                    not isinstance(value, str) or not value.strip() for value in values):
+                raise ValueError(f'contract {field} must be a list of nonempty strings')
+        for field in ('artifacts', 'verification', 'stop_conditions'):
+            if not contract[field]:
+                raise ValueError(f'contract {field} must not be empty')
+        return contract
+
     def reconcile(self):
         """Recover durable native links; immutable requirement IDs use revision 1."""
         store = self.service.store
@@ -92,9 +160,11 @@ class Operations:
 
     def call(self, args):
         expected = self.ctx.get_config('coordinator_profile', 'ancor-coordinator')
-        if self.ctx.profile_name != expected:
-            raise PermissionError('coordinator profile required')
+        interactor = self.ctx.get_config('interactor_profile', 'ancor-interactor')
         action = args['action']
+        if self.ctx.profile_name != expected and not (
+                self.ctx.profile_name == interactor and action in {'list', 'show'}):
+            raise PermissionError('coordinator profile required')
         if action not in {'create', 'list', 'show', 'block', 'unblock', 'revise', 'comment', 'link', 'unlink', 'edit', 'associate'}:
             raise ValueError('unknown board action')
         store = self.service.store
@@ -104,6 +174,7 @@ class Operations:
             req = store.get_requirement(args['requirement_id'])
             if req['status'] != 'active':
                 raise ValueError('requirement is not active')
+            contract = self._contract(args.get('contract'))
             for field in ('key', 'title', 'body'):
                 store._text(args[field])
             parent_ids, hold = args.get('parent_ids', []), args.get('hold', False)
@@ -119,16 +190,15 @@ class Operations:
                     raise ValueError('parent requirement is not active')
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
             body = build_work_contract(
-                objective=req['brief'], scope=req['brief'], task=args['body'],
-                constraints=[req['acceptance_criteria'],
-                              'Do not change authorization or requirement version.'],
-                artifacts=['Return actual artifacts and their exact locations.'],
-                verification=['Verify the result against the acceptance criteria.',
-                               'Report checks performed and any remaining limitations.'],
-                stop_conditions=['A required input is missing or the current state conflicts with this contract.',
-                                 'Verification fails and no bounded repair is available.',
-                                 'Execution would exceed scope or require new authorization.'],
-                report=['Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
+                objective=contract['objective'], scope=contract['scope'], task=args['body'],
+                inputs=contract['inputs'], dependencies=contract['dependencies'],
+                constraints=list(dict.fromkeys([req['acceptance_criteria'],
+                                                 'Do not change authorization or requirement version.',
+                                                 *contract['constraints']])),
+                artifacts=contract['artifacts'], verification=contract['verification'],
+                stop_conditions=contract['stop_conditions'],
+                report=contract.get('report') or [
+                    'Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
             task = self.board.create(req['id'], 1, args['key'], title=args['title'],
                                      body=body,
                                      assignee=worker_profile, parent_ids=parent_ids, hold=hold)
@@ -140,8 +210,17 @@ class Operations:
         snapshot = store.snapshot()
         links = {link['task_id']: link['requirement_id'] for link in snapshot['task_links']}
         if action == 'list':
-            return {'tasks': [self.detail(tid) for tid, rid in links.items()
-                              if not args.get('requirement_id') or rid == args['requirement_id']]}
+            limit = args.get('limit', 100)
+            if type(limit) is not int or not 1 <= limit <= 200:
+                raise ValueError('limit must be an integer between 1 and 200')
+            include_archived = args.get('include_archived', False)
+            if type(include_archived) is not bool:
+                raise ValueError('include_archived must be a boolean')
+            items = self.tasks(requirement_id=args.get('requirement_id'),
+                               status=args.get('status'),
+                               include_archived=include_archived)
+            return {'tasks': items[:limit], 'count': len(items),
+                    'returned': min(len(items), limit), 'truncated': len(items) > limit}
         if action in {'link', 'unlink'}:
             parent, child = args['parent_id'], args['child_id']
             for tid in (parent, child):
@@ -173,6 +252,8 @@ class Operations:
             req = store.get_requirement(links[tid])
             if req['status'] != 'active':
                 raise ValueError('requirement is not active')
+            if 'contract' in args and 'body' not in args:
+                raise ValueError('contract edits require body')
             fields = {key: args[key] for key in ('title', 'body', 'priority') if key in args}
             if 'priority' in fields and type(fields['priority']) is not int:
                 raise ValueError('priority must be an integer')
@@ -180,21 +261,21 @@ class Operations:
                 store._text(fields['title'])
             if 'body' in fields:
                 store._text(fields['body'])
+                contract = self._contract(args.get('contract'))
                 metadata = self.board.link(detail['task'])
                 if not metadata or metadata['requirement_id'] != req['id'] or metadata['revision'] != 1:
                     raise ValueError('native task association mismatch')
                 link_line = detail['task']['body'].split('\n', 1)[0]
                 fields['body'] = link_line + '\n' + build_work_contract(
-                    objective=req['brief'], scope=req['brief'], task=fields['body'],
-                    constraints=[req['acceptance_criteria'],
-                                  'Do not change authorization or requirement version.'],
-                    artifacts=['Return actual artifacts and their exact locations.'],
-                    verification=['Verify the result against the acceptance criteria.',
-                                   'Report checks performed and any remaining limitations.'],
-                    stop_conditions=['A required input is missing or the current state conflicts with this contract.',
-                                     'Verification fails and no bounded repair is available.',
-                                     'Execution would exceed scope or require new authorization.'],
-                    report=['Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
+                    objective=contract['objective'], scope=contract['scope'], task=fields['body'],
+                    inputs=contract['inputs'], dependencies=contract['dependencies'],
+                    constraints=list(dict.fromkeys([req['acceptance_criteria'],
+                                                     'Do not change authorization or requirement version.',
+                                                     *contract['constraints']])),
+                    artifacts=contract['artifacts'], verification=contract['verification'],
+                    stop_conditions=contract['stop_conditions'],
+                    report=contract.get('report') or [
+                        'Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
             return self.board.edit(tid, **fields)
         text = None
         if action == 'block':

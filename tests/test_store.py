@@ -153,3 +153,95 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(combined['status'], 'active')
         self.assertEqual(self.store.get_requirement(a['id'])['status'], 'invalidated')
         self.assertEqual(self.store.get_requirement(b['id'])['status'], 'invalidated')
+
+    def test_confirmed_cancellation_is_atomic_and_idempotent(self):
+        first = self.store.confirm(self.store.create_draft('one', 'criteria')['id'], 'ref1')
+        second = self.store.confirm(self.store.create_draft('two', 'criteria')['id'], 'ref2')
+        proposal = self.store.create_cancellation([first['id'], second['id']], 'withdrawn together')
+        self.assertEqual([r['status'] for r in (self.store.get_requirement(first['id']),
+                                                self.store.get_requirement(second['id']))],
+                         ['active', 'active'])
+        result = self.store.confirm_cancellation(proposal['id'], 'confirmation-1')
+        self.assertEqual([r['status'] for r in result], ['cancelled', 'cancelled'])
+        retry = self.store.confirm_cancellation(proposal['id'], 'confirmation-1')
+        self.assertEqual([r['status'] for r in retry], ['cancelled', 'cancelled'])
+        cancelled = [e for e in self.store.pending_events()
+                     if e['kind'] == 'requirement.cancelled']
+        self.assertEqual(len(cancelled), 2)
+
+    def test_cancellation_proposal_requires_all_active_requirements(self):
+        first = self.store.confirm(self.store.create_draft('one', 'criteria')['id'], 'ref1')
+        second = self.store.confirm(self.store.create_draft('two', 'criteria')['id'], 'ref2')
+        proposal = self.store.create_cancellation([first['id'], second['id']], None)
+        self.store.cancel([second['id']], 'already withdrawn')
+        with self.assertRaises(ValueError):
+            self.store.confirm_cancellation(proposal['id'], 'confirmation-2')
+        self.assertEqual(self.store.get_requirement(first['id'])['status'], 'active')
+    def test_pause_and_resume_commands_are_durable_and_idempotent(self):
+        requirement = self.store.confirm(
+            self.store.create_draft('brief', 'criteria')['id'], 'ref')
+        proposal = self.store.create_requirement_command(
+            'pause', requirement['id'], 'user asked', 'Stop briefly')
+        self.assertEqual(proposal, self.store.create_requirement_command(
+            'pause', requirement['id'], 'user asked', 'Stop briefly'))
+        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'active')
+
+        paused = self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
+        self.assertEqual(paused['status'], 'paused')
+        retry = self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
+        self.assertEqual(retry['status'], 'paused')
+        events = [e for e in self.store.pending_events()
+                  if e['kind'] == 'requirement.paused']
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['payload']['reason'], 'user asked')
+        with self.assertRaises(ValueError):
+            self.store.create_requirement_command(
+                'pause', requirement['id'], 'again', 'Already paused')
+
+        resume = self.store.create_requirement_command(
+            'resume', requirement['id'], 'user ready', 'Continue the work')
+        active = self.store.confirm_requirement_command(resume['id'], 'confirmation-2')
+        self.assertEqual(active['status'], 'active')
+        self.assertEqual(len([e for e in self.store.pending_events()
+                              if e['kind'] == 'requirement.resumed']), 1)
+        with self.assertRaises(ValueError):
+            self.store.create_requirement_command(
+                'resume', requirement['id'], 'again', 'Already active')
+
+    def test_paused_requirement_can_be_cancelled_or_replaced(self):
+        requirement = self.store.confirm(
+            self.store.create_draft('brief', 'criteria')['id'], 'ref')
+        pause = self.store.create_requirement_command(
+            'pause', requirement['id'], 'user asked', 'Stop briefly')
+        self.store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'paused')
+
+        replacement = self.store.confirm(self.store.create_draft(
+            'changed', 'new criteria', requirement['id'])['id'], 'replacement-confirmation')
+        self.assertEqual(replacement['status'], 'active')
+        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'invalidated')
+
+        paused = self.store.confirm(
+            self.store.create_draft('cancel me', 'criteria')['id'], 'ref2')
+        command = self.store.create_requirement_command(
+            'pause', paused['id'], 'user asked', 'Stop briefly')
+        self.store.confirm_requirement_command(command['id'], 'pause-confirmation-2')
+        cancellation = self.store.create_cancellation([paused['id']], 'withdrawn while paused')
+        cancelled = self.store.confirm_cancellation(cancellation['id'], 'cancel-confirmation')
+        self.assertEqual(cancelled[0]['status'], 'cancelled')
+
+    def test_pause_event_failure_rolls_back_status(self):
+        requirement = self.store.confirm(
+            self.store.create_draft('brief', 'criteria')['id'], 'ref')
+        proposal = self.store.create_requirement_command(
+            'pause', requirement['id'], 'user asked', 'Stop briefly')
+        db = sqlite3.connect(self.path)
+        try:
+            db.execute("CREATE TRIGGER fail_pause BEFORE INSERT ON events "
+                       "BEGIN SELECT RAISE(ABORT, 'disk simulation'); END")
+            db.commit()
+        finally:
+            db.close()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
+        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'active')

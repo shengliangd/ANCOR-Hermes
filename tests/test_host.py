@@ -217,6 +217,21 @@ def test_idle_never_spawns(tmp_path, monkeypatch):
     assert asyncio.run(host.coordinator.tick()) == 'idle'
 
 
+def test_paused_requirement_remains_visible_without_liveness(tmp_path):
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('pause me', 'verified')['id'], 'human:1')
+    store.link_task(req['id'], 'task')
+    pause = store.create_requirement_command('pause', req['id'], 'user asked', 'Stop briefly')
+    store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+    host = Host(ctx, store=store, board=Board({'id': 'task', 'status': 'blocked'}))
+    snapshot = host.snapshot()
+    assert [item['id'] for item in snapshot['requirements']] == [req['id']]
+    assert snapshot['requirements'][0]['status'] == 'paused'
+    assert snapshot['progression'][0]['state'] == 'paused'
+    assert snapshot['liveness']['due_at'] is None
+
+
 def test_per_task_cursors_preserve_racing_and_newly_discovered_history(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])

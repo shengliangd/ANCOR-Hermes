@@ -47,6 +47,20 @@ def test_idempotency_and_no_automatic_duplicate_send(tmp_path):
         outbox.enqueue('c', 'completion', 'Changed', actor='coordinator')
 
 
+def test_one_open_question_per_requirement_task(tmp_path):
+    outbox = box(tmp_path)
+    outbox.enqueue('q1', 'question', 'Which label?', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    with pytest.raises(RuntimeError, match='q1'):
+        outbox.enqueue('q2', 'question', 'Which label?', actor='coordinator',
+                       requirement_id='req', task_id='task')
+    outbox.enqueue('q1', 'question', 'Which label?', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    outbox.respond('q1', 'Quarterly', 'turn-1')
+    outbox.enqueue('q2', 'question', 'Any other label?', actor='coordinator',
+                   requirement_id='req', task_id='task')
+
+
 @pytest.mark.parametrize('receipt', [{'success': True, 'skipped': True}, {'accepted': True}, {'error': 'no'}, None])
 def test_unconfirmed_receipts_never_become_sent(tmp_path, receipt):
     outbox = box(tmp_path, lambda *_: receipt)

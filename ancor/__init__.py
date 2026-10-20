@@ -1,9 +1,137 @@
 """Thin profile-scoped Hermes integration. No provisioning during registration."""
+import hashlib
 import json
 import logging
 import os
 
+from .views import (draft_summary, event_summaries, notification_selection,
+                    notification_summary, requirement_summary, transition_summary)
+
 log = logging.getLogger(__name__)
+
+
+_ACTION_FIELDS = {
+    'ancor_requirement': {
+        'draft': ['summary', 'brief', 'acceptance_criteria'],
+        'confirm': ['draft_id'],
+        'cancel': ['summary', 'requirement_ids'],
+        'pause': ['requirement_id', 'summary', 'reason'],
+        'resume': ['requirement_id', 'summary', 'reason'],
+        'respond': ['requirement_id', 'body'],
+    },
+    'ancor_notify': {
+        'send': ['id', 'kind', 'message'],
+        'list': [],
+        'respond': ['id', 'answer'],
+    },
+    'ancor_board': {
+        'create': ['requirement_id', 'key', 'title', 'body', 'contract'],
+        'list': [],
+        'show': ['task_id'],
+        'block': ['task_id', 'reason'],
+        'unblock': ['task_id', 'reason'],
+        'comment': ['task_id', 'body'],
+        'link': ['parent_id', 'child_id'],
+        'unlink': ['parent_id', 'child_id'],
+        'edit': ['task_id'],
+        'revise': ['task_id', 'reason'],
+        'retire': ['requirement_id', 'task_id', 'reason'],
+        'associate': ['task_id', 'requirement_id', 'reason'],
+    },
+    'ancor_wake': {
+        'schedule': ['requirement_id', 'reason', 'due_at'],
+        'list': [],
+        'cancel': ['wake_id'],
+        'replace': ['wake_id', 'reason', 'due_at'],
+    },
+    'ancor_acceptance': {
+        'accept': ['requirement_id', 'evidence'],
+        'reject': ['requirement_id', 'reason'],
+    },
+}
+
+
+def _missing_fields(args, fields):
+    missing = []
+    for field in fields:
+        value = args.get(field)
+        if (field not in args or value is None
+                or (isinstance(value, str) and not value.strip())
+                or (isinstance(value, (list, dict)) and not value)):
+            missing.append(field)
+    return missing
+
+
+def _invalid_request(name, action, *, missing=(), reason=None, next_step=None,
+                     valid_actions=None, required_any=None, valid_kinds=None):
+    missing = list(missing)
+    result = {
+        'error': reason or f'{name} {action} is missing required fields: {", ".join(missing)}',
+        'code': 'invalid_request',
+        'tool': name,
+        'action': action,
+    }
+    if missing:
+        result['missing_fields'] = missing
+    if required_any:
+        result['required_any'] = list(required_any)
+    if valid_actions:
+        result['valid_actions'] = list(valid_actions)
+    if valid_kinds:
+        result['valid_kinds'] = list(valid_kinds)
+    result['next_step'] = next_step or (
+        f'Provide {", ".join(missing)} and retry {name} with action={action}.')
+    return result
+
+
+def _validate_action_request(name, args):
+    """Return a model-actionable error before any business method runs."""
+    fields = _ACTION_FIELDS.get(name)
+    if fields is None:
+        return None
+    action = args.get('action')
+    if not isinstance(action, str) or not action.strip():
+        return _invalid_request(
+            name, action, missing=['action'],
+            reason=f'{name} requires action',
+            next_step=f'Choose one of: {", ".join(sorted(fields))}.',
+            valid_actions=sorted(fields))
+    if action not in fields:
+        return _invalid_request(
+            name, action,
+            reason=f'{name} does not support action {action!r}',
+            next_step=f'Choose one of: {", ".join(sorted(fields))}.',
+            valid_actions=sorted(fields))
+    missing = _missing_fields(args, fields[action])
+    if missing:
+        return _invalid_request(name, action, missing=missing)
+    if name == 'ancor_board' and action == 'edit':
+        editable = ['title', 'body', 'priority']
+        if not any(field in args and args[field] is not None
+                   and not (isinstance(args[field], str) and not args[field].strip())
+                   for field in editable):
+            return _invalid_request(
+                name, action,
+                reason='ancor_board edit requires at least one of title, body or priority',
+                next_step='Provide title, body or priority, then retry ancor_board edit.',
+                required_any=editable)
+    if name == 'ancor_notify' and action == 'send':
+        kind = args.get('kind')
+        if kind == 'question':
+            missing = _missing_fields(args, ['requirement_id', 'task_id'])
+            if missing:
+                return _invalid_request(name, action, missing=missing)
+        elif kind == 'completion':
+            missing = _missing_fields(args, ['requirement_id'])
+            if missing:
+                return _invalid_request(name, action, missing=missing)
+        elif kind not in {'question', 'completion'}:
+            return _invalid_request(
+                name, action,
+                reason=f'ancor_notify send does not support kind {kind!r}',
+                next_step='Choose kind=question or kind=completion.',
+                valid_kinds=['question', 'completion'])
+    return None
 
 
 def register(ctx, *, scan_runner=None):
@@ -57,7 +185,7 @@ def register(ctx, *, scan_runner=None):
                 response_event(row)
         return rows
 
-    def wake(args):
+    def wake(args, **_native):
         from .scheduling import Scheduling
         return Scheduling(service.store).call(args)
 
@@ -76,33 +204,172 @@ def register(ctx, *, scan_runner=None):
             if event['kind'] == 'native.block_loop_detected' and task.get('status') == 'triage':
                 raise ValueError(f'event {identifier} cannot be acknowledged while {task_id} is in triage')
 
-    def get_context(args):
+    def get_context(args, **_native):
+        requirement_id = args.get('requirement_id')
+        task_limit = args.get('task_limit', 100)
+        if type(task_limit) is not int or not 1 <= task_limit <= 200:
+            raise ValueError('task_limit must be an integer between 1 and 200')
+        event_limit = args.get('event_limit', 100)
+        if type(event_limit) is not int or not 1 <= event_limit <= 500:
+            raise ValueError('event_limit must be an integer between 1 and 500')
+        event_id = args.get('event_id')
+        if event_id is not None and (type(event_id) is not int or event_id < 1):
+            raise ValueError('event_id must be a positive integer')
         try:
-            extra = {'notifications': notifications()}
+            notification_rows = notifications()
         except ValueError as exc:
-            extra = {'notifications': [], 'notifications_error': str(exc)}
-        tasks = None
-        if coordinator:
-            try:
-                tasks = operations.board.list()
-            except Exception as exc:
-                extra['board_error'] = str(exc)
-        if coordinator and args.get('ack_event_ids'):
-            validate_acks(args['ack_event_ids'], service.store.snapshot(), tasks)
+            notification_rows = []
+            notification_error = str(exc)
+        else:
+            notification_error = None
+        extra = {'notifications_error': notification_error} if notification_error else {}
+        all_tasks = None
+        try:
+            all_tasks = operations.tasks(include_archived=True)
+        except Exception as exc:
+            extra['board_error'] = str(exc)
+        if args.get('ack_event_ids'):
+            validate_acks(args['ack_event_ids'], service.store.snapshot(), all_tasks or [])
+        data = service.get_context(args if coordinator else {})
+        if event_id is not None:
+            if not coordinator:
+                raise PermissionError('coordinator profile required to inspect events')
+            event = next((row for row in data['pending_events']
+                          if row['id'] == event_id), None)
+            if event is None:
+                raise KeyError(event_id)
+            return {'event': event,
+                    'expand': 'Use ancor_board show with the payload task_id for full task evidence.'}
         from .scheduling import Scheduling
-        data = service.get_context(args)
-        return {**data, **Scheduling(service.store).observation(data, tasks, extra['notifications']), **extra}
+        observation = Scheduling(service.store).observation(
+            data, all_tasks, notification_rows)
+        drafts_by_id = {draft['id']: draft for draft in data['drafts']}
+        expand = ('Call ancor_get_context with requirement_id=<id> for exact requirement text'
+                  + (', or event_id=<id> for one complete event' if coordinator else '')
+                  + '; call ancor_board show with task_id=<id> for the full contract, '
+                    'comments, runs and events.')
+        if requirement_id:
+            requirement = service.store.get_requirement(requirement_id)
+            linked = [task for task in all_tasks or []
+                      if task.get('requirement_id') == requirement_id]
+            active = [task for task in linked if not task.get('archived')]
+            visible = active[:task_limit]
+            relevant = [row for row in notification_rows
+                        if row.get('requirement_id') == requirement_id]
+            task_ids = {task['id'] for task in linked}
+            events = [event for event in data['pending_events']
+                      if (event.get('payload') or {}).get('requirement_id') == requirement_id
+                      or (event.get('payload') or {}).get('task_id') in task_ids]
+            filtered = {**data, 'requirements': [requirement],
+                        'task_links': [link for link in data['task_links']
+                                       if link['requirement_id'] == requirement_id]}
+            scoped = Scheduling(service.store).observation(
+                filtered, linked, notification_rows)
+            result = {
+                'requirement': requirement,
+                'summary': (drafts_by_id.get(requirement['draft_id']) or {}).get('summary'),
+                'tasks': visible,
+                'task_count': len(active),
+                'archived_task_count': len(linked) - len(active),
+                'task_truncated': len(visible) < len(active),
+                'notifications': [notification_summary(row) for row
+                                  in notification_selection(relevant)],
+                'notification_count': len(relevant),
+                'open_question_count': sum(
+                    row.get('kind') == 'question' and row.get('answer') is None
+                    for row in relevant),
+                'notifications_truncated': len(relevant) > 20,
+                'transitions': [transition_summary(event) for event in
+                                service.store.requirement_transitions(requirement_id)],
+                'progression': scoped['progression'],
+                'liveness': scoped['liveness'],
+                'scheduled_wakes': scoped['scheduled_wakes'],
+                'expand': expand,
+                **extra,
+            }
+            if coordinator:
+                result['pending_events'] = event_summaries(events, event_limit)
+                result['pending_event_count'] = len(events)
+                result['pending_events_truncated'] = len(events) > event_limit
+            else:
+                result['pending_event_count'] = len(events)
+            return result
+        confirmed_drafts = {requirement['draft_id'] for requirement in data['requirements']}
+        visible = [task for task in all_tasks or [] if not task.get('archived')]
+        result = {
+            'requirements': [requirement_summary(
+                requirement, drafts_by_id.get(requirement['draft_id']))
+                for requirement in data['requirements']],
+            'tasks': visible[:task_limit],
+            'linked_task_count': len(all_tasks or []),
+            'task_truncated': len(visible) > task_limit,
+            'notifications': [notification_summary(row) for row
+                              in notification_selection(notification_rows)],
+            'notification_count': len(notification_rows),
+            'open_question_count': sum(
+                row.get('kind') == 'question' and row.get('answer') is None
+                for row in notification_rows),
+            'notifications_truncated': len(notification_rows) > 20,
+            'progression': observation['progression'],
+            'liveness': observation['liveness'],
+            'scheduled_wakes': observation['scheduled_wakes'],
+            'expand': expand,
+            **extra,
+        }
+        if interactor:
+            result['drafts'] = [draft_summary(draft) for draft in data['drafts']
+                                if draft['id'] not in confirmed_drafts]
+        if coordinator:
+            result['pending_events'] = event_summaries(data['pending_events'], event_limit)
+            result['pending_event_count'] = len(data['pending_events'])
+            result['pending_events_truncated'] = len(data['pending_events']) > event_limit
+        else:
+            result['pending_event_count'] = len(data['pending_events'])
+        return result
 
     def notify(args, **native):
         action = args['action']
         if action == 'list':
-            return {'notifications': notifications()}
+            rows = notifications()
+            identifier = args.get('id')
+            if identifier:
+                rows = [row for row in rows if row['id'] == identifier]
+                if not rows:
+                    raise KeyError(identifier)
+            state = args.get('state')
+            if state:
+                rows = [row for row in rows if row['state'] == state]
+            for field in ('requirement_id', 'task_id'):
+                value = args.get(field)
+                if value:
+                    rows = [row for row in rows if row.get(field) == value]
+            if args.get('open_only'):
+                rows = [row for row in rows if row['kind'] == 'question'
+                        and row['answer'] is None]
+            limit = args.get('limit', 50)
+            if type(limit) is not int or not 1 <= limit <= 200:
+                raise ValueError('limit must be an integer between 1 and 200')
+            total = len(rows)
+            rows = rows[-limit:]
+            full = args.get('view') == 'full' or bool(identifier)
+            return {'notifications': rows if full else
+                    [notification_summary(row) for row in rows],
+                    'count': total, 'returned': len(rows),
+                    'truncated': total > len(rows)}
         box = outbox()
         identifier = args['id']
         if action == 'send':
             if not coordinator:
                 raise PermissionError('coordinator profile required to send notifications')
             requirement_id, task_id = args.get('requirement_id'), args.get('task_id')
+            try:
+                existing = box.get(identifier)
+            except KeyError:
+                existing = None
+            retry_same_question = bool(
+                existing and existing['kind'] == 'question'
+                and existing['requirement_id'] == requirement_id
+                and existing['task_id'] == task_id)
             if args['kind'] == 'completion':
                 req = service.store.get_requirement(requirement_id)
                 if req['status'] != 'accepted':
@@ -119,6 +386,18 @@ def register(ctx, *, scan_runner=None):
                          if link['requirement_id'] == req['id']}
                 if task_id not in links:
                     raise ValueError('question task must be linked to the requirement')
+                if not retry_same_question:
+                    task = operations.board.show(task_id)
+                    if task.get('archived_at') or task.get('archived'):
+                        raise RuntimeError('question requires an unarchived task')
+                    if task.get('status') != 'blocked':
+                        if task.get('status') == 'triage':
+                            raise RuntimeError(
+                                f'question requires a blocked task; {task_id} is in triage, '
+                                'which must be reviewed and revised before asking the human')
+                        raise RuntimeError(
+                            f'question requires a blocked task; {task_id} is '
+                            f'{task.get("status")}')
             box.enqueue(identifier, args['kind'], args['message'], actor=ctx.profile_name,
                         requirement_id=requirement_id, task_id=task_id)
             return box.deliver(identifier, actor=ctx.profile_name)
@@ -138,7 +417,7 @@ def register(ctx, *, scan_runner=None):
             return {'notification': row, 'event': response_event(row)}
         raise ValueError('unknown notification action')
 
-    def requirement(args):
+    def requirement(args, **_native):
         if args['action'] != 'respond':
             return service.requirement(args)
         req = service.store.get_requirement(args['requirement_id'])
@@ -146,18 +425,20 @@ def register(ctx, *, scan_runner=None):
         # Foreground transcription is advisory input, never consent evidence.
         return service.store.add_event('requirement.response', {
             'requirement_id': req['id'], 'body': body,
-            'source': 'interactor_transcription', 'authorization': False})
+            'source': 'interactor_transcription', 'authorization': False},
+            source_key='requirement.response:' + req['id'] + ':' +
+            hashlib.sha256(body.encode('utf-8')).hexdigest())
 
     def retirement():
         from .retirement import Retirement
         return Retirement(ctx, service.store, operations.board)
 
-    def board_action(args):
+    def board_action(args, **_native):
         if args['action'] == 'retire':
             return retirement().retire(args['requirement_id'], args['task_id'], args['reason'])
         return operations.call(args)
 
-    def acceptance(args):
+    def acceptance(args, **_native):
         if args['action'] == 'accept':
             operations.reconcile()
             retired = retirement().effective_retired(args['requirement_id'])
@@ -172,71 +453,116 @@ def register(ctx, *, scan_runner=None):
     if interactor:
         ctx.register_hook('pre_tool_call', service.pre_tool_call)
         ctx.register_hook('post_tool_call', service.post_tool_call)
-    definitions = {
-        'ancor_wake': ('Manage durable future one-shot wakes. schedule requires requirement_id, reason, due_at (Unix seconds); replace requires wake_id, reason, due_at; cancel requires wake_id. list optionally filters requirement_id. Mutations require coordinator. Never create immediate self-wake loops.',
-                       {'action': {'type': 'string', 'enum': ['schedule', 'list', 'cancel', 'replace']},
-                        'requirement_id': {'type': 'string'}, 'wake_id': {'type': 'string'},
-                        'reason': {'type': 'string'}, 'due_at': {'type': 'number'}}, ['action']),
-        'ancor_notify': ('Send a durable question or accepted completion (coordinator only), list notifications, or transcribe a human answer. Answers are advisory, never authorization. Reuse stable IDs; completion IDs must be accept:<requirement_id>. Uncertain delivery requires operator reconciliation, not a new ID.',
-                         {'action': {'type': 'string', 'enum': ['send', 'list', 'respond']},
-                          'id': {'type': 'string'},
-                          'kind': {'type': 'string', 'enum': ['question', 'completion']},
-                          'message': {'type': 'string'}, 'answer': {'type': 'string'},
-                          'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'}}, ['action']),
-        'ancor_requirement': ('Prepare an immutable draft and exact native clarify_args. Call native clarify separately; only its submitted exact confirmation activates the requirement. cancel and replace accept one or more requirement_ids atomically; respond records the exact human reply as advisory input, never new authorization.',
-                              {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'link', 'cancel', 'replace', 'respond']},
-                               'body': {'type': 'string'},
-                               'brief': {'type': 'string'}, 'acceptance_criteria': {'type': 'string'},
-                               'replacement_of': {'type': 'string'}, 'draft_id': {'type': 'string'},
-                               'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
-                               'requirement_ids': {'type': 'array', 'items': {'type': 'string'}},
-                               'reason': {'type': 'string'}}, ['action']),
-        'ancor_board': ('Read linked native tasks. Coordinator actions: create, block, unblock, comment, edit title/body/priority, link/unlink parent_id → child_id dependencies. Native ownership and cycle checks apply.',
-                        {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock', 'comment', 'link', 'unlink', 'edit', 'revise', 'retire', 'associate']},
-                         'priority': {'type': 'integer'},
-                         'parent_ids': {'type': 'array', 'items': {'type': 'string'}},
-                         'hold': {'type': 'boolean'},
-                         **{field: {'type': 'string'} for field in
-                            ('requirement_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'body', 'reason')}}, ['action']),
-        'ancor_get_context': ('Read the global requirement snapshot and pending events; acknowledge only explicit event IDs.',
-                             {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}}}, []),
-        'ancor_acceptance': ('Record coordinator verification against exact requirement criteria, or reject with a reason.',
-                            {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['accept', 'reject']},
-                             'evidence': {
-                                 'type': 'object',
-                                 'description': 'Required for accept. Bind exact stored acceptance criteria and independently verified artifacts to linked task IDs.',
-                                 'properties': {
-                                     'criteria': {'type': 'string', 'description': 'Exact requirement acceptance_criteria text.'},
-                                     **{field: {'type': 'array', 'minItems': 1,
-                                                'items': {'type': 'string', 'pattern': r'\S'}}
-                                        for field in ('verification', 'artifacts', 'task_ids')}},
-                                 'required': ['criteria', 'verification', 'artifacts', 'task_ids']},
-                             'reason': {'type': 'string'}}, ['requirement_id', 'action']),
+    contract_schema = {
+        'type': 'object',
+        'description': 'Mandatory self-contained worker execution contract.',
+        'properties': {
+            'objective': {'type': 'string', 'pattern': r'\S'},
+            'scope': {'type': 'string', 'pattern': r'\S'},
+            'inputs': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
+            'dependencies': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
+            'artifacts': {'type': 'array', 'minItems': 1,
+                          'items': {'type': 'string', 'pattern': r'\S'}},
+            'verification': {'type': 'array', 'minItems': 1,
+                             'items': {'type': 'string', 'pattern': r'\S'}},
+            'constraints': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
+            'stop_conditions': {'type': 'array', 'minItems': 1,
+                                'items': {'type': 'string', 'pattern': r'\S'}},
+            'report': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
+        },
+        'required': ['objective', 'scope', 'inputs', 'dependencies', 'artifacts',
+                     'verification', 'constraints', 'stop_conditions'],
+        'additionalProperties': False,
     }
     if worker:
-        # Workers use native Kanban's task-scoped tools.  The global ANCOR
-        # snapshot would expose unrelated requirements and pending events.
+        # Workers use native Kanban's task-scoped tools and the task card contract.
         definitions = {}
     elif interactor:
-        definitions['ancor_requirement'] = (*definitions['ancor_requirement'][:1],
-            {**definitions['ancor_requirement'][1],
-             'action': {'type': 'string', 'enum': ['draft', 'confirm', 'respond']}},
-            definitions['ancor_requirement'][2])
-        definitions['ancor_notify'] = (*definitions['ancor_notify'][:1],
-            {**definitions['ancor_notify'][1],
-             'action': {'type': 'string', 'enum': ['list', 'respond']}},
-            definitions['ancor_notify'][2])
-        definitions = {name: value for name, value in definitions.items()
-                       if name in {'ancor_requirement', 'ancor_get_context', 'ancor_notify'}}
+        definitions = {
+            'ancor_requirement': (
+                'Draft, confirm, cancel, pause, resume, or answer an ANCOR requirement. draft, cancel, pause and resume require a high-level summary and create immutable proposals with exact native clarify_args; only the exact submitted native confirmation activates, cancels, pauses or resumes. respond records a human reply as advisory input, never authorization.',
+                {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond']},
+                 'summary': {'type': 'string',
+                             'description': 'High-level, user-facing points shown before the exact stored requirement.'},
+                 'brief': {'type': 'string'}, 'acceptance_criteria': {'type': 'string'},
+                 'replacement_of': {'oneOf': [{'type': 'string'},
+                                               {'type': 'array', 'items': {'type': 'string'}}]},
+                 'draft_id': {'type': 'string'}, 'requirement_id': {'type': 'string'},
+                 'requirement_ids': {'type': 'array', 'items': {'type': 'string'}},
+                 'reason': {'type': 'string'}, 'body': {'type': 'string'}}, ['action']),
+            'ancor_get_context': (
+                'Read a compact ANCOR overview: open drafts, requirement previews, linked task summaries, notifications and health. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
+                {'requirement_id': {'type': 'string'},
+                 'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, []),
+            'ancor_board': (
+                'Read linked native tasks. list returns compact summaries and accepts requirement_id, status, limit and include_archived filters; show returns one full card with contract, comments, runs and events. This role cannot mutate the board.',
+                {'action': {'type': 'string', 'enum': ['list', 'show']},
+                 'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
+                 'status': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'include_archived': {'type': 'boolean'}}, ['action']),
+            'ancor_notify': (
+                'List compact durable notifications, expand one by id, or transcribe a human answer for the matching open question. Filter by requirement_id, task_id, state or open_only. Answers are advisory, never authorization.',
+                {'action': {'type': 'string', 'enum': ['list', 'respond']},
+                 'id': {'type': 'string'}, 'answer': {'type': 'string'},
+                 'view': {'type': 'string', 'enum': ['summary', 'full']},
+                 'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
+                 'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
+                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
+        }
     elif coordinator:
-        definitions['ancor_requirement'] = (*definitions['ancor_requirement'][:1],
-            {**definitions['ancor_requirement'][1],
-             'action': {'type': 'string', 'enum': ['cancel', 'replace', 'link']}},
-            definitions['ancor_requirement'][2])
-        definitions['ancor_notify'] = (*definitions['ancor_notify'][:1],
-            {**definitions['ancor_notify'][1],
-             'action': {'type': 'string', 'enum': ['send', 'list']}},
-            definitions['ancor_notify'][2])
+        definitions = {
+            'ancor_wake': (
+                'Manage durable future one-shot wakes. schedule requires requirement_id, reason, due_at (Unix seconds); replace requires wake_id, reason, due_at; cancel requires wake_id. list optionally filters requirement_id. Never create immediate self-wake loops.',
+                {'action': {'type': 'string', 'enum': ['schedule', 'list', 'cancel', 'replace']},
+                 'requirement_id': {'type': 'string'}, 'wake_id': {'type': 'string'},
+                 'reason': {'type': 'string'}, 'due_at': {'type': 'number'}}, ['action']),
+            'ancor_notify': (
+                'Send a durable neutral question or accepted completion, or list compact notifications. A question requires an active requirement, a linked task that is blocked, and no other open question for that requirement and task; completion requires an accepted requirement and id accept:<requirement_id>. Filter by requirement_id, task_id, state or open_only; view=full or id expands one notification. Reuse stable IDs; uncertain delivery requires operator reconciliation, not a new ID.',
+                {'action': {'type': 'string', 'enum': ['send', 'list']},
+                 'id': {'type': 'string'},
+                 'kind': {'type': 'string', 'enum': ['question', 'completion']},
+                 'message': {'type': 'string'},
+                 'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
+                 'view': {'type': 'string', 'enum': ['summary', 'full']},
+                 'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
+                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
+            'ancor_board': (
+                'Read and coordinate linked native tasks. list returns compact summaries; show returns one full card. create requires a complete contract; edit with body requires the same contract. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, retire, and associate.',
+                {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock',
+                                                        'comment', 'link', 'unlink', 'edit', 'revise',
+                                                        'retire', 'associate']},
+                 'priority': {'type': 'integer'},
+                 'parent_ids': {'type': 'array', 'items': {'type': 'string'}},
+                 'hold': {'type': 'boolean'},
+                 'status': {'type': 'string'},
+                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'include_archived': {'type': 'boolean'},
+                 'contract': contract_schema,
+                 **{field: {'type': 'string'} for field in
+                    ('requirement_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'body', 'reason')}},
+                ['action']),
+            'ancor_get_context': (
+                'Read a compact coordination snapshot: pending event summaries, requirement previews, linked task summaries, notifications and health for active or paused requirements. Payloads are previews; pass requirement_id for exact requirement text, ancor_board show for a full task, and ancor_notify id for one full notification. Raise event_limit for a larger event batch and pass event_id to read one complete payload. Acknowledge only explicit event IDs actually handled.',
+                {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}},
+                 'requirement_id': {'type': 'string'},
+                 'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'event_limit': {'type': 'integer', 'minimum': 1, 'maximum': 500},
+                 'event_id': {'type': 'integer', 'minimum': 1}}, []),
+            'ancor_acceptance': (
+                'Record independent coordinator verification against exact requirement criteria, or reject with a reason.',
+                {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['accept', 'reject']},
+                 'evidence': {
+                     'type': 'object',
+                     'description': 'Required for accept. Bind exact stored acceptance criteria and independently verified artifacts to linked task IDs.',
+                     'properties': {
+                         'criteria': {'type': 'string', 'description': 'Exact requirement acceptance_criteria text.'},
+                         **{field: {'type': 'array', 'minItems': 1,
+                                    'items': {'type': 'string', 'pattern': r'\S'}}
+                            for field in ('verification', 'artifacts', 'task_ids')}},
+                     'required': ['criteria', 'verification', 'artifacts', 'task_ids']},
+                 'reason': {'type': 'string'}}, ['requirement_id', 'action']),
+        }
+
     coordination_observed = False
     for name, (description, properties, required) in definitions.items():
         method = methods[name.removeprefix('ancor_')]
@@ -254,20 +580,26 @@ def register(ctx, *, scan_runner=None):
                             or (_name == 'ancor_wake' and args.get('action') != 'list')
                             or (_name == 'ancor_notify' and args.get('action') == 'send')
                             or (_name == 'ancor_board' and args.get('action') not in {'list', 'show'})
-                            or (_name == 'ancor_requirement' and args.get('action') in {'link', 'cancel', 'replace'})
                             or (_name == 'ancor_get_context' and bool(args.get('ack_event_ids'))))
                 # Cooperation marker, not a shell/process security sandbox.
                 if mutation and not coordinator:
                     raise PermissionError('coordinator profile required')
+                invalid = _validate_action_request(_name, args)
+                if invalid:
+                    return json.dumps(invalid, ensure_ascii=False)
                 if not coordination_observed and coordinator:
                     from .scheduling import Scheduling
                     Scheduling(service.store).started()
                     coordination_observed = True
-                result = _method(args, **kwargs) if _name == 'ancor_notify' else _method(args)
+                result = _method(args, **kwargs)
                 return json.dumps(result, ensure_ascii=False)
             except Exception as exc:
                 log.exception('ANCOR tool failed')
-                return json.dumps({'error': str(exc)})
+                code = ('forbidden' if isinstance(exc, PermissionError) else
+                        'not_found' if isinstance(exc, KeyError) else
+                        'invalid_request' if isinstance(exc, ValueError) else
+                        'state_conflict' if isinstance(exc, RuntimeError) else 'internal')
+                return json.dumps({'error': str(exc), 'code': code}, ensure_ascii=False)
         ctx.register_tool(name=name, toolset='ancor',
                           schema={'name': name, 'description': description, 'parameters': {
                               'type': 'object', 'properties': properties, 'required': required,

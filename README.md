@@ -16,7 +16,10 @@ User ↔ interactor → immutable draft → explicit confirmation
                         useful questions or delivery
 ```
 
-The interactor prepares and confirms requirements, then stops. It does not inspect the board, schedule workers, wake coordination, or perform acceptance. The coordinator owns those operations. Worker completion is evidence, not requirement acceptance.
+The interactor prepares and confirms requirements, may read the board to explain progress, then stops at the coordination boundary. It does not mutate the board, schedule workers, wake coordination, or perform acceptance. The coordinator owns those operations. Worker completion is evidence, not requirement acceptance. Pause and resume are confirmed, reversible human decisions; pausing suppresses new work and wakes, and resuming asks the coordinator to re-evaluate existing work.
+
+Confirmation prompts lead with a short high-level summary, followed by the exact
+requirement text that will be stored in ANCOR.
 
 ## Implementation
 
@@ -25,18 +28,44 @@ The interactor prepares and confirms requirements, then stops. It does not inspe
 - `ancor/host.py`: Gateway-owned event reconciliation and bounded retries.
 - `ancor/board.py`: native Kanban adapter; no native SQL writes.
 - `ancor/service.py`: requirement and user-response tools.
-- `roles/`: profile identities; `skills/ancor-coordination/`: coordinator procedure;
-  `skills/ancor-interactor/`: interactor procedure for handing human replies back to ANCOR.
+- `roles/`: profile identities; `skills/ancor-interactor/`: user conversation,
+  requirement confirmation and durable reply handoff; `skills/ancor-coordination/`:
+  coordinator procedure; `skills/ancor-worker/`: bounded task execution procedure.
 
 Native Hermes owns worker dispatch and task lifecycle. The plugin owns requirement semantics and coordination admission. Idle polling uses no model tokens. Events are batched; unchanged unprocessed batches have a retry budget rather than a hot model loop.
 
+The interactor is the only human-facing role and can read the board for progress
+explanations. The coordinator creates neutral durable questions and completion
+outcomes; it does not conduct user dialogue.
+Workers receive no ANCOR business tools and use only their native task card,
+heartbeats and Kanban lifecycle tools.
+
+## Model-facing output
+
+Tools default to compact, decision-oriented summaries. Requirement text is shown
+as a preview, board lists omit card bodies and history, notifications carry a
+message preview, and pending events carry a payload preview plus stable IDs.
+
+Expansion is explicit and bounded:
+
+- `ancor_get_context(requirement_id=...)` returns the exact brief and acceptance criteria.
+- `ancor_get_context(event_id=...)` returns one complete pending event payload.
+- `ancor_board show(task_id=...)` returns one full card with contract, comments, runs and events.
+- `ancor_notify list(requirement_id=...)` scopes the notification history; adding `id` returns one full notification.
+
+Previews are never authoritative for confirmation, acceptance, or transcription.
+List results report total and returned counts so truncation is visible rather than silent.
+Unanswered questions stay visible ahead of recent completion notices, and live or recent
+tasks sort ahead of archived history.
+
 ## Health states
 
-`progression` reports health per active requirement. `active` requires a running
+`progression` reports health per active or paused requirement. `active` requires a running
 task with a fresh heartbeat, or ready work. `waiting_on_human` requires a blocked
-task with a delivered, unanswered question. Everything else is `stalled`: triage,
-stale heartbeat, blocked without an open question, blocked after its question was
-answered, no work, or acceptance pending. A scheduled wake is a timer, not
+task with a delivered, unanswered question. `paused` is a deliberate resting state,
+not stalled and not liveness. For active requirements, everything else is `stalled`:
+triage, stale heartbeat, blocked without an open question, blocked after its question
+was answered, no work, or acceptance pending. A scheduled wake is a timer, not
 progress. The host publishes a `host.stalled` condition event that cannot be
 acknowledged and clears only when real work recovers.
 

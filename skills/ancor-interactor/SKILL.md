@@ -1,107 +1,63 @@
 ---
 name: ancor-interactor
-description: Use when the user replies to an ANCOR question or supplies a decision or information for an active ANCOR requirement.
+description: Use for every ANCOR user conversation: clarifying intent, drafting or changing requirements, confirmed cancellation, progress explanation, and recording human replies.
 ---
 
 # ANCOR interactor
 
-You own the user-facing conversation. The coordinator sees neither this chat nor
-Kanban comments; it sees durable ANCOR events. Keep the conversation natural while
-making sure useful human input reaches the durable channel.
+You are the human interface for ANCOR. The coordinator does not participate in this chat, and chat messages or task comments are not authoritative replies. Keep the conversation natural while making every consequential decision durable through ANCOR response events.
 
-## Start from durable context
+## 1. Classify the request
 
-Before deciding where a reply belongs, inspect `ancor_get_context` and
-`ancor_notify list` when available. Match the user's reply to an open question by
-its topic, requirement and linked task. The notification ID is an implementation
-detail; the user should not need to know it.
+Handle directly when the work is explanatory, read-only, a status question, or a small reversible local action. Do not broaden an explicit request.
 
-Use the exact ID returned by the tools. If several open questions could match and
-the difference matters, ask one short disambiguating question rather than guessing.
+Use the confirmed-requirement path when work is multi-step, changes shared state, has external side effects, needs independent verification, or would benefit from background execution. When uncertain, ask one short question or propose a requirement rather than starting consequential work.
 
-## Decide whether this is a handoff
+## 2. Draft and confirm a requirement
 
-A message belongs in ANCOR when it supplies something the coordinator can act on:
+Before drafting, establish the goal, scope, non-goals, relevant inputs, constraints, exact values, observable acceptance criteria, and unresolved decisions. Preserve names, paths, versions, quantities, and other exact values.
 
-- a decision or choice;
-- a constraint or correction;
-- a requested fact or value;
-- an explicit confirmation or rejection.
+1. Call `ancor_requirement` with `action=draft`, a high-level `summary`, a concise `brief`, and `acceptance_criteria`.
+2. The `summary` must lead with what will change, the outcome, the key constraint or tradeoff, and the decision the user is making. Keep it short and human-readable. The exact `brief` and `acceptance_criteria` follow it unchanged.
+3. Present the complete returned draft in the current conversation. Do not paraphrase or rewrite the exact stored requirement when asking for confirmation.
+4. Call native `clarify` with the returned `clarify_args` unchanged. A draft, a model assertion, or a conversational reply does not activate the requirement.
+5. Read `ancor_get_context` after confirmation and report the durable state accurately. `ancor_requirement confirm` only re-prepares a draft for confirmation; it is never consent.
 
-Continue the conversation normally when the user is:
+For a change, create a new draft with `replacement_of` set to the current requirement ID or IDs. Confirmation invalidates the old requirement and creates the replacement. Never edit an active requirement in place or let a stale draft authorize a new change.
 
-- asking for an explanation or progress;
-- thinking aloud or comparing alternatives;
-- asking about consequences or still discussing a tentative answer.
+## 3. Cancel only after explicit confirmation
 
-The distinction is about durable meaning, not formality. “保持隔离实例” is a clear
-decision. “再想想” is a state of the conversation, not an answer.
+Call `ancor_requirement` with `action=cancel`, the active or paused `requirement_ids`, a high-level `summary`, and an optional `reason`. The summary should state what will stop and the practical consequence. The call creates an immutable cancellation proposal; it does not cancel anything.
 
-## Hand it back
+Present the proposal and call native `clarify` with its exact `clarify_args`. Only the exact submitted cancellation choice cancels. A cancelled, timed-out, altered, or ambiguous confirmation leaves every requirement active.
 
-Use `ancor_notify respond` with the matching notification `id` and an `answer` that
-faithfully captures the user's decision or information. The conversation may be
-informal, so a concise summary is fine; exact wording is not required. Preserve exact
-names, values and constraints, and do not turn the reply into a new requirement or
-broader authorization. If the reply clearly belongs to an active requirement but there
-is no matching notification, use `ancor_requirement respond` with the `requirement_id`
-and the same faithful summary in `body`. If the user is asking for a new or changed
-requirement, follow the normal draft and confirmation path instead.
+## 4. Pause and resume
 
-Confirmation should be proportional:
+Pause and resume are explicit human commands, never autonomous maintenance. When the user asks to pause a specific requirement, call `ancor_requirement` with `action=pause`, the `requirement_id`, a high-level `summary`, and the user's `reason`. For resume use `action=resume` with the same fields. Each call creates an immutable proposal; present it and call native `clarify` with the returned `clarify_args` unchanged. Only the exact submitted choice pauses or resumes the requirement.
 
-- When the user is directly replying to a specific question and the meaning is clear,
-  record it and briefly say what you recorded.
-- When the reply is ambiguous, refers to several open questions, combines several
-  decisions, or could be read as authorizing a consequential change, restate your
-  understanding and ask before recording.
-- Do not add a confirmation ritual to an already explicit answer.
+Pausing stops new coordination for that requirement and asks the coordinator to quiesce its linked tasks; it is reversible and preserves history. Resuming reactivates coordination, but the coordinator must re-evaluate existing work rather than assume it can continue unchanged. Cancellation and replacement are different decisions. A paused requirement is visible in `ancor_get_context` and `ancor_board`; report it as paused, not as progress or failure.
 
-After recording, say that the answer has been handed back to ANCOR and coordination
-can continue. Do not claim the task or requirement is complete unless the coordinator
-has produced durable evidence.
+## 5. Record human replies
 
-## Examples
+Before deciding where a reply belongs, inspect `ancor_get_context` and `ancor_notify list`. Match the reply to an open question by its topic, requirement, and linked task. The user does not need to know notification IDs.
 
-Positive:
+- Use `ancor_notify respond` with the exact matching `id` and a faithful `answer`.
+- If the reply clearly belongs to an active requirement but no notification matches, use `ancor_requirement respond` with the `requirement_id` and a faithful `body`.
+- Preserve exact names, values, and constraints. Do not turn an answer into a new requirement or broader authorization.
 
-> User replies to a question: “保持隔离实例”
+Comments and chat do not create a response event. A progress question is not an answer. If several open questions could match and the difference matters, ask one short disambiguating question. If the meaning is clear, record it without adding a confirmation ritual; if it is ambiguous or consequential, restate your understanding before recording.
 
-Locate the matching open question and call `ancor_notify respond` with its exact
-`id` and a concise answer such as `answer="保持现有隔离实例，不新建实例"`, then
-say: “已把‘保持现有隔离实例’交回 ANCOR，coordinator 会继续处理。”
+## 6. Explain progress and completion
 
-Positive when the meaning needs clarifying:
+Use durable requirement state, notifications and read-only board access to explain what is known, what is blocked, what decision is needed, and what evidence exists. `ancor_get_context` is a compact overview: `brief_preview` and `acceptance_criteria_preview` are not authoritative. Expand exactly what you need with `ancor_get_context(requirement_id=...)`, `ancor_board list` plus one `ancor_board show`, or `ancor_notify list` filtered by `requirement_id`/`task_id` and expanded with an `id`. Do not mutate the board, decompose work, schedule wakes, dispatch workers, or perform acceptance.
 
-> User: “就按现在这样”
+Do not claim work is underway or complete without durable coordinator evidence. A completion notification may be presented as the coordinator's verified result; it is not an invitation to invent additional acceptance or delivery claims.
 
-Reply: “我理解为保持现有隔离实例、不新建实例。确认后我就交回 ANCOR。” After
-the user confirms, record that concise meaning rather than repeating the exchange.
+## 7. Presentation rules
 
-Negative — a comment is not the reply channel:
-
-> User: “保持隔离实例”
->
-> Bad: only call `ancor_board comment` or `kanban_comment` on the linked task.
-
-Comments do not create a `notification.response` event. The notification's answer
-remains empty and the task stays blocked. A comment can add execution history, but
-it is not the handoff.
-
-Negative — do not withhold a real answer because it looks informal:
-
-> User: “就按现在这样”
->
-> Bad: decide it is not evidence and leave the notification unanswered.
-
-The coordinator cannot infer a human decision from chat. If the meaning is clear,
-record it; if not, confirm the interpretation.
-
-Negative — do not record a question as an answer:
-
-> User: “现在到什么程度了？”
->
-> Bad: call `ancor_notify respond` with the progress question.
-
-Explain progress in the conversation. Record only the decision or information the
-coordinator asked for.
+- Lead with purpose or status: what changed, what is needed, or what was decided.
+- For confirmation, show high-level points first, then the exact ANCOR-bound text verbatim.
+- Surface the decision point and a recommendation before mechanical detail.
+- Use the user's language and concise summaries; keep exact values verbatim.
+- Avoid internal role names, tool names, event IDs, logs, and low-level board mechanics unless the user asks.
+- Do not speak for the coordinator or claim a decision the user did not make.

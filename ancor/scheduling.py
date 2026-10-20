@@ -102,12 +102,13 @@ class Scheduling:
 
     def _blocked_wait(self, notifications, requirement_id, task_id):
         questions = self._question(notifications, requirement_id, task_id)
+        # A recorded answer is progress even if transport state stayed uncertain.
+        if any(row.get('answer') is not None for row in questions):
+            return 'stalled', 'question_answered_not_resumed'
         if any(row.get('state') == 'sent' and row.get('answer') is None for row in questions):
             return 'waiting', None
         if any(row.get('state') in {'pending', 'sending', 'uncertain'} for row in questions):
             return 'stalled', 'question_delivery_unconfirmed'
-        if any(row.get('answer') is not None for row in questions):
-            return 'stalled', 'question_answered_not_resumed'
         return 'stalled', 'blocked_without_wait'
 
     def health(self, data, tasks, notifications, now=None):
@@ -120,7 +121,7 @@ class Scheduling:
             linked.setdefault(link['requirement_id'], []).append(by_id.get(link['task_id'], {'id': link['task_id']}))
         wakes = self.call({'action': 'list'})
         results = []
-        for requirement in (r for r in data['requirements'] if r['status'] == 'active'):
+        for requirement in data['requirements']:
             rid = requirement['id']
             items = linked.get(rid, [])
             timers = [{'kind': 'scheduled_wake', **wake} for wake in wakes
@@ -129,6 +130,13 @@ class Scheduling:
                 {key: task[key] for key in ('id', 'status', 'last_heartbeat_at', 'blocked_reason',
                                             'block_kind', 'block_recurrences') if key in task}
                 for task in items], 'timers': timers}
+            if requirement['status'] == 'paused':
+                results.append({**base, 'state': 'paused', 'reason': 'requirement_paused',
+                                'waiting_on': None,
+                                'task_ids': [task['id'] for task in items]})
+                continue
+            if requirement['status'] != 'active':
+                continue
             triage = [task for task in items if task.get('status') == 'triage']
             if triage:
                 results.append({**base, 'state': 'stalled', 'reason': 'triage',
@@ -196,11 +204,12 @@ class Scheduling:
         anchor = max(state['active_since'] if state['active_since'] is not None else self.clock(), state['last_started'] or 0)
         deadline = anchor + self.INTERVAL if active else None
         if tasks is None:
+            tracked = [r for r in data['requirements'] if r['status'] in {'active', 'paused'}]
             progression = [{'requirement_id': req['id'], 'state': 'unknown', 'reason': 'board_unavailable',
                             'waiting_on': None, 'task_ids': [],
                             'timers': [{'kind': 'scheduled_wake', **wake} for wake in wakes
                                        if wake['requirement_id'] == req['id'] and wake['state'] in {'scheduled', 'queued'}]}
-                           for req in active]
+                           for req in tracked]
         else:
             progression = self.health(data, tasks, notifications)
         return {'scheduled_wakes': wakes, 'progression': progression, 'liveness': {**state, 'due_at': deadline, 'overdue': deadline is not None and self.clock() >= deadline}}

@@ -117,6 +117,16 @@ def test_health_distinguishes_triage_blocked_wait_and_stale_heartbeat(tmp_path):
     assert scheduler.health(data, [{'id': 'task', 'status': 'ready'}], [])[0]['state'] == 'active'
 
 
+def test_answered_uncertain_question_is_progress_not_delivery_failure(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    store.link_task(req['id'], 'task')
+    question = {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+                'task_id': 'task', 'state': 'uncertain', 'answer': 'Use quarterly'}
+    result = scheduler.health(store.snapshot(), [{'id': 'task', 'status': 'blocked'}], [question])[0]
+    assert result['state'] == 'stalled'
+    assert result['reason'] == 'question_answered_not_resumed'
+
+
 def test_wake_is_a_timer_not_a_progress_source(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='later', due_at=20_000))
@@ -136,3 +146,32 @@ def test_stalled_event_lifecycle_follows_recovery(tmp_path):
     restarted = Scheduling(Store(store.path), lambda: 10_000)
     restarted.sync_health(store.snapshot(), [{'id': 'task', 'status': 'triage'}], [])
     assert len([e for e in store.pending_events() if e['kind'] == 'host.stalled']) == 1
+
+
+def test_paused_requirement_is_not_stalled_and_suppresses_wakes(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    store.link_task(req['id'], 'task')
+    wake = scheduler.call(dict(action='schedule', requirement_id=req['id'],
+                               reason='later', due_at=20_000))
+    pause = store.create_requirement_command('pause', req['id'], 'user asked', 'Stop briefly')
+    store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+    data = store.snapshot()
+
+    health = scheduler.health(
+        data, [{'id': 'task', 'status': 'running', 'last_heartbeat_at': 1}], [])[0]
+    assert health['state'] == 'paused'
+    assert health['reason'] == 'requirement_paused'
+    scheduler.sync_health(data, [{'id': 'task', 'status': 'running',
+                                  'last_heartbeat_at': 1}], [])
+    assert not [e for e in store.pending_events() if e['kind'] == 'host.stalled']
+    observation = scheduler.observation(data, [{'id': 'task', 'status': 'running',
+                                                'last_heartbeat_at': 1}], [])
+    assert observation['liveness']['due_at'] is None
+    assert observation['progression'][0]['state'] == 'paused'
+    scheduler.scan()
+    assert next(item for item in scheduler.call({'action': 'list'})
+                if item['id'] == wake['id'])['state'] == 'suppressed'
+
+    resume = store.create_requirement_command('resume', req['id'], 'user ready', 'Continue')
+    store.confirm_requirement_command(resume['id'], 'resume-confirmation')
+    assert scheduler.observation(store.snapshot(), [], [])['liveness']['due_at'] is not None
