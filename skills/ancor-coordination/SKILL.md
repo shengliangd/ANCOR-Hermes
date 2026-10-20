@@ -1,6 +1,6 @@
 ---
 name: ancor-coordination
-description: Use for background ANCOR coordination: planning bounded worker cards, maintaining dependencies, resolving blockers, recovering interrupted work, verifying artifacts, accepting requirements, and creating durable human outcomes.
+description: Use for background ANCOR coordination: shaping requirements, planning and replanning bounded worker cards, maintaining dependencies, resolving blockers, recovering interrupted work, verifying artifacts, accepting requirements, and creating durable human outcomes.
 ---
 
 # ANCOR coordination
@@ -25,9 +25,26 @@ Use one investigation by default. Use the `tasks` array only for independent que
 
 A child report is evidence, not a verdict. Verify the important paths and claims before changing a card, asking the human, or accepting work. Do not automatically persist the child's result; if it changes the task contract or is needed as acceptance evidence, record the relevant finding and evidence on the task card yourself. In the one-shot coordinator CLI, `delegate_task` returns its result in the same turn; do not poll transcripts. Keep `delegation.max_spawn_depth=1`; do not build nested delegation chains.
 
+## Shape the work before moving it
+
+A confirmed requirement is a portfolio of outcomes, not a single job ticket. Before creating work for a newly confirmed requirement, a replacement, or a material change in scope, build a working model of the whole requirement from its exact brief and acceptance criteria:
+
+- which distinct artifacts, capabilities, or decisions must exist for acceptance;
+- what can be proven independently, what depends on other work, and what can run in parallel;
+- which real gates are external to the team, such as hardware, credentials, upstream packages, repositories, environments, or a human decision;
+- which uncertainty should be resolved early because it changes the shape of later work.
+
+Use that model to choose execution units. A good card is a coherent outcome that one worker can own end to end, with its own evidence and a contract that can be executed without coordinating another card. Do not confuse bounded with small: a card is bounded when its outcome and evidence are clear, not when its scope is narrow. Your job is to find the right boundaries, not to minimize the number of cards. A card that bundles independent repositories, services, deliverables, or an entire phase usually means planning stopped at the first convenient boundary. A card that exists only to relay a message to another card is usually too small. Aim for the smallest set of cards that makes the work legible, parallel where useful, and independently verifiable.
+
+The first coordination pass after confirmation should leave the requirement with a coherent execution shape, even when later work is held behind an external gate. A running card is not evidence that planning is complete.
+
+The plan is a working hypothesis, not a commitment to the first card you write. When evidence changes the shape, adapt: split, merge, add a probe, change dependencies, or change the order. If later work is still uncertain, make the near-term cards concrete and state what you are deferring and what evidence will trigger the next planning pass. Do not let an existing card prevent you from replanning.
+
 ## Plan incremental work
 
-Create only the next useful bounded outcome. Every `ancor_board create` call must include a complete `contract`:
+Plan the requirement at a useful granularity, then start the next useful bounded outcome. On a new confirmed requirement this often yields more than one card; a single card is appropriate only when the requirement truly is one coherent outcome. Acknowledging `requirement.confirmed` means the requirement now has a credible execution shape, not merely that some card exists.
+
+Before treating a new requirement as planned, trace each acceptance criterion to a card, a dependency, or an explicit unknown or out-of-scope note. If every criterion lands in the same card, ask whether that card is too broad. If a criterion has no card and no gate, the plan is incomplete. Every `ancor_board create` call must include a complete `contract`:
 
 - `objective`: the concrete result this card produces.
 - `scope`: what is included and what is explicitly excluded.
@@ -41,6 +58,8 @@ Create only the next useful bounded outcome. Every `ancor_board create` call mus
 Keep the card self-contained. Workers must not need to read the full requirement store. Use stable task keys, hold cards while arranging dependencies, and parallelize only work that does not share conflicting files, services, accounts, or capacity.
 
 Write the card around the outcome and its evidence, not around unverified assumptions. A card states what must be true and what the worker must produce; it does not predict the environment. If a dependency may be unavailable, make obtaining or verifying it part of the work rather than a stop condition. A stop condition marks a genuine external boundary, not the first failed attempt.
+
+If a card turns out to span multiple outcomes, replan instead of asking its worker to act as a mini-coordinator. A worker should not have to coordinate other cards; if its contract requires that, the decomposition is wrong.
 
 For a body change, resupply the full contract; for title or priority changes, leave the body untouched. Use `revise` only for a genuine triage failure after inspecting the cause. Retire abandoned blocked work only after quiescence, with a reason, and never present retirement as completion.
 
