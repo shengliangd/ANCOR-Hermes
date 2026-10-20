@@ -1,156 +1,248 @@
+import asyncio
 import json
-import subprocess
-from types import SimpleNamespace
 
 import pytest
 
-from ancor.notification import HermesSender, NotificationOutbox
+from ancor.notification import (NativeSender, NotificationDispatcher, NotificationOutbox,
+                                TransportUnavailable)
 
 
-def box(tmp_path, sender=lambda *_: {'success': True, 'message_id': 'native-1'}):
+def box(tmp_path, clock=lambda: 0):
     return NotificationOutbox(tmp_path / 'notify.db', coordinator_profile='coordinator',
-                              target='telegram:explicit-test-target', sender=sender)
+                              target='telegram:explicit-test-target', clock=clock)
 
 
-def test_durable_selection_delivery_and_answer_readback(tmp_path):
-    first = box(tmp_path)
-    first.enqueue('q1', 'question', 'Which option? Reply with q1.', actor='coordinator')
+def dispatcher(outbox, sender, *, requirement_status='active', task_status='blocked',
+               clock=lambda: 0):
+    return NotificationDispatcher(
+        outbox, sender,
+        resolve_requirement=lambda _: {'id': 'req', 'status': requirement_status},
+        resolve_task=lambda _: {'id': 'task', 'status': task_status},
+        retry_seconds=15, timeout=1, clock=clock)
+
+
+def deliver(delivery):
+    return asyncio.run(delivery.deliver_once())
+
+
+def test_durable_enqueue_and_gateway_delivery_then_answer(tmp_path):
+    calls = []
+    outbox = box(tmp_path)
+    row = outbox.enqueue('q1', 'question', 'Which option? Reply with q1.',
+                         actor='coordinator', requirement_id='req', task_id='task')
+    assert row['state'] == 'pending'
     reopened = box(tmp_path)
     assert reopened.get('q1')['state'] == 'pending'
-    assert reopened.deliver('q1', actor='coordinator')['receipt']['message_id'] == 'native-1'
+    assert deliver(dispatcher(reopened, lambda *args: calls.append(args) or {
+        'success': True, 'message_id': 'native-1'}))
+    assert reopened.get('q1')['state'] == 'sent'
+    assert reopened.get('q1')['receipt']['message_id'] == 'native-1'
     reopened.respond('q1', 'Option B', 'human-session:turn-4')
     persisted = box(tmp_path).get('q1')
     assert persisted['state'] == 'sent'
     assert persisted['answer'] == 'Option B'
     assert persisted['answer_reference'] == 'human-session:turn-4'
-    assert box(tmp_path).list() == [persisted]
+    assert calls == [('telegram:explicit-test-target', 'Which option? Reply with q1.')]
 
 
-def test_worker_cannot_select_or_deliver(tmp_path):
+def test_worker_cannot_select_or_withdraw_questions(tmp_path):
     outbox = box(tmp_path)
     with pytest.raises(PermissionError):
         outbox.enqueue('w', 'question', 'raw worker event', actor='worker')
-    outbox.enqueue('c', 'completion', 'Coordinator verified completion', actor='coordinator')
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
     with pytest.raises(PermissionError):
-        outbox.deliver('c', actor='worker')
-    assert outbox.get('c')['state'] == 'pending'
+        outbox.withdraw('q', actor='worker', reason='not allowed')
 
 
-def test_idempotency_and_no_automatic_duplicate_send(tmp_path):
+def test_idempotency_and_no_duplicate_delivery(tmp_path):
     calls = []
-    outbox = box(tmp_path, lambda *args: calls.append(args) or {'success': True})
+    outbox = box(tmp_path)
     for _ in range(2):
-        outbox.enqueue('c', 'completion', 'Done', actor='coordinator')
-        outbox.deliver('c', actor='coordinator')
+        outbox.enqueue('c', 'completion', 'Done', actor='coordinator',
+                       requirement_id='req')
+    delivery = dispatcher(outbox, lambda *args: calls.append(args) or {'success': True},
+                          requirement_status='accepted')
+    assert deliver(delivery) is True
+    assert deliver(delivery) is False
     assert len(calls) == 1
     with pytest.raises(ValueError):
-        outbox.enqueue('c', 'completion', 'Changed', actor='coordinator')
+        outbox.enqueue('c', 'completion', 'Changed', actor='coordinator',
+                       requirement_id='req')
 
 
-def test_one_open_question_per_requirement_task(tmp_path):
+def test_one_open_question_per_requirement_task_and_withdraw_releases_it(tmp_path):
     outbox = box(tmp_path)
     outbox.enqueue('q1', 'question', 'Which label?', actor='coordinator',
                    requirement_id='req', task_id='task')
     with pytest.raises(RuntimeError, match='q1'):
         outbox.enqueue('q2', 'question', 'Which label?', actor='coordinator',
                        requirement_id='req', task_id='task')
-    outbox.enqueue('q1', 'question', 'Which label?', actor='coordinator',
-                   requirement_id='req', task_id='task')
-    outbox.respond('q1', 'Quarterly', 'turn-1')
+    closed = outbox.withdraw('q1', actor='coordinator', reason='bypassed by new input')
+    assert closed['closed'] is True
+    assert closed['answer'] is None
+    assert closed['close_reason'] == 'bypassed by new input'
     outbox.enqueue('q2', 'question', 'Any other label?', actor='coordinator',
                    requirement_id='req', task_id='task')
+    with pytest.raises(ValueError, match='closed'):
+        outbox.respond('q1', 'late answer', 'human:late')
 
 
-@pytest.mark.parametrize('receipt', [{'success': True, 'skipped': True}, {'accepted': True}, {'error': 'no'}, None])
+def test_answer_before_delivery_is_not_sent(tmp_path):
+    calls = []
+    outbox = box(tmp_path)
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    answered = outbox.respond('q', 'early answer', 'human:early')
+    assert answered['state'] == 'answered'
+    delivery = dispatcher(outbox, lambda *args: calls.append(args) or {'success': True})
+    assert deliver(delivery) is False
+    assert calls == []
+
+
+def test_answer_after_claim_is_not_sent(tmp_path):
+    calls = []
+    outbox = box(tmp_path)
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    claim = outbox.claim_next
+
+    def claim_then_answer():
+        row = claim()
+        if row is not None:
+            outbox.respond(row['id'], 'answer won the race', 'human:race')
+        return row
+
+    outbox.claim_next = claim_then_answer
+    delivery = dispatcher(outbox, lambda *args: calls.append(args) or {'success': True})
+    assert deliver(delivery) is True
+    assert calls == []
+    row = outbox.get('q')
+    assert row['state'] == 'answered'
+    assert row['answer'] == 'answer won the race'
+
+
+def test_close_after_claim_is_not_sent(tmp_path):
+    calls = []
+    outbox = box(tmp_path)
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    claim = outbox.claim_next
+
+    def claim_then_withdraw():
+        row = claim()
+        if row is not None:
+            outbox.withdraw(row['id'], actor='coordinator', reason='bypassed by new input')
+        return row
+
+    outbox.claim_next = claim_then_withdraw
+    delivery = dispatcher(outbox, lambda *args: calls.append(args) or {'success': True})
+    assert deliver(delivery) is True
+    assert calls == []
+    row = outbox.get('q')
+    assert row['state'] == 'closed'
+    assert row['closed'] is True
+    assert row['answer'] is None
+
+
+@pytest.mark.parametrize('receipt', [
+    {'success': True, 'skipped': True}, {'accepted': True}, {'error': 'no'}, None])
 def test_unconfirmed_receipts_never_become_sent(tmp_path, receipt):
-    outbox = box(tmp_path, lambda *_: receipt)
-    outbox.enqueue('q', 'question', 'Question', actor='coordinator')
-    assert outbox.deliver('q', actor='coordinator')['state'] == 'uncertain'
-    assert box(tmp_path).deliver('q', actor='coordinator')['state'] == 'uncertain'
+    calls = []
+    outbox = box(tmp_path)
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    delivery = dispatcher(outbox, lambda *args: calls.append(args) or receipt)
+    assert deliver(delivery) is True
+    assert outbox.get('q')['state'] == 'uncertain'
+    assert deliver(delivery) is False
+    assert len(calls) == 1
+
+
+def test_transport_unavailable_returns_pending_with_backoff(tmp_path):
+    now = [100.0]
+    outbox = box(tmp_path, clock=lambda: now[0])
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    def unavailable(*_):
+        raise TransportUnavailable('transport_unavailable')
+    delivery = dispatcher(outbox, unavailable, clock=lambda: now[0])
+    assert deliver(delivery) is True
+    row = outbox.get('q')
+    assert row['state'] == 'pending'
+    assert row['next_attempt_at'] == 115
+    assert json.loads(row['error'])['reason_code'] == 'transport_unavailable'
+    assert deliver(delivery) is False
+    now[0] = 115
+    assert deliver(delivery) is True
+    assert outbox.get('q')['state'] == 'pending'
+
+
+def test_timeout_is_uncertain_and_not_retried(tmp_path):
+    outbox = box(tmp_path)
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    def slow(*_):
+        import time
+        time.sleep(1.2)
+        return {'success': True}
+    delivery = dispatcher(outbox, slow)
+    assert deliver(delivery) is True
+    row = outbox.get('q')
+    assert row['state'] == 'uncertain'
+    assert json.loads(row['error'])['reason_code'] == 'timeout'
+    assert deliver(delivery) is False
 
 
 def test_crash_claim_survives_restart_without_resend(tmp_path):
-    def crash(*_):
-        raise KeyboardInterrupt()
-    outbox = box(tmp_path, crash)
-    outbox.enqueue('q', 'question', 'Question', actor='coordinator')
-    with pytest.raises(KeyboardInterrupt):
-        outbox.deliver('q', actor='coordinator')
-    assert box(tmp_path).deliver('q', actor='coordinator')['state'] == 'sending'
+    outbox = box(tmp_path)
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    claimed = outbox.claim_next()
+    assert claimed['state'] == 'sending'
+    assert box(tmp_path).claim_next() is None
+    assert box(tmp_path).get('q')['state'] == 'sending'
 
 
-def test_public_cli_argv_and_receipt(monkeypatch):
+def test_gate_closes_terminal_work_without_sending(tmp_path):
     calls = []
-    def run(argv, **kwargs):
-        calls.append((argv, kwargs))
-        return SimpleNamespace(returncode=0, stdout=json.dumps({'success': True, 'message_id': '42'}))
-    monkeypatch.setattr('ancor.notification.subprocess.run', run)
-    assert HermesSender('transport-owner')('telegram:123', 'Hello')['message_id'] == '42'
-    argv, kwargs = calls[0]
-    assert argv == ['hermes', '--profile', 'transport-owner', 'send', '--to', 'telegram:123', '--file', '-', '--json']
-    assert kwargs['input'] == 'Hello'
-    assert 'env' not in kwargs  # native profile resolution; no credential copying
-
-
-@pytest.mark.parametrize('stdout,code', [('garbage', 0), ('[]', 0), ('{"success":true,"skipped":true}', 0), ('{"success":true}', 1)])
-def test_cli_rejects_invalid_or_skipped_delivery(monkeypatch, stdout, code):
-    monkeypatch.setattr('ancor.notification.subprocess.run', lambda *a, **k: SimpleNamespace(returncode=code, stdout=stdout))
-    with pytest.raises(RuntimeError):
-        HermesSender('transport')('telegram:123', 'Hello')
-
-
-@pytest.mark.parametrize('failure,reason,exception_class,code', [
-    ('bad-json', 'invalid_receipt_json', 'ValueError', 0),
-    ('shape', 'invalid_receipt_shape', 'RuntimeError', 0),
-    ('exit', 'nonzero_exit', 'RuntimeError', 7),
-    ('unconfirmed', 'delivery_unconfirmed', 'RuntimeError', 0),
-    ('timeout', 'timeout', 'TimeoutExpired', None),
-    ('missing', 'executable_not_found', 'FileNotFoundError', None),
-    ('denied', 'executable_os_error', 'PermissionError', None),
-])
-def test_safe_durable_sender_diagnostics_no_retry(tmp_path, monkeypatch, failure,
-                                                 reason, exception_class, code):
-    calls = []
-    executable = str(tmp_path / 'hermes')
-    monkeypatch.setattr('shutil.which', lambda _: executable)
-    def run(*args, **kwargs):
-        calls.append(args)
-        if failure == 'timeout':
-            raise subprocess.TimeoutExpired('SECRET', 1, output='SECRET', stderr='SECRET')
-        if failure == 'missing':
-            raise FileNotFoundError('SECRET')
-        if failure == 'denied':
-            raise PermissionError('SECRET')
-        stdout = {'bad-json': 'SECRET', 'shape': '[]', 'exit': 'SECRET',
-                  'unconfirmed': '{"error":"SECRET"}'}[failure]
-        return SimpleNamespace(returncode=code, stdout=stdout)
-    monkeypatch.setattr('ancor.notification.subprocess.run', run)
-    outbox = box(tmp_path, HermesSender('transport'))
-    outbox.enqueue('q', 'question', 'SECRET body', actor='coordinator')
-    row = outbox.deliver('q', actor='coordinator')
-    assert row['state'] == 'uncertain'
-    assert json.loads(row['error']) == {
-        'exception_class': exception_class, 'reason_code': reason,
-        'exit_code': code, 'resolved_executable': executable}
-    assert 'SECRET' not in row['error']
-    assert box(tmp_path).deliver('q', actor='coordinator') == row
-    assert len(calls) == 1
+    outbox = box(tmp_path)
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    delivery = dispatcher(outbox, lambda *args: calls.append(args) or {'success': True},
+                          requirement_status='cancelled')
+    assert deliver(delivery) is True
+    row = outbox.get('q')
+    assert row['closed'] is True
+    assert row['close_reason'] == 'requirement_cancelled'
+    assert row['answer'] is None
+    assert calls == []
 
 
 def test_text_only_and_explicit_target(tmp_path):
     with pytest.raises(ValueError):
-        NotificationOutbox(tmp_path / 'x', coordinator_profile='coordinator', target='telegram', sender=None)
+        NotificationOutbox(tmp_path / 'x', coordinator_profile='coordinator', target='telegram')
     with pytest.raises(ValueError):
         box(tmp_path).enqueue('q', 'question', 'MEDIA:/secret', actor='coordinator')
+    with pytest.raises(ValueError, match='human_target'):
+        NotificationOutbox(tmp_path / 'y', coordinator_profile='coordinator').enqueue(
+            'q', 'question', 'Question', actor='coordinator')
 
 
 def test_answer_is_immutable_and_not_completion_acceptance(tmp_path):
     outbox = box(tmp_path)
-    outbox.enqueue('q', 'question', 'Question', actor='coordinator')
+    outbox.enqueue('q', 'question', 'Question', actor='coordinator',
+                   requirement_id='req', task_id='task')
     outbox.respond('q', 'yes', 'turn-1')
     outbox.respond('q', 'yes', 'turn-1')
     with pytest.raises(ValueError):
         outbox.respond('q', 'no', 'turn-2')
-    outbox.enqueue('c', 'completion', 'Complete', actor='coordinator')
+    outbox.enqueue('c', 'completion', 'Complete', actor='coordinator',
+                   requirement_id='req')
     with pytest.raises(ValueError):
         outbox.respond('c', 'accepted', 'turn-3')
+
+
+def test_native_sender_requires_explicit_profile():
+    with pytest.raises(ValueError):
+        NativeSender('')

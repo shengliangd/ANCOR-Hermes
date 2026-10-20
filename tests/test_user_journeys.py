@@ -6,6 +6,7 @@ native CLI; no SQL task writes, forced completion, or delegation-fence removal.
 Run the full suite from an unfenced parent process. Delegated children can run
 confirmation coverage but skip board mutations instead of evading native fences.
 """
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -79,7 +80,6 @@ class Journey:
         from hermes_cli.plugins_manifest import PluginManifest
         from tools.registry import registry
         from ancor.store import Store
-        from ancor.notification import HermesSender
         from ancor.board import NativeBoard
         import ancor
         import tools.clarify_tool  # register the genuine native clarify handler
@@ -99,10 +99,10 @@ class Journey:
         self.coord.role = 'ancor-coordinator'
         self.coord.profile_name_override = 'ancor-coordinator'
         self.sent = []
-        def send(self_sender, target, message):
+        def send(target, message):
             self.sent.append((target, message))
             return {'success': True, 'message_id': 'simulated-transport-' + str(len(self.sent))}
-        HermesSender.__call__ = send
+        self.send = send
         ancor.register(self.ctx)
         ancor.register(self.coord)
         assert registry.get_entry('ancor_requirement', scope=get_plugin_manager().scope_key)
@@ -120,6 +120,20 @@ class Journey:
             (config_home / 'config.yaml').write_text(disposable_config, encoding='utf-8')
         self.board = NativeBoard('default')
         self.calls = 0
+
+    def deliver_notifications(self):
+        from ancor.notification import NotificationDispatcher, NotificationOutbox
+        box = NotificationOutbox(self.store.path + '.notifications.db',
+                                 coordinator_profile='ancor-coordinator',
+                                 target=self.config['human_target'])
+        tasks = {task['id']: task for task in self.board.list()}
+        delivery = NotificationDispatcher(
+            box, self.send, resolve_requirement=self.store.get_requirement,
+            resolve_task=lambda task_id: tasks.get(task_id), retry_seconds=1)
+        for _ in range(10):
+            if not asyncio.run(delivery.deliver_once()):
+                return
+        raise AssertionError('notification delivery did not quiesce')
 
     def call(self, tool, **args):
         context = self.coord if tool in {'board', 'acceptance', 'wake'} else self.ctx
@@ -287,10 +301,11 @@ def journey_blocker(j):
     j.call('board', action='comment', task_id=tid, body='Coordinator resolved source: use approved fixture')
     j.call('notify', action='send', id='label-question', kind='question', message='Use label Quarterly?',
            requirement_id=req['id'], task_id=tid)
+    j.deliver_notifications()
     answer = 'Yes, use Quarterly. Do not deploy.'
     from ancor.notification import NotificationOutbox
     response = NotificationOutbox(j.store.path + '.notifications.db', coordinator_profile='ancor-coordinator',
-                                  target='feishu:simulated-human', sender=lambda *a: None).respond(
+                                  target='feishu:simulated-human').respond(
                                       'label-question', answer, 'interactor_transcription:label-question')
     assert response['answer'] == answer
     event = j.store.add_event('notification.response', {
@@ -350,6 +365,7 @@ def journey_acceptance(j):
     assert j.call('acceptance', action='accept', requirement_id=req['id'], evidence=evidence)['status'] == 'accepted'
     j.call('notify', **premature)
     j.call('notify', **premature)
+    j.deliver_notifications()
     assert len(j.sent) == 1
     assert j.call('notify', action='list')['notifications'][0]['state'] == 'sent'
 

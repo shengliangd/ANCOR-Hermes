@@ -93,7 +93,8 @@ def notification_selection(rows, limit=20):
     if len(rows) <= limit:
         return list(rows)
     open_questions = [row for row in rows
-                      if row.get('kind') == 'question' and row.get('answer') is None]
+                      if row.get('kind') == 'question' and row.get('answer') is None
+                      and row.get('closed_at') is None]
     chosen = {row['id'] for row in open_questions[:limit]}
     if len(chosen) < limit:
         for row in reversed(rows):
@@ -115,9 +116,14 @@ def notification_summary(row, message_limit=600, answer_limit=300):
         'requirement_id': row.get('requirement_id'),
         'task_id': row.get('task_id'),
         'answered': answer is not None,
+        'closed': bool(row.get('closed_at')),
         'answer': answer_preview,
         'message_preview': message,
     }
+    if row.get('close_reason'):
+        summary['close_reason'] = row['close_reason']
+    if row.get('closed_by'):
+        summary['closed_by'] = row['closed_by']
     if message_truncated:
         summary['message_truncated'] = True
     if answer_truncated:

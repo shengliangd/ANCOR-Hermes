@@ -99,12 +99,12 @@ def test_notification_list_is_compact_and_id_expands(tmp_path):
     store.link_task(req['id'], 't1')
     box = NotificationOutbox(store.path + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
-                             target='test:destination',
-                             sender=lambda target, message: {'success': True})
+                             target='test:destination')
     message = 'Question ' + 'Q' * 1000
     box.enqueue('q1', 'question', message, actor='ancor-coordinator',
                 requirement_id=req['id'], task_id='t1')
-    box.deliver('q1', actor='ancor-coordinator')
+    assert box.claim_next()['state'] == 'sending'
+    box.mark_sent('q1', {'success': True})
     ancor.register(ctx)
     call = lambda args: json.loads(tools['ancor_notify']['handler'](args))
 

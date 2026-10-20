@@ -80,8 +80,6 @@ class Host:
     def scan(self):
         self.scheduling.scan()
         snapshot = self.store.snapshot()
-        from .notification import NotificationOutbox
-        notifications = NotificationOutbox.read_existing(self.store.path + '.notifications.db')
         known = {r['id']: r for r in snapshot['requirements']}
         # Invalidation is a durable coordination event, not an automatic stop.
         # Only the coordinator decides whether affected native tasks should be blocked.
@@ -96,6 +94,7 @@ class Host:
             if link and link['requirement_id'] in known:
                 self.store.link_task(link['requirement_id'], task['id'])
                 tracked.add(task['id'])
+        notifications = self.close_stale_notifications(snapshot)
         if not tracked:
             self.scheduling.sync_health(snapshot, self.tasks, notifications)
             return
@@ -136,6 +135,70 @@ class Host:
             if events:
                 self.save(state)
         self.scheduling.sync_health(self.store.snapshot(), self.tasks, notifications)
+
+    def notification_outbox(self):
+        from .notification import NotificationOutbox
+        target = self.ctx.get_config('human_target')
+        if target is not None and (not isinstance(target, str) or ':' not in target
+                                   or not target.partition(':')[2].strip()):
+            return None
+        return NotificationOutbox(
+            self.store.path + '.notifications.db',
+            coordinator_profile=self.profile, target=target, clock=self.clock)
+
+    def close_stale_notifications(self, snapshot=None):
+        """Close unanswered questions whose structural reason has disappeared."""
+        from .notification import NotificationOutbox
+        path = Path(self.store.path + '.notifications.db')
+        if not path.exists():
+            return []
+        snapshot = snapshot or self.store.snapshot()
+        requirements = {row['id']: row for row in snapshot['requirements']}
+        tasks = {task['id']: task for task in self.tasks}
+        box = self.notification_outbox()
+        if box is None:
+            return NotificationOutbox.read_existing(path)
+        decisions = {}
+        for row in box.list():
+            if row['kind'] != 'question' or row['answer'] is not None or row['closed_at'] is not None:
+                continue
+            requirement = requirements.get(row.get('requirement_id'))
+            if requirement is None:
+                decisions[row['id']] = 'requirement_missing'
+                continue
+            status = requirement['status']
+            if status in {'cancelled', 'invalidated', 'accepted'}:
+                decisions[row['id']] = 'requirement_' + status
+                continue
+            task = tasks.get(row.get('task_id'))
+            if task is not None and task.get('status') != 'blocked':
+                decisions[row['id']] = 'task_not_blocked'
+        if decisions:
+            box.close_questions(decisions, closed_by='host')
+            log.info('ANCOR closed %d stale question(s): %s', len(decisions),
+                     ', '.join(f'{key}={value}' for key, value in sorted(decisions.items())))
+        return box.list()
+
+    def notification_dispatcher(self):
+        from .notification import NativeSender, NotificationDispatcher
+        box = self.notification_outbox()
+        profile = self.ctx.get_config('transport_profile')
+        if box is None or not isinstance(profile, str) or not profile.strip():
+            raise ValueError('human_target and transport_profile required for notification delivery')
+        def resolve_task(task_id):
+            if not task_id:
+                return None
+            task = next((row for row in self.tasks if row['id'] == task_id), None)
+            if task is not None:
+                return task
+            try:
+                return self.board.show(task_id)
+            except Exception:
+                return None
+        interval = max(15, float(self.ctx.get_config('poll_interval', 15)))
+        return NotificationDispatcher(
+            box, NativeSender(profile), resolve_requirement=self.store.get_requirement,
+            resolve_task=resolve_task, retry_seconds=interval, clock=self.clock)
 
     def pending(self, limit):
         if self.startup:
@@ -229,7 +292,8 @@ class Host:
                 'acceptances': [e for e in self.store.acceptances()
                                 if e['payload']['requirement_id'] in relevant],
                 'notifications': [n for n in notifications if n['state'] != 'sent' or
-                                  (n['kind'] == 'question' and n['answer'] is None)],
+                                  (n['kind'] == 'question' and n['answer'] is None
+                                   and n.get('closed_at') is None)],
                 'task_links': data['task_links'],
                 'board': [{k: t[k] for k in ('id', 'title', 'status', 'assignee', 'blocked_reason',
                                              'last_heartbeat_at', 'block_kind', 'block_recurrences',
@@ -249,25 +313,41 @@ async def scan_runner(ctx, adapter):
     while not adapter.is_connected:
         await asyncio.sleep(interval)
     host = Host(ctx)
-    while adapter.is_connected:
-        tick = asyncio.create_task(host.coordinator.tick())
+    delivery = None
+    try:
         try:
-            while not tick.done():
-                done, _ = await asyncio.wait({tick}, timeout=interval)
-                if not done and host.scheduling.observation(host.store.snapshot())['liveness']['overdue']:
-                    log.error('ANCOR liveness overdue: coordinator still running; no overlapping launch')
-            outcome = await tick
-        finally:
-            if not tick.done():
-                tick.cancel()
-                try:
-                    await tick
-                except asyncio.CancelledError:
-                    pass
-        if outcome == 'busy':
-            observation = host.scheduling.observation(host.store.snapshot())
-            if observation['liveness']['overdue']:
-                log.error('ANCOR liveness overdue: coordinator lock remains held; inspect stuck/surviving coordinator, no overlapping launch')
-        if outcome == 'failed':
-            log.error('ANCOR coordinator infrastructure failure: %s', host.coordinator.last_error)
-        await asyncio.sleep(interval)
+            dispatcher = host.notification_dispatcher()
+        except ValueError as exc:
+            log.error('ANCOR notification delivery unavailable: %s', exc)
+        else:
+            delivery = asyncio.create_task(
+                dispatcher.run(lambda: adapter.is_connected), name='ancor:notifications')
+        while adapter.is_connected:
+            tick = asyncio.create_task(host.coordinator.tick())
+            try:
+                while not tick.done():
+                    done, _ = await asyncio.wait({tick}, timeout=interval)
+                    if not done and host.scheduling.observation(host.store.snapshot())['liveness']['overdue']:
+                        log.error('ANCOR liveness overdue: coordinator still running; no overlapping launch')
+                outcome = await tick
+            finally:
+                if not tick.done():
+                    tick.cancel()
+                    try:
+                        await tick
+                    except asyncio.CancelledError:
+                        pass
+            if outcome == 'busy':
+                observation = host.scheduling.observation(host.store.snapshot())
+                if observation['liveness']['overdue']:
+                    log.error('ANCOR liveness overdue: coordinator lock remains held; inspect stuck/surviving coordinator, no overlapping launch')
+            if outcome == 'failed':
+                log.error('ANCOR coordinator infrastructure failure: %s', host.coordinator.last_error)
+            await asyncio.sleep(interval)
+    finally:
+        if delivery is not None:
+            delivery.cancel()
+            try:
+                await delivery
+            except asyncio.CancelledError:
+                pass

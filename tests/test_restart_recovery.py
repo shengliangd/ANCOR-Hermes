@@ -86,9 +86,10 @@ def test_invalidated_orphan_restart(tmp_path, status, retired, run, expected):
     before = deepcopy(detail)
     store.accept(new['id'], 'verified replacement')
     box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
-                             target='test:destination', sender=lambda *a: {'success': True})
+                             target='test:destination')
     box.enqueue('accept:' + new['id'], 'completion', 'Delivered replacement', actor='ancor-coordinator')
-    box.deliver('accept:' + new['id'], actor='ancor-coordinator')
+    assert box.claim_next()['state'] == 'sending'
+    box.mark_sent('accept:' + new['id'], {'success': True})
     store.ack_events([e['id'] for e in store.pending_events()])
 
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
@@ -151,33 +152,16 @@ def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state)
     store.accept(req['id'], 'evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
-                             target='test:destination', sender=lambda *a: {'success': True})
+                             target='test:destination')
     identifier = 'accept:' + req['id']
     box.enqueue(identifier, 'completion', 'Exact result', actor='ancor-coordinator')
-    if state == 'sent':
-        box.deliver(identifier, actor='ancor-coordinator')
-    elif state in {'sending', 'uncertain'}:
-        script = (
-            'import sys,time; from pathlib import Path; from ancor.notification import NotificationOutbox; '
-            'checkpoint=Path(sys.argv[3]); '
-            '\ndef sender(*args):\n checkpoint.touch()\n'
-            ' if sys.argv[4] == "uncertain": raise TimeoutError("test")\n'
-            ' while True: time.sleep(.01)\n'
-            'box=NotificationOutbox(sys.argv[1],coordinator_profile="ancor-coordinator",'
-            'target="test:destination",sender=sender); '
-            'box.deliver(sys.argv[2],actor="ancor-coordinator")')
-        checkpoint = tmp_path / 'sending'
-        child = subprocess.Popen([sys.executable, '-c', script, box.path, identifier, str(checkpoint), state])
-        try:
-            wait_file(checkpoint)
-            if state == 'uncertain':
-                assert child.wait(timeout=5) == 0
-            else:
-                child.kill()
-        finally:
-            if child.poll() is None:
-                child.kill()
-            child.wait(timeout=5)
+    if state in {'sending', 'uncertain', 'sent'}:
+        assert box.claim_next()['state'] == 'sending'
+    if state == 'uncertain':
+        from ancor.notification import SenderError
+        box.mark_uncertain(identifier, SenderError('timeout'))
+    elif state == 'sent':
+        box.mark_sent(identifier, {'success': True})
     host = Host(Context(path), board=Board())
     events = host.pending(32)
     assert bool(events) == (state != 'sent')
@@ -197,10 +181,11 @@ def test_sent_question_is_not_completion_delivery(tmp_path):
     store.accept(req['id'], 'evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
-                             target='test:destination', sender=lambda *a: {'success': True})
+                             target='test:destination')
     identifier = 'accept:' + req['id']
     box.enqueue(identifier, 'question', 'Is this suitable?', actor='ancor-coordinator')
-    box.deliver(identifier, actor='ancor-coordinator')
+    assert box.claim_next()['state'] == 'sending'
+    box.mark_sent(identifier, {'success': True})
     box.respond(identifier, 'yes', 'human:answer')
     host = Host(Context(path), board=Board())
     assert host.snapshot()['requirements'] == [store.get_requirement(req['id'])]

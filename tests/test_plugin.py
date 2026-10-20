@@ -41,9 +41,6 @@ def configured_context():
 def test_confirmation_uses_current_chat_without_delivery_configuration(tmp_path, monkeypatch, brief):
     from ancor.service import Service
     from ancor.store import Store
-    def forbidden_send(*args, **kwargs):
-        raise AssertionError('confirmation must not send to a separate destination')
-    monkeypatch.setattr('ancor.notification.HermesSender.__call__', forbidden_send)
     service = Service(None, Store(tmp_path / 'state.db'))
     draft = service.requirement({'action': 'draft', 'summary': 'Short high-level summary',
                                  'brief': brief, 'acceptance_criteria': 'exact criteria'})
@@ -141,7 +138,7 @@ def test_only_ancor_roles_have_business_tools():
             assert tools['ancor_board']['schema']['parameters']['properties']['action']['enum'] == ['list', 'show']
         elif role == 'ancor-coordinator':
             assert set(tools) == {'ancor_get_context', 'ancor_acceptance', 'ancor_board', 'ancor_wake', 'ancor_notify'}
-            assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list']
+            assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
             assert 'contract' in tools['ancor_board']['schema']['parameters']['properties']
         elif role == 'ancor-worker':
             assert not tools

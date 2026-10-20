@@ -127,6 +127,22 @@ def test_answered_uncertain_question_is_progress_not_delivery_failure(tmp_path):
     assert result['reason'] == 'question_answered_not_resumed'
 
 
+def test_question_delivery_grace_and_stale_question(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    store.link_task(req['id'], 'task')
+    base = {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+            'task_id': 'task', 'answer': None}
+    pending = {**base, 'state': 'pending', 'queued_at': 9_990}
+    result = scheduler.health(store.snapshot(), [{'id': 'task', 'status': 'blocked'}], [pending])[0]
+    assert result['state'] == 'active' and result['reason'] == 'question_delivery_in_progress'
+    expired = {**pending, 'queued_at': 9_000}
+    result = scheduler.health(store.snapshot(), [{'id': 'task', 'status': 'blocked'}], [expired])[0]
+    assert result['reason'] == 'question_delivery_unconfirmed'
+    closed = {**base, 'state': 'sent', 'closed_at': 9_999, 'close_reason': 'task_not_blocked'}
+    result = scheduler.health(store.snapshot(), [{'id': 'task', 'status': 'blocked'}], [closed])[0]
+    assert result['reason'] == 'question_superseded'
+
+
 def test_wake_is_a_timer_not_a_progress_source(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='later', due_at=20_000))

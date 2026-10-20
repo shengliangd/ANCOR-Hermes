@@ -7,6 +7,7 @@ from uuid import uuid4
 class Scheduling:
     INTERVAL = 7200
     HEARTBEAT_STALE_SECONDS = 3600
+    DELIVERY_GRACE_SECONDS = 210
 
     def __init__(self, store, clock=time.time):
         self.store, self.clock = store, clock
@@ -94,21 +95,34 @@ class Scheduling:
         return isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) and now - timestamp <= seconds
 
     @staticmethod
-    def _question(notifications, requirement_id, task_id):
+    def _question(notifications, requirement_id, task_id, *, open_only=False):
         return [row for row in notifications or ()
                 if row.get('kind') == 'question'
                 and row.get('requirement_id') == requirement_id
-                and row.get('task_id') == task_id]
+                and row.get('task_id') == task_id
+                and (not open_only or (row.get('answer') is None
+                                       and row.get('closed_at') is None))]
 
-    def _blocked_wait(self, notifications, requirement_id, task_id):
+    def _blocked_wait(self, notifications, requirement_id, task_id, now):
         questions = self._question(notifications, requirement_id, task_id)
         # A recorded answer is progress even if transport state stayed uncertain.
         if any(row.get('answer') is not None for row in questions):
             return 'stalled', 'question_answered_not_resumed'
-        if any(row.get('state') == 'sent' and row.get('answer') is None for row in questions):
+        open_questions = [row for row in questions if row.get('closed_at') is None]
+        if any(row.get('state') == 'sent' for row in open_questions):
             return 'waiting', None
-        if any(row.get('state') in {'pending', 'sending', 'uncertain'} for row in questions):
+        delivering = [row for row in open_questions if row.get('state') in {'pending', 'sending'}]
+        if delivering:
+            stamps = [row.get('delivery_started_at') or row.get('queued_at')
+                      for row in delivering]
+            if any(isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
+                   and now - stamp <= self.DELIVERY_GRACE_SECONDS for stamp in stamps):
+                return 'active', 'question_delivery_in_progress'
             return 'stalled', 'question_delivery_unconfirmed'
+        if any(row.get('state') == 'uncertain' for row in open_questions):
+            return 'stalled', 'question_delivery_unconfirmed'
+        if any(row.get('closed_at') is not None for row in questions):
+            return 'stalled', 'question_superseded'
         return 'stalled', 'blocked_without_wait'
 
     def health(self, data, tasks, notifications, now=None):
@@ -143,12 +157,19 @@ class Scheduling:
                                 'waiting_on': None, 'task_ids': [task['id'] for task in triage]})
                 continue
             blocked = [task for task in items if task.get('status') == 'blocked']
-            blocked_health = [(task, *self._blocked_wait(notifications, rid, task['id'])) for task in blocked]
+            blocked_health = [(task, *self._blocked_wait(notifications, rid, task['id'], now))
+                              for task in blocked]
             invalid_blocked = [item for item in blocked_health if item[1] == 'stalled']
             if invalid_blocked:
                 task, _, reason = invalid_blocked[0]
                 results.append({**base, 'state': 'stalled', 'reason': reason,
                                 'waiting_on': None, 'task_ids': [item[0]['id'] for item in invalid_blocked]})
+                continue
+            delivering = [task for task, state, _ in blocked_health if state == 'active']
+            if delivering:
+                results.append({**base, 'state': 'active', 'reason': 'question_delivery_in_progress',
+                                'waiting_on': None,
+                                'task_ids': [task['id'] for task in delivering]})
                 continue
             running = [task for task in items if task.get('status') == 'running']
             fresh = [task for task in running if self._fresh(task.get('last_heartbeat_at'), now,
@@ -168,7 +189,8 @@ class Scheduling:
                 continue
             waiting = [(task, reason) for task, state, reason in blocked_health if state == 'waiting']
             if waiting:
-                questions = [row for task, _ in waiting for row in self._question(notifications, rid, task['id'])]
+                questions = [row for task, _ in waiting for row in self._question(
+                    notifications, rid, task['id'], open_only=True)]
                 results.append({**base, 'state': 'waiting_on_human', 'reason': 'blocked_waiting_human',
                                 'waiting_on': {'question_ids': [row['id'] for row in questions]},
                                 'task_ids': [task['id'] for task, _ in waiting]})

@@ -67,42 +67,44 @@ plugin doctor before starting:
 | `gateway_owner` | owner only | `true`; keep `false` in role profiles |
 | `poll_interval` | owner | At least 15 seconds |
 | `human_target` | coordinator | Explicit native `platform:destination` |
-| `transport_profile` | coordinator | Profile owning that configured transport |
-| `sender_executable` | coordinator | Optional executable, default `hermes` (native transport) |
+| `transport_profile` | owner | Served Gateway profile owning that transport |
 
-For an isolated transport test only, set `sender_executable` to the absolute path
-of the approved test executable through native config, e.g.
-`hermes -p ancor-coordinator config set plugins.entries.ancor.settings.sender_executable /absolute/isolated/bin/hermes`.
-It must implement the native `send --file - --json` contract. A PATH-only override
-is insufficient when Hermes bootstrap prepends its own launcher. Do not configure
-the test executable in a live profile; leave `hermes` for normal native delivery.
-Failed sends retain safe structured diagnostics in the outbox `error` field
-(exception class, reason code, exit code, resolved executable), never raw output
-or exception text. Legacy errors remain readable. `uncertain`/`sending` entries
-are not retried automatically: reconcile transport evidence before any retry.
+The coordinator only durably enqueues notifications. The Gateway owner claims
+them in a background loop and sends through Hermes' generic `send_message_tool`
+under `transport_profile`; no per-notification CLI process is started. A send
+returns `pending`, not `sent`. Failed sends retain safe structured diagnostics
+in the outbox `error` field (exception class and reason code), never raw output,
+message text or credentials. `sending` and `uncertain` entries are not retried
+automatically: reconcile transport evidence before any retry. An item that found
+no live transport adapter remains `pending` and is retried with bounded backoff.
+Unanswered questions are closed automatically when their requirement is
+cancelled, invalidated or accepted, or when their linked task is no longer
+blocked. Closing a question is not an answer and cannot be used as human consent.
 
 ### Coordinator notification channel
 
 Background questions and completion notices fail closed unless the coordinator
-profile has both values below. The coordinator is the only role that sends them;
-the interactor reads the resulting outbox and relays answers.
+has `human_target` and the Gateway owner has `transport_profile`. The coordinator
+is the only role that enqueues them; the owner delivers from the durable outbox,
+and the interactor reads it to relay answers.
 
 ```sh
 hermes -p ancor-coordinator config set plugins.entries.ancor.settings.human_target 'telegram:-1001234567890'
-hermes -p ancor-coordinator config set plugins.entries.ancor.settings.transport_profile default
+hermes -p default config set plugins.entries.ancor.settings.transport_profile default
 ```
 
-Use the exact destination syntax accepted by `hermes send --to` for the selected
-platform, for example `telegram:<chat_id>`, `discord:#ops`,
+Use the exact destination syntax accepted by the selected native transport, for
+example `telegram:<chat_id>`, `discord:#ops`,
 `slack:C0123ABCD` or `feishu:oc_<chat_id>`. The destination must include a
 non-empty platform and destination separated by `:`.
 
-`transport_profile` must name the profile whose native `.env`/`config.yaml`
-actually contains that channel's credentials and for which `hermes send` works.
-If the bot credentials live only with the Gateway owner, set that owner's profile
-name here; do not copy the default `.env` into role profiles. Pointing at a
-profile without credentials, or omitting either setting, leaves notification
-delivery unavailable.
+`transport_profile` must name a profile served by the same Gateway whose native
+`.env`/`config.yaml` contains that channel's credentials and whose platform
+adapter is connected. If the bot credentials live only with the Gateway owner,
+set that owner's profile name here; do not copy the default `.env` into role
+profiles. A CLI-only send test is insufficient: the production path uses the
+Gateway's live adapter. Pointing at a profile without a connected adapter leaves
+questions pending instead of silently falling back to a cold CLI process.
 
 Verify the exact transport path used by the outbox before enabling the
 coordinator:
@@ -111,19 +113,51 @@ coordinator:
 printf 'ANCOR channel test' | hermes --profile default send --to 'telegram:-1001234567890' --file - --json
 ```
 
-Replace the profile and destination with the configured values. The JSON receipt
-must contain `"success": true` and no `error` or `skipped` field. The plugin invokes
-exactly `hermes --profile <transport_profile> send --to <human_target> --file - --json`;
-`sent` means the native transport accepted the message, not that a human read or
-answered it.
+Replace the profile and destination with the configured values. This checks the
+underlying native transport, but production uses the live Gateway adapter through
+the generic send API. Verify the same platform is connected for
+`transport_profile`, then submit one real question and confirm its outbox state
+becomes `sent`. `sent` means the native transport accepted the message, not that
+a human read or answered it.
 
 Enable the plugin/toolset in the selected profiles. The owner registers lifecycle
-infrastructure, not business tools. The interactor exclusively receives requirement
-draft/confirm/cancel/respond, read-only board/progress context and notification
-reply tools. Its Kanban read path is `ancor_board list` / `ancor_board show`; do not
-grant that profile native Kanban write tools. The coordinator receives full context,
-board, wake, acceptance and notification send tools; it has no requirement-lifecycle
-tool. The worker receives no ANCOR business tools.
+infrastructure, not business tools. All three role profiles receive the normal
+Hermes work surface. Replace the invalid `all` sentinel in every saved
+`platform_toolsets` list with explicit toolset names; Hermes silently ignores an
+unknown toolset, which would leave the role with only its named ANCOR tools.
+
+Baseline: `web browser terminal file code_execution vision image_gen tts skills
+todo memory session_search connections computer_use`.
+
+| Role | Additional toolsets | Must not enable |
+| --- | --- | --- |
+| interactor | `ancor`, `clarify`, `delegation`, `cronjob` | native `kanban`; use `ancor_board list/show` for read-only progress |
+| coordinator | `ancor`, `kanban`, `delegation` | `clarify`, `cronjob`; use `ancor_notify` and `ancor_wake` |
+| worker | `ancor`, `kanban` | `clarify`, `cronjob`, `delegation` |
+
+Apply the same matrix to every platform that routes to a role; at minimum `cli`
+for coordinator/worker and both `cli` and `feishu` for interactor.
+
+```sh
+ROLE_TOOLSETS="web browser terminal file code_execution vision image_gen tts skills todo memory session_search connections computer_use ancor"
+hermes -p ancor-coordinator tools enable $ROLE_TOOLSETS kanban delegation --platform cli
+hermes -p ancor-coordinator tools disable clarify cronjob --platform cli
+hermes -p ancor-worker tools enable $ROLE_TOOLSETS kanban --platform cli
+hermes -p ancor-worker tools disable clarify cronjob delegation --platform cli
+hermes -p ancor-interactor tools enable $ROLE_TOOLSETS clarify delegation cronjob --platform feishu
+hermes -p ancor-interactor tools disable kanban --platform feishu
+hermes -p ancor-interactor tools enable $ROLE_TOOLSETS clarify delegation cronjob --platform cli
+hermes -p ancor-interactor tools disable kanban --platform cli
+```
+
+The coordinator and interactor may use native `delegate_task` for bounded
+analysis; the worker may not delegate. A child inherits the parent's tools and
+permissions, does not inherit the role SOUL/skill, and cannot use `clarify`,
+`send_message`, or native Kanban. Put the investigation boundary and return
+contract in every delegation context; the parent verifies the result and makes
+all durable changes. The interactor's task-board path stays read-only through
+`ancor_board list` / `ancor_board show`; its normal tools are for analysis, not
+for bypassing requirement confirmation or recording unconfirmed human input.
 
 ### Gateway owner and API server
 
@@ -166,6 +200,9 @@ Before calling the Gateway ready, verify all of the following:
 - That profile has `api_server` enabled and connected, with `poll_interval >= 15`.
 - The `ancor` plugin and the correct role toolsets are enabled in the owner and in
   all three role profiles.
+- Each role's `hermes -p <role> tools list` matches the matrix: coordinator and
+  interactor have `delegation`; worker does not. Coordinator and worker lack
+  `clarify`/`cronjob`; interactor lacks native `kanban`.
 - Native Kanban dispatch is running: either `kanban.dispatch_in_gateway true` in
   the owner, or one separate `hermes kanban daemon`. With review dispatch disabled,
   it must still be able to spawn `ancor-worker` for ordinary tasks.

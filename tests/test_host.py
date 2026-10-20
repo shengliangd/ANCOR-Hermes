@@ -172,7 +172,10 @@ def test_lifecycle_waits_for_native_connected_property(tmp_path, monkeypatch):
         return 'idle'
     def factory(ctx):
         assert adapter.is_connected
-        return SimpleNamespace(coordinator=SimpleNamespace(tick=tick))
+        def notification_dispatcher():
+            raise ValueError('not configured in lifecycle test')
+        return SimpleNamespace(coordinator=SimpleNamespace(tick=tick),
+                               notification_dispatcher=notification_dispatcher)
     async def sleep(delay):
         sleeps.append(delay)
         if not ticks:
@@ -182,6 +185,50 @@ def test_lifecycle_waits_for_native_connected_property(tmp_path, monkeypatch):
     asyncio.run(scan_runner(Context(tmp_path / 'store.db'), adapter))
     assert ticks == [True]
     assert sleeps == [15, 15]
+
+
+def test_host_closes_questions_for_terminal_requirement(tmp_path):
+    from ancor.notification import NotificationOutbox
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human')
+    store.link_task(req['id'], 'task')
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination')
+    box.enqueue('q1', 'question', 'Which value?', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='task')
+    store.cancel([req['id']], 'user withdrew it')
+    host = Host(ctx, store=store, board=Board({'id': 'task', 'status': 'blocked'}),
+                db_path=tmp_path / 'native.db')
+    host.scan()
+    row = box.get('q1')
+    assert row['closed'] is True
+    assert row['close_reason'] == 'requirement_cancelled'
+    assert row['answer'] is None
+
+
+def test_host_closes_question_when_task_is_no_longer_blocked(tmp_path):
+    from ancor.notification import NotificationOutbox
+    ctx = Context(tmp_path / 'store.db')
+    ctx.config['human_target'] = 'test:destination'
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human')
+    store.link_task(req['id'], 'task')
+    task = {'id': 'task', 'status': 'blocked'}
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination')
+    box.enqueue('q1', 'question', 'Which value?', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='task')
+    host = Host(ctx, store=store, board=Board(task), db_path=tmp_path / 'native.db')
+    host.scan()
+    assert box.get('q1')['closed'] is False
+    task['status'] = 'running'
+    host.scan()
+    row = box.get('q1')
+    assert row['closed'] is True
+    assert row['close_reason'] == 'task_not_blocked'
 
 
 def test_native_event_api_to_store_and_prompt(tmp_path, monkeypatch):

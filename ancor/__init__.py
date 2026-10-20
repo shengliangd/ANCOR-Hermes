@@ -21,6 +21,7 @@ _ACTION_FIELDS = {
     },
     'ancor_notify': {
         'send': ['id', 'kind', 'message'],
+        'withdraw': ['id', 'reason'],
         'list': [],
         'respond': ['id', 'answer'],
     },
@@ -160,14 +161,12 @@ def register(ctx, *, scan_runner=None):
     operations.service = service
 
     def outbox():
-        from .notification import HermesSender, NotificationOutbox
-        # Fail closed: destination and credential-owning profile are explicit.
+        from .notification import NotificationOutbox
+        # Fail closed: destination is explicit. Delivery is Gateway-owned.
         return NotificationOutbox(
             service.store.path + '.notifications.db',
             coordinator_profile=coordinator_profile,
-            target=ctx.get_config('human_target'),
-            sender=HermesSender(ctx.get_config('transport_profile'),
-                                executable=ctx.get_config('sender_executable', 'hermes')))
+            target=ctx.get_config('human_target'))
 
     def response_event(row):
         return service.store.add_event('notification.response', {
@@ -345,7 +344,7 @@ def register(ctx, *, scan_runner=None):
                     rows = [row for row in rows if row.get(field) == value]
             if args.get('open_only'):
                 rows = [row for row in rows if row['kind'] == 'question'
-                        and row['answer'] is None]
+                        and row['answer'] is None and row.get('closed_at') is None]
             limit = args.get('limit', 50)
             if type(limit) is not int or not 1 <= limit <= 200:
                 raise ValueError('limit must be an integer between 1 and 200')
@@ -400,7 +399,11 @@ def register(ctx, *, scan_runner=None):
                             f'{task.get("status")}')
             box.enqueue(identifier, args['kind'], args['message'], actor=ctx.profile_name,
                         requirement_id=requirement_id, task_id=task_id)
-            return box.deliver(identifier, actor=ctx.profile_name)
+            return box.get(identifier)
+        if action == 'withdraw':
+            if not coordinator:
+                raise PermissionError('coordinator profile required to withdraw questions')
+            return box.withdraw(identifier, actor=ctx.profile_name, reason=args['reason'])
         if action == 'respond':
             existing = box.get(identifier)
             # IDs come only from handler metadata, never model-supplied provenance.
@@ -501,7 +504,7 @@ def register(ctx, *, scan_runner=None):
                  'status': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'include_archived': {'type': 'boolean'}}, ['action']),
             'ancor_notify': (
-                'List compact durable notifications, expand one by id, or transcribe a human answer for the matching open question. Filter by requirement_id, task_id, state or open_only. Answers are advisory, never authorization.',
+                'List compact durable notifications, expand one by id, or transcribe a human answer for the matching open question. Filter by requirement_id, task_id, state or open_only. A closed question cannot be resurrected; use requirement respond for new human input. Answers are advisory, never authorization.',
                 {'action': {'type': 'string', 'enum': ['list', 'respond']},
                  'id': {'type': 'string'}, 'answer': {'type': 'string'},
                  'view': {'type': 'string', 'enum': ['summary', 'full']},
@@ -517,11 +520,11 @@ def register(ctx, *, scan_runner=None):
                  'requirement_id': {'type': 'string'}, 'wake_id': {'type': 'string'},
                  'reason': {'type': 'string'}, 'due_at': {'type': 'number'}}, ['action']),
             'ancor_notify': (
-                'Send a durable neutral question or accepted completion, or list compact notifications. A question requires an active requirement, a linked task that is blocked, and no other open question for that requirement and task; completion requires an accepted requirement and id accept:<requirement_id>. Filter by requirement_id, task_id, state or open_only; view=full or id expands one notification. Reuse stable IDs; uncertain delivery requires operator reconciliation, not a new ID.',
-                {'action': {'type': 'string', 'enum': ['send', 'list']},
+                'Durably enqueue a neutral question or accepted completion, list compact notifications, or withdraw an unanswered question that later information made obsolete. Enqueue returns pending; Gateway delivery is asynchronous. A question requires an active requirement, a linked blocked task, and no other open question for that requirement and task; completion requires an accepted requirement and id accept:<requirement_id>. Filter by requirement_id, task_id, state or open_only; view=full or id expands one. Reuse stable IDs; pending is not delivery, and uncertain requires operator reconciliation.',
+                {'action': {'type': 'string', 'enum': ['send', 'list', 'withdraw']},
                  'id': {'type': 'string'},
                  'kind': {'type': 'string', 'enum': ['question', 'completion']},
-                 'message': {'type': 'string'},
+                 'message': {'type': 'string'}, 'reason': {'type': 'string'},
                  'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
                  'view': {'type': 'string', 'enum': ['summary', 'full']},
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},

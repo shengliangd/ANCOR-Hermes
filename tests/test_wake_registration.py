@@ -88,15 +88,13 @@ def test_ack_does_not_depend_on_question_delivery(tmp_path, monkeypatch):
     assert context['progression'][0]['state'] == 'stalled'
     assert context['progression'][0]['reason'] == 'blocked_without_wait'
 
-    def timeout(*args):
-        raise SenderError('timeout', 'hermes')
     box = NotificationOutbox(store.path + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
-                             target='test:destination',
-                             sender=timeout)
+                             target='test:destination')
     box.enqueue('label-question', 'question', 'Which label?', actor='ancor-coordinator',
                 requirement_id=req['id'], task_id='task')
-    assert box.deliver('label-question', actor='ancor-coordinator')['state'] == 'uncertain'
+    assert box.claim_next()['state'] == 'sending'
+    assert box.mark_uncertain('label-question', SenderError('timeout'))['state'] == 'uncertain'
 
     blocked_again = store.add_event('native.blocked', {'task_id': 'task'},
                                     source_key='native:test:blocked-again')

@@ -23,8 +23,6 @@ def registered(tmp_path, monkeypatch, profile, tasks):
     monkeypatch.setattr('ancor.board.NativeBoard.show', lambda self, task_id: tasks[task_id])
     monkeypatch.setattr('ancor.board.NativeBoard._call', lambda self, *args, **kwargs: {
         'task': tasks[args[1]], 'comments': [], 'runs': [], 'events': []})
-    monkeypatch.setattr('ancor.notification.HermesSender.__call__',
-                        lambda self, target, message: {'success': True})
     ancor.register(ctx)
     store = Store(config['store_path'])
     req = store.confirm(store.create_draft('Deliver report', 'Exact totals')['id'], 'fixture')
@@ -51,7 +49,7 @@ def test_question_requires_blocked_task_and_reuses_one_open_question(tmp_path, m
     assert call(tools, 'ancor_board', {'action': 'show', 'task_id': 't1'})['task']['status'] == 'blocked'
     first = call(tools, 'ancor_notify', args)
     assert first['id'] == 'q1'
-    assert first['state'] == 'sent'
+    assert first['state'] == 'pending'
 
     duplicate = call(tools, 'ancor_notify', dict(args, id='q2'))
     assert duplicate['code'] == 'state_conflict'
@@ -60,6 +58,7 @@ def test_question_requires_blocked_task_and_reuses_one_open_question(tmp_path, m
     tasks['t1']['status'] = 'running'
     retry = call(tools, 'ancor_notify', args)
     assert retry['id'] == 'q1'
+    assert retry['state'] == 'pending'
     assert [row['id'] for row in NotificationOutbox.read_existing(
         store.path + '.notifications.db')] == ['q1']
 
@@ -75,6 +74,21 @@ def test_open_question_scope_is_requirement_and_task(tmp_path, monkeypatch):
                     dict(base, id='q1', requirement_id=req['id'])).get('error')
     assert not call(tools, 'ancor_notify',
                     dict(base, id='q2', requirement_id=other['id'])).get('error')
+
+
+def test_coordinator_can_withdraw_superseded_question(tmp_path, monkeypatch):
+    tasks = {'t1': {'id': 't1', 'status': 'blocked'}}
+    tools, store, req = registered(tmp_path, monkeypatch, 'ancor-coordinator', tasks)
+    store.link_task(req['id'], 't1')
+    args = {'action': 'send', 'id': 'q1', 'kind': 'question', 'message': 'Which label?',
+            'requirement_id': req['id'], 'task_id': 't1'}
+    assert call(tools, 'ancor_notify', args)['state'] == 'pending'
+    closed = call(tools, 'ancor_notify', {
+        'action': 'withdraw', 'id': 'q1', 'reason': 'new input supplied the label'})
+    assert closed['closed'] is True
+    assert closed['close_reason'] == 'new input supplied the label'
+    listed = call(tools, 'ancor_notify', {'action': 'list', 'open_only': True})
+    assert listed['count'] == 0
 
 
 def test_requirement_response_is_idempotent(tmp_path, monkeypatch):

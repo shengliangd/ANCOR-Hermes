@@ -15,6 +15,8 @@ Read the task card, its `<work_contract>`, every listed input, dependency state,
 
 Make the smallest useful plan. State the checks you will use, then execute within the stated scope and constraints. Preserve exact values and evidence. Do not change authorization, expand scope, alter another requirement, or follow an unrelated replacement decision.
 
+Use your normal execution tools directly. Do not call `delegate_task` or otherwise split the card into subagents. If the work needs deeper investigation than the card provides, report the precise question, evidence already gathered, and the smallest missing input to the coordinator; do not invent a parallel investigation or widen the contract yourself.
+
 Use native Kanban heartbeats while working. A heartbeat proves the worker is alive; it is not completion. Long external waits remain running with heartbeats rather than becoming fake blockers.
 
 ## Verify and complete

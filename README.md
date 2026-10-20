@@ -34,11 +34,22 @@ requirement text that will be stored in ANCOR.
 
 Native Hermes owns worker dispatch and task lifecycle. The plugin owns requirement semantics and coordination admission. Idle polling uses no model tokens. Events are batched; unchanged unprocessed batches have a retry budget rather than a hot model loop.
 
+Human notifications are durably enqueued by the coordinator and delivered by the
+Gateway owner through Hermes' generic send interface. Enqueue returns `pending`;
+it is not a delivery receipt. The Gateway keeps one background delivery loop, so
+coordinator turns do not wait on transport startup. Unanswered questions are
+closed, without inventing an answer, when their requirement becomes terminal or
+their linked task is no longer blocked; the coordinator can also explicitly
+withdraw a question after newer input makes it obsolete.
+
 The interactor is the only human-facing role and can read the board for progress
 explanations. The coordinator creates neutral durable questions and completion
-outcomes; it does not conduct user dialogue.
-Workers receive no ANCOR business tools and use only their native task card,
-heartbeats and Kanban lifecycle tools.
+outcomes; it does not conduct user dialogue. All three roles receive the normal
+Hermes work tools; role-specific exclusions keep the human and scheduling
+boundaries intact. The coordinator and interactor may delegate bounded analysis to
+native subagents, while workers execute directly with their normal tools and do
+not delegate. Workers receive no ANCOR business tools and use their native task
+card, heartbeats and Kanban lifecycle tools.
 
 ## Model-facing output
 
@@ -61,13 +72,14 @@ tasks sort ahead of archived history.
 ## Health states
 
 `progression` reports health per active or paused requirement. `active` requires a running
-task with a fresh heartbeat, or ready work. `waiting_on_human` requires a blocked
-task with a delivered, unanswered question. `paused` is a deliberate resting state,
-not stalled and not liveness. For active requirements, everything else is `stalled`:
-triage, stale heartbeat, blocked without an open question, blocked after its question
-was answered, no work, or acceptance pending. A scheduled wake is a timer, not
-progress. The host publishes a `host.stalled` condition event that cannot be
-acknowledged and clears only when real work recovers.
+task with a fresh heartbeat, ready work, or a question still inside its short delivery
+window. `waiting_on_human` requires a blocked task with a delivered, unanswered, open
+question. `paused` is a deliberate resting state, not stalled and not liveness. For active
+requirements, everything else is `stalled`: triage, stale heartbeat, blocked without an
+open question, blocked after its question was answered or withdrawn, unconfirmed delivery,
+no work, or acceptance pending. A scheduled wake is a timer, not progress. The host
+publishes a `host.stalled` condition event that cannot be acknowledged and clears only when
+real work recovers.
 
 ## Guarantee boundaries
 
