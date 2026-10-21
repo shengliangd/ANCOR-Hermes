@@ -2,8 +2,12 @@
 from pathlib import Path
 from contextlib import contextmanager
 import json
+import logging
 import sqlite3
 import re
+
+
+log = logging.getLogger(__name__)
 
 
 class Service:
@@ -140,7 +144,12 @@ class Service:
             db.execute('CREATE TABLE IF NOT EXISTS confirmations ('
                        'session TEXT, call TEXT, kind TEXT NOT NULL, target TEXT NOT NULL, '
                        'args TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, '
+                       'outcome TEXT, error TEXT, '
                        'PRIMARY KEY(session, call))')
+            present = {row[1] for row in db.execute('PRAGMA table_info(confirmations)')}
+            for column in ('outcome', 'error'):
+                if column not in present:
+                    db.execute(f'ALTER TABLE confirmations ADD COLUMN {column} TEXT')
             db.execute('BEGIN IMMEDIATE')
             yield db
             db.commit()
@@ -149,6 +158,31 @@ class Service:
             raise
         finally:
             db.close()
+
+    @staticmethod
+    def _finish_confirmation(db, session_id, tool_call_id, outcome, error=None):
+        db.execute('UPDATE confirmations SET consumed=1, outcome=?, error=? '
+                   'WHERE session=? AND call=?',
+                   (outcome, None if error is None else str(error), session_id, tool_call_id))
+
+    @staticmethod
+    def _confirmation_mismatch(payload, question, answer):
+        if not isinstance(payload, dict):
+            return 'clarify result is not an object'
+        if payload.get('outcome') != 'submitted':
+            return f"clarify outcome is {payload.get('outcome')!r}, not 'submitted'"
+        responses = payload.get('responses')
+        if not isinstance(responses, list) or len(responses) != 1:
+            return 'clarify result must contain exactly one response'
+        response = responses[0]
+        if not isinstance(response, dict):
+            return 'clarify response is not an object'
+        expected = {'question': question['question'], 'choices_offered': question['choices'],
+                    'status': 'answered', 'user_response': answer}
+        for field, value in expected.items():
+            if response.get(field) != value:
+                return f'clarify response {field} does not match the exact confirmation'
+        return None
 
     def pre_tool_call(self, tool_name, args, session_id='', tool_call_id='', **kwargs):
         if tool_name != 'clarify':
@@ -187,9 +221,10 @@ class Service:
                                       (session_id, tool_call_id)).fetchone()
                 if existing and existing != (kind, target, encoded, 0):
                     raise ValueError('confirmation call identity already used')
-                db.execute('INSERT OR IGNORE INTO confirmations(session, call, kind, target, args) '
-                           'VALUES (?, ?, ?, ?, ?)',
-                           (session_id, tool_call_id, kind, target, encoded))
+                db.execute('INSERT OR IGNORE INTO confirmations('
+                           'session, call, kind, target, args, outcome) '
+                           'VALUES (?, ?, ?, ?, ?, ?)',
+                           (session_id, tool_call_id, kind, target, encoded, 'pending'))
         except Exception as exc:
             return {'action': 'block', 'message': str(exc)}
 
@@ -203,12 +238,19 @@ class Service:
             if not row or row[3]:
                 return
             kind, target, encoded = row[0], row[1], row[2]
-            if status != 'ok' or json.dumps(args, sort_keys=True, ensure_ascii=False) != encoded:
-                db.execute('UPDATE confirmations SET consumed=1 WHERE session=? AND call=?',
-                           (session_id, tool_call_id))
+            if status != 'ok':
+                self._finish_confirmation(
+                    db, session_id, tool_call_id, 'error', f'clarify status is {status!r}')
+                return
+            if json.dumps(args, sort_keys=True, ensure_ascii=False) != encoded:
+                self._finish_confirmation(
+                    db, session_id, tool_call_id, 'rejected',
+                    'clarify arguments changed after registration')
                 return
             try:
                 payload = json.loads(result) if isinstance(result, str) else result
+                if isinstance(payload, dict) and payload.get('error'):
+                    raise RuntimeError(f"clarify failed: {payload['error']}")
                 if kind == 'draft':
                     question = self.presentation(self.store.get_draft(target))['clarify_args']['questions'][0]
                     answer = f'Confirm ANCOR draft {target}'
@@ -222,27 +264,29 @@ class Service:
                     question = self.command_presentation(command)['clarify_args']['questions'][0]
                     answer = (f"Pause ANCOR requirement {requirement['id']}" if kind == 'pause'
                               else f"Resume ANCOR requirement {requirement['id']}")
-                expected = {'question': question['question'], 'choices_offered': question['choices'],
-                            'status': 'answered', 'user_response': answer}
-                if not isinstance(payload, dict) or payload.get('outcome') != 'submitted' or payload.get('responses') != [expected]:
-                    db.execute('UPDATE confirmations SET consumed=1 WHERE session=? AND call=?',
-                               (session_id, tool_call_id))
-                    return
-            except (ValueError, TypeError, KeyError):
-                db.execute('UPDATE confirmations SET consumed=1 WHERE session=? AND call=?',
-                           (session_id, tool_call_id))
+                mismatch = self._confirmation_mismatch(payload, question, answer)
+            except Exception as exc:
+                self._finish_confirmation(db, session_id, tool_call_id, 'error', exc)
+                log.warning('ANCOR confirmation validation failed for %s: %s', target, exc)
+                return
+            if mismatch:
+                self._finish_confirmation(db, session_id, tool_call_id, 'rejected', mismatch)
                 return
             reference = json.dumps({'source': 'native_clarify', 'kind': kind, 'target': target,
                                     'session_id': session_id, 'tool_call_id': tool_call_id},
                                    sort_keys=True)
-            if kind == 'draft':
-                self.store.confirm(target, reference)
-            elif kind == 'cancellation':
-                self.store.confirm_cancellation(target, reference)
-            else:
-                self.store.confirm_requirement_command(target, reference)
-            db.execute('UPDATE confirmations SET consumed=1 WHERE session=? AND call=?',
-                       (session_id, tool_call_id))
+            try:
+                if kind == 'draft':
+                    self.store.confirm(target, reference)
+                elif kind == 'cancellation':
+                    self.store.confirm_cancellation(target, reference)
+                else:
+                    self.store.confirm_requirement_command(target, reference)
+            except Exception as exc:
+                self._finish_confirmation(db, session_id, tool_call_id, 'error', exc)
+                log.exception('ANCOR confirmation commit failed for %s', target)
+                return
+            self._finish_confirmation(db, session_id, tool_call_id, 'confirmed')
 
     def get_context(self, args):
         ids = args.get('ack_event_ids', [])

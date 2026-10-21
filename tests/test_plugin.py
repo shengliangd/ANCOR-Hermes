@@ -2,6 +2,7 @@
 import importlib
 import json
 from pathlib import Path
+import sqlite3
 import pytest
 
 
@@ -160,6 +161,16 @@ def confirmation(tmp_path):
     return service, draft, args, result
 
 
+def confirmation_row(service, session_id='s', tool_call_id='c'):
+    db = sqlite3.connect(service.store.path + '.confirmations.db')
+    try:
+        return db.execute('SELECT consumed, outcome, error FROM confirmations '
+                          'WHERE session=? AND call=?',
+                          (session_id, tool_call_id)).fetchone()
+    finally:
+        db.close()
+
+
 def test_confirmation_survives_service_restart_and_is_exactly_once(tmp_path):
     from ancor.service import Service
     service, draft, args, result = confirmation(tmp_path)
@@ -174,6 +185,7 @@ def test_confirmation_survives_service_restart_and_is_exactly_once(tmp_path):
     assert len(snapshot['requirements']) == len(snapshot['pending_events']) == 1
     assert snapshot['requirements'][0]['draft_id'] == draft['id']
     assert Path(draft['draft_file']).read_text().endswith('exact criteria')
+    assert confirmation_row(service) == (1, 'confirmed', None)
 
 
 def test_confirmation_leads_with_high_level_summary_then_exact_text(tmp_path):
@@ -207,6 +219,31 @@ def test_nonconsent_results_never_activate_or_replay(tmp_path, mutation):
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
     service.post_tool_call('clarify', args, valid, session_id='s', tool_call_id='c')
     assert not service.store.snapshot()['requirements']
+    consumed, outcome, error = confirmation_row(service)
+    expected = 'error' if mutation in {'error', 'malformed'} else 'rejected'
+    assert consumed == 1 and outcome == expected and error
+
+
+def test_confirmation_store_failure_is_audited(tmp_path, monkeypatch):
+    service, draft, args, result = confirmation(tmp_path)
+
+    def fail(*_args):
+        raise RuntimeError('store unavailable')
+
+    monkeypatch.setattr(service.store, 'confirm', fail)
+    assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
+    service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
+    assert not service.store.snapshot()['requirements']
+    assert confirmation_row(service) == (1, 'error', 'store unavailable')
+
+
+def test_confirmation_accepts_additive_response_fields(tmp_path):
+    service, draft, args, result = confirmation(tmp_path)
+    result['responses'][0]['surface_metadata'] = {'render': 'interactive_card'}
+    assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
+    service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
+    assert service.store.snapshot()['requirements'][0]['draft_id'] == draft['id']
+    assert confirmation_row(service) == (1, 'confirmed', None)
 
 
 def test_pre_hook_rejects_incomplete_presentation_and_missing_identity(tmp_path):
