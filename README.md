@@ -22,6 +22,14 @@ Every requirement has an authoritative, single-line `title`. Confirmation
 prompts lead with that title and an optional high-level summary, followed by the
 exact requirement text that will be stored in ANCOR.
 
+## ANCOR dashboard
+
+启用插件后，原生 Hermes dashboard 提供只读 `/ancor` 页面，展示需求、任务、待回答问题和事件概览，并可打开单条需求、任务、通知或事件详情。前端使用单文件 IIFE，无构建步骤、CDN 或新增依赖；页面每 5 秒轮询 `/api/plugins/ancor/overview`，不使用 SSE。
+
+后端路由挂载在 `/api/plugins/ancor`：`GET /overview`、`GET /requirements/{id}`、`GET /tasks/{id}`、`GET /notifications/{id}`、`GET /events/{id}` 和 `GET /health`。所有路由均为只读；POST/PUT/PATCH/DELETE 会返回 405。SQLite 使用 `mode=ro` URI 打开，敏感确认引用、传输目标和回执不返回浏览器。
+
+安装副本位于 `~/.hermes/plugins/ancor/dashboard/`，内容应与本仓库 `ancor/dashboard/` 保持一致。安装后重启 `hermes dashboard`，并访问 `/ancor`；非 loopback 部署仍由 Hermes dashboard 的标准认证门控保护。
+
 ## Implementation
 
 - `ancor/store.py`: immutable drafts, transactional requirements, task links and durable events.

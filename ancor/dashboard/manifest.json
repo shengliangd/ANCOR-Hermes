@@ -1,0 +1,11 @@
+{
+  "name": "ancor",
+  "label": "ANCOR",
+  "description": "Read-only requirements, tasks, questions, and event history.",
+  "version": "1.0.0",
+  "icon": "GitBranch",
+  "tab": {"path": "/ancor", "position": "end"},
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
