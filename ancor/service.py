@@ -136,6 +136,34 @@ class Service:
             'choices': [keep, confirm], 'multi_select': False}]},
             'next_step': 'Call native clarify as an actual agent tool with clarify_args unchanged. Then read ancor_get_context.'}
 
+    def _notification_outbox(self):
+        from .notification import NotificationOutbox
+        if self.ctx is None:
+            raise ValueError('notification confirmation requires a profile context')
+        target = self.ctx.get_config('human_target')
+        coordinator = self.ctx.get_config('coordinator_profile', 'ancor-coordinator')
+        return NotificationOutbox(
+            self.store.path + '.notifications.db',
+            coordinator_profile=coordinator, target=target)
+
+    def response_presentation(self, proposal):
+        """Offer one exact human reply for native confirmation."""
+        requirement = self.store.get_requirement(proposal['requirement_id'])
+        text = (f"ANCOR response {proposal['id']}\n"
+                f"Requirement: {requirement['id']}\n"
+                f"Title: {requirement['title']}\n"
+                f"Task: {proposal.get('task_id') or 'not specified'}\n"
+                f"Question asked:\n{proposal['message']}\n\n"
+                f"Exact human reply to be recorded:\n{proposal['answer']}")
+        return {**proposal,
+                'clarify_args': {'questions': [{
+                    'question': text + f"\n\nConfirm this reply as ANCOR response {proposal['id']}?",
+                    'choices': [f"Do not confirm {proposal['id']}",
+                                f"Confirm ANCOR response {proposal['id']}"],
+                    'multi_select': False}]},
+                'next_step': ('Call native clarify as an actual agent tool with clarify_args '
+                              'unchanged. The reply is recorded only by the exact confirmation.')}
+
     @contextmanager
     def _confirmations(self):
         # Separate service-owned sidecar; no changes to the shared Store schema.
@@ -196,6 +224,8 @@ class Service:
             kind, pattern = 'pause', r'ANCOR pause ([0-9a-f]{32})'
         elif 'ANCOR resume ' in encoded:
             kind, pattern = 'resume', r'ANCOR resume ([0-9a-f]{32})'
+        elif 'ANCOR response ' in encoded:
+            kind, pattern = 'response', r'Confirm ANCOR response ([0-9a-f]{64})'
         else:
             return
         try:
@@ -210,6 +240,9 @@ class Service:
             elif kind == 'cancellation':
                 expected = self.cancellation_presentation(
                     self.store.get_cancellation(target))['clarify_args']
+            elif kind == 'response':
+                proposal = self._notification_outbox().get_response_proposal(target)
+                expected = self.response_presentation(proposal)['clarify_args']
             else:
                 expected = self.command_presentation(
                     self.store.get_requirement_command(target))['clarify_args']
@@ -258,6 +291,10 @@ class Service:
                     question = self.cancellation_presentation(
                         self.store.get_cancellation(target))['clarify_args']['questions'][0]
                     answer = f'Cancel ANCOR requirements {target}'
+                elif kind == 'response':
+                    proposal = self._notification_outbox().get_response_proposal(target)
+                    question = self.response_presentation(proposal)['clarify_args']['questions'][0]
+                    answer = f'Confirm ANCOR response {target}'
                 else:
                     command = self.store.get_requirement_command(target)
                     requirement = self.store.get_requirement(command['requirement_id'])
@@ -272,7 +309,9 @@ class Service:
             if mismatch:
                 self._finish_confirmation(db, session_id, tool_call_id, 'rejected', mismatch)
                 return
-            reference = json.dumps({'source': 'native_clarify', 'kind': kind, 'target': target,
+            reference = json.dumps({'source': ('native_clarify_response' if kind == 'response'
+                                               else 'native_clarify'),
+                                    'kind': kind, 'target': target,
                                     'session_id': session_id, 'tool_call_id': tool_call_id},
                                    sort_keys=True)
             try:
@@ -280,6 +319,8 @@ class Service:
                     self.store.confirm(target, reference)
                 elif kind == 'cancellation':
                     self.store.confirm_cancellation(target, reference)
+                elif kind == 'response':
+                    self._notification_outbox().confirm_response(target, reference)
                 else:
                     self.store.confirm_requirement_command(target, reference)
             except Exception as exc:

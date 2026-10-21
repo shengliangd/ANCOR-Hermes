@@ -21,10 +21,40 @@ def test_interactor_can_read_but_not_mutate_the_board():
     assert 'must not mutate the board' in text
     assert '`ancor_notify respond`' in skill
     assert '`ancor_requirement respond`' in skill
+    assert 'The answer becomes durable only after the user submits that exact confirmation.' in skill
     assert 'action=pause' in skill and 'action=resume' in skill
     assert 'authoritative single-line `title`' in skill
     assert '`summary` is optional' in skill
     assert 'show the title and any summary first' in skill
+
+
+def test_interactor_keeps_requirements_at_outcome_altitude():
+    text = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
+    skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
+    assert 'Do not prescribe implementation method, verification technique, or task decomposition.' in text
+    assert '### Requirement altitude' in skill
+    assert 'Leave implementation and execution choices to the coordinator and workers' in skill
+    assert 'would a different valid implementation still satisfy it' in skill
+    assert 'Do not invoke altitude to drop safety, authorization, resource limits' in skill
+    assert 'not verification procedures, evidence formats, or internal state assertions' in skill
+    assert 'Image-text training must actually work, not merely appear runnable.' in skill
+    assert 'Training data must update correctly when the data sources change.' in skill
+
+
+def test_requirement_tool_describes_outcome_altitude():
+    tools = {}
+    ctx = SimpleNamespace(profile_name='ancor-interactor',
+                          get_config=lambda key, default=None: default,
+                          register_hook=lambda *args: None,
+                          register_tool=lambda **kw: tools.update({kw['name']: kw}))
+    ancor.register(ctx)
+    tool = tools['ancor_requirement']['schema']
+    assert 'outcome-oriented brief and observable acceptance criteria' in tool['description']
+    assert 'keep implementation method and task decomposition out' in tool['description']
+    properties = tool['parameters']['properties']
+    assert 'Outcome, scope, hard constraints, non-goals' in properties['brief']['description']
+    assert 'not test steps, evidence formats or internal implementation details' in properties['acceptance_criteria']['description']
+    assert 'which execution choices are left open' in properties['summary']['description']
 
 
 def test_coordinator_skill_has_no_user_conversation_flow():

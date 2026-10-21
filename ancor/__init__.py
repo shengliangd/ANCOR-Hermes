@@ -176,11 +176,20 @@ def register(ctx, *, scan_runner=None):
             target=ctx.get_config('human_target'))
 
     def response_event(row):
+        try:
+            reference = json.loads(row.get('answer_reference') or '{}')
+        except (TypeError, ValueError):
+            reference = {}
+        meta = reference if isinstance(reference, dict) else {}
+        confirmed = meta.get('source') == 'native_clarify_response'
         return service.store.add_event('notification.response', {
             'notification_id': row['id'], 'body': row['answer'],
             'requirement_id': row.get('requirement_id'), 'task_id': row.get('task_id'),
             'reference': row['answer_reference'],
-            'source': 'interactor_transcription', 'authorization': False},
+            'source': ('native_clarify_response' if confirmed
+                       else 'interactor_transcription'),
+            'confirmed': confirmed,
+            'authorization': False},
             source_key='notification.response:' + row['id'])
 
     def notifications():
@@ -529,19 +538,22 @@ def register(ctx, *, scan_runner=None):
             return notification_detail(box.withdraw(identifier, actor=ctx.profile_name,
                                                     reason=args['reason']))
         if action == 'respond':
-            existing = box.get(identifier)
-            # IDs come only from handler metadata, never model-supplied provenance.
-            # Even native IDs link the transcription; they do not authenticate it.
-            reference = json.dumps({key: native[key] for key in ('session_id', 'tool_call_id')
-                                    if isinstance(native.get(key), str) and native[key]}, sort_keys=True)
-            if reference == '{}':
-                reference = 'interactor_transcription:' + identifier
-            if existing['answer'] == args['answer']:
-                reference = existing['answer_reference']
             if not interactor:
                 raise PermissionError('interactor profile required to respond')
-            row = box.respond(identifier, args['answer'], reference)
-            return {'notification': notification_detail(row), 'event': response_event(row)}
+            existing = box.get(identifier)
+            if existing['kind'] != 'question':
+                raise ValueError('not a question')
+            if existing['answer'] is not None:
+                if existing['answer'] != args['answer']:
+                    raise ValueError('question already answered')
+                event = response_event(existing)
+                return {'notification': notification_detail(existing),
+                        'event': event, 'confirmed': event['payload']['confirmed']}
+            # The reply is not durable here. The returned proposal is immutable
+            # and only its exact native confirmation commits the answer.
+            proposal = box.propose_response(identifier, args['answer'])
+            return {'notification': notification_detail(existing),
+                    **service.response_presentation(proposal)}
         raise ValueError('unknown notification action')
 
     def requirement(args, **_native):
@@ -608,13 +620,16 @@ def register(ctx, *, scan_runner=None):
     elif interactor:
         definitions = {
             'ancor_requirement': (
-                'Draft, confirm, cancel, pause, resume, or answer an ANCOR requirement. draft requires an authoritative single-line title plus the exact brief and acceptance criteria; summary is optional. cancel, pause and resume create immutable proposals with exact native clarify_args; only the exact submitted native confirmation activates, cancels, pauses or resumes. respond records a human reply as advisory input, never authorization.',
+                'Draft, confirm, cancel, pause, resume, or answer an ANCOR requirement. draft requires an authoritative single-line title plus an outcome-oriented brief and observable acceptance criteria; keep implementation method and task decomposition out unless the user made a detail a hard constraint. summary is optional. cancel, pause and resume create immutable proposals with exact native clarify_args; only the exact submitted native confirmation activates, cancels, pauses or resumes. respond records a human reply as advisory input, never authorization.',
                 {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond']},
                  'title': {'type': 'string', 'maxLength': 80,
                            'description': 'Authoritative single-line requirement label used by every compact list and wake packet.'},
                  'summary': {'type': 'string',
-                             'description': 'Optional high-level, user-facing points shown before the exact stored requirement.'},
-                 'brief': {'type': 'string'}, 'acceptance_criteria': {'type': 'string'},
+                             'description': 'Optional high-level, user-facing points shown before the exact stored requirement; may state which execution choices are left open.'},
+                 'brief': {'type': 'string',
+                           'description': 'Outcome, scope, hard constraints, non-goals and unresolved human decisions. Do not prescribe implementation unless externally fixed or explicitly non-negotiable.'},
+                 'acceptance_criteria': {'type': 'string',
+                                         'description': 'Observable end states and important failure boundaries; not test steps, evidence formats or internal implementation details.'},
                  'replacement_of': {'oneOf': [{'type': 'string'},
                                                {'type': 'array', 'items': {'type': 'string'}}]},
                  'draft_id': {'type': 'string'}, 'requirement_id': {'type': 'string'},
@@ -638,7 +653,7 @@ def register(ctx, *, scan_runner=None):
                  'status': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
                  'include_archived': {'type': 'boolean'}}, ['action']),
             'ancor_notify': (
-                'List compact durable notifications, expand one by id, or transcribe a human answer for the matching open question. Filter by requirement_id, task_id, state or open_only. A closed question cannot be resurrected; use requirement respond for new human input. Answers are advisory, never authorization.',
+                'List compact durable notifications, expand one by id, or answer an open question. respond returns an immutable response proposal with exact native clarify_args; the reply is not recorded until the user submits that exact confirmation. Filter by requirement_id, task_id, state or open_only. A closed question cannot be resurrected; use requirement respond for new human input outside a question.',
                 {'action': {'type': 'string', 'enum': ['list', 'respond']},
                  'id': {'type': 'string'}, 'answer': {'type': 'string'},
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},

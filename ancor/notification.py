@@ -9,6 +9,7 @@ cannot be promised across a process crash or transport timeout.
 """
 from contextlib import contextmanager
 import asyncio
+import hashlib
 import json
 import logging
 import sqlite3
@@ -128,6 +129,15 @@ class NotificationOutbox:
             for column, kind in additions.items():
                 if column not in columns:
                     db.execute(f'ALTER TABLE human_notifications ADD COLUMN {column} {kind}')
+            # A response proposal binds the exact question and the exact reply
+            # before the interactor asks the human for native confirmation.
+            db.execute('''CREATE TABLE IF NOT EXISTS response_proposals (
+                id TEXT PRIMARY KEY, notification_id TEXT NOT NULL,
+                answer TEXT NOT NULL, message TEXT NOT NULL,
+                requirement_id TEXT, task_id TEXT,
+                superseded INTEGER NOT NULL DEFAULT 0,
+                confirmed INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL)''')
 
     @contextmanager
     def _db(self):
@@ -158,6 +168,17 @@ class NotificationOutbox:
             result.setdefault(column, None)
         result['receipt'] = json.loads(result['receipt']) if result['receipt'] else None
         result['closed'] = result['closed_at'] is not None
+        return result
+
+    @staticmethod
+    def _proposal(db, proposal_id):
+        row = db.execute('SELECT * FROM response_proposals WHERE id=?',
+                         (proposal_id,)).fetchone()
+        if row is None:
+            raise KeyError(proposal_id)
+        result = dict(row)
+        result['superseded'] = bool(result['superseded'])
+        result['confirmed'] = bool(result['confirmed'])
         return result
 
     def get(self, identifier):
@@ -325,6 +346,72 @@ class NotificationOutbox:
                 db.execute('UPDATE human_notifications SET answer=?,answer_reference=? WHERE id=?',
                            (answer, reference, identifier))
             return self._row(db, identifier)
+
+    def propose_response(self, identifier, answer):
+        """Bind one exact reply to its still-open question without recording it.
+
+        A newer proposal supersedes older unconfirmed proposals for the same
+        question, so confirming a stale reply cannot silently win.
+        """
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError('nonempty answer required')
+        with self._db() as db:
+            row = self._row(db, identifier)
+            if row['kind'] != 'question':
+                raise ValueError('not a question')
+            if row['closed_at'] is not None:
+                raise ValueError('question is closed: ' + (row['close_reason'] or 'closed'))
+            if row['answer'] is not None:
+                raise ValueError('question already answered')
+            proposal_id = hashlib.sha256(
+                (identifier + '\0' + answer).encode('utf-8')).hexdigest()
+            db.execute('UPDATE response_proposals SET superseded=1 '
+                       'WHERE notification_id=? AND id<>? AND confirmed=0',
+                       (identifier, proposal_id))
+            db.execute('INSERT OR IGNORE INTO response_proposals('
+                       'id, notification_id, answer, message, requirement_id, '
+                       'task_id, superseded, confirmed, created_at) '
+                       'VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)',
+                       (proposal_id, identifier, answer, row['message'],
+                        row.get('requirement_id'), row.get('task_id'), self.clock()))
+            db.execute('UPDATE response_proposals SET superseded=0 '
+                       'WHERE id=? AND confirmed=0', (proposal_id,))
+            return self._proposal(db, proposal_id)
+
+    def get_response_proposal(self, proposal_id):
+        with self._db() as db:
+            proposal = self._proposal(db, proposal_id)
+            if proposal['superseded']:
+                raise ValueError('response proposal superseded by a newer reply')
+            return proposal
+
+    def confirm_response(self, proposal_id, reference):
+        """Commit exactly one previously proposed reply as a confirmed answer."""
+        if not isinstance(reference, str) or not reference.strip():
+            raise ValueError('confirmation reference required')
+        with self._db() as db:
+            proposal = self._proposal(db, proposal_id)
+            if proposal['superseded']:
+                raise ValueError('response proposal superseded by a newer reply')
+            row = self._row(db, proposal['notification_id'])
+            if row['kind'] != 'question':
+                raise ValueError('not a question')
+            if row['closed_at'] is not None:
+                raise ValueError('question is closed: ' + (row['close_reason'] or 'closed'))
+            if row['answer'] is not None:
+                if row['answer'] != proposal['answer']:
+                    raise ValueError('question already answered')
+                if proposal['confirmed']:
+                    return row
+            if row['state'] == 'pending':
+                db.execute('UPDATE human_notifications SET answer=?,answer_reference=?,'
+                           "state='answered',next_attempt_at=NULL WHERE id=?",
+                           (proposal['answer'], reference, proposal['notification_id']))
+            else:
+                db.execute('UPDATE human_notifications SET answer=?,answer_reference=? WHERE id=?',
+                           (proposal['answer'], reference, proposal['notification_id']))
+            db.execute('UPDATE response_proposals SET confirmed=1 WHERE id=?', (proposal_id,))
+            return self._row(db, proposal['notification_id'])
 
     def withdraw(self, identifier, *, actor, reason):
         self._coordinator(actor)
