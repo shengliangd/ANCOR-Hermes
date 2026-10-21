@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -131,9 +132,41 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.confirm(stale['id'], 'ref3')
         self.assertEqual(self.store.confirm(first['id'], 'retry'), replacement)
-        missing = self.store.create_draft('missing', 'criteria', 'nonexistent')
-        with self.assertRaises(KeyError):
-            self.store.confirm(missing['id'], 'ref4')
+        with self.assertRaisesRegex(ValueError, 'does not reference an existing requirement'):
+            self.store.create_draft('missing', 'criteria', 'nonexistent')
+
+    def test_replacement_requires_confirmed_active_or_paused_requirement(self):
+        provisional = self.store.create_draft('provisional', 'criteria')
+        before = self.store.snapshot()['drafts']
+        with self.assertRaisesRegex(ValueError, 'is a draft, not a confirmed requirement'):
+            self.store.create_draft('invalid', 'criteria', [provisional['id']])
+        self.assertEqual(self.store.snapshot()['drafts'], before)
+
+        cancelled = self.store.confirm(
+            self.store.create_draft('cancelled', 'criteria')['id'], 'ref')
+        self.store.cancel([cancelled['id']], 'withdrawn')
+        with self.assertRaisesRegex(ValueError, 'replacement bases must be active or paused'):
+            self.store.create_draft('invalid', 'criteria', cancelled['id'])
+
+    def test_legacy_draft_replacement_fails_confirmation_clearly(self):
+        base = self.store.create_draft('draft only', 'criteria')
+        draft_id = 'legacy-draft-replacement'
+        db = sqlite3.connect(self.path)
+        try:
+            db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?)',
+                       (draft_id, 'Legacy', 'legacy brief', 'legacy criteria',
+                        json.dumps([base['id']]), None))
+            db.commit()
+        finally:
+            db.close()
+
+        before = self.store.snapshot()
+        with self.assertRaisesRegex(ValueError, 'is a draft, not a confirmed requirement'):
+            self.store.confirm(draft_id, 'ref')
+        after = self.store.snapshot()
+        self.assertEqual(after['requirements'], before['requirements'])
+        self.assertEqual(after['drafts'], before['drafts'])
+        self.assertEqual(after['pending_events'], before['pending_events'])
 
     def test_draft_confirmation_is_durable_exact_and_idempotent(self):
         draft = self.store.create_draft(' brief\n', ' exact criteria\n')

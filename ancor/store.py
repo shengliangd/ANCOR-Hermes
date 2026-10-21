@@ -105,6 +105,24 @@ class Store:
             raise KeyError(identifier)
         return dict(row)
 
+    def _require_replacement_bases(self, db, replacement_ids):
+        bases = []
+        for identifier in replacement_ids:
+            try:
+                base = self._get(db, 'requirements', identifier)
+            except KeyError:
+                if db.execute('SELECT 1 FROM drafts WHERE id = ?', (identifier,)).fetchone():
+                    raise ValueError(
+                        f'replacement_of {identifier} is a draft, not a confirmed requirement') from None
+                raise ValueError(
+                    f'replacement_of {identifier} does not reference an existing requirement') from None
+            if base['status'] not in {'active', 'paused'}:
+                raise ValueError(
+                    f'replacement_of {identifier} is {base["status"]}; '
+                    'replacement bases must be active or paused') from None
+            bases.append(base)
+        return bases
+
     def create_draft(self, brief, acceptance_criteria, replacement_of=None,
                      summary=None, *, title):
         title = self._title(title)
@@ -114,11 +132,14 @@ class Store:
         if isinstance(replacement_of, list):
             if not replacement_of or any(not isinstance(i, str) or not i.strip() for i in replacement_of):
                 raise ValueError('replacement_of list must contain nonempty IDs')
-            replacement_of = json.dumps(list(dict.fromkeys(replacement_of)))
+            replacement_ids = list(dict.fromkeys(replacement_of))
+            replacement_of = json.dumps(replacement_ids)
         else:
             replacement_of = self._optional_text(replacement_of)
+            replacement_ids = [replacement_of] if replacement_of is not None else []
         identifier = uuid4().hex
         with self._transaction() as db:
+            self._require_replacement_bases(db, replacement_ids)
             db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?)',
                        (identifier, title, brief, acceptance_criteria,
                         replacement_of, summary))
@@ -258,9 +279,7 @@ class Store:
             replacement_ids = ([draft['replacement_of']] if draft['replacement_of'] is not None else [])
             if draft['replacement_of'] and draft['replacement_of'].startswith('['):
                 replacement_ids = json.loads(draft['replacement_of'])
-            bases = [self._get(db, 'requirements', i) for i in replacement_ids]
-            if any(base['status'] not in {'active', 'paused'} for base in bases):
-                raise ValueError('all replacement bases must be active or paused')
+            bases = self._require_replacement_bases(db, replacement_ids)
             for base in bases:
                 db.execute("UPDATE requirements SET status = 'invalidated' WHERE id = ?", (base['id'],))
             identifier = uuid4().hex
