@@ -73,10 +73,11 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
     assert asyncio.run(host.coordinator.tick()) == 'ran'
     payload = json.loads(calls[0][-1].split('\n', 1)[1])
-    assert payload['events'][0]['source_key'] == 'native:test-board:17'
-    assert payload['events'][0]['kind'] == 'native.' + kind
-    assert payload['events'][0]['payload'] == board.history[0]
-    assert payload['snapshot']['board'][0]['status'] == 'done'
+    event = next(e for e in payload['events'] if e['kind'] == 'native.' + kind)
+    assert event['source_key'] == 'native:test-board:17'
+    assert 'attention' in event['payload_preview']
+    assert event['task_id'] == 't1'
+    assert payload['snapshot']['board']['items'][0]['status'] == 'done'
     assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': 't1'}]
     assert store.pending_events()  # successful exit is NOT an ack
     restarted = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
@@ -121,11 +122,13 @@ def test_invalidated_requirements_wake_coordinator_without_automatic_guard(tmp_p
     payload = json.loads(calls[0][-1].split('\n', 1)[1])
     invalidated = [e for e in payload['events'] if e['kind'] == 'requirement.invalidated']
     assert len(invalidated) == 1
-    assert invalidated[0]['payload'] == {'requirement_id': old['id'], 'replacement_id': new['id']}
+    assert invalidated[0]['requirement_id'] == old['id']
+    assert new['id'] in invalidated[0]['payload_preview']
     assert board.guards == []
     assert board.tasks[0]['status'] == 'running'
-    assert payload['snapshot']['board'][0]['status'] == 'running'
-    assert [r['id'] for r in host.snapshot()['requirements']] == [new['id']]
+    assert payload['snapshot']['invalidated_tasks']['items'][0]['task_status'] == 'running'
+    assert payload['snapshot']['board']['items'] == []
+    assert [r['id'] for r in host.wake_packet()['requirements']['items']] == [new['id']]
     assert invalidated[0]['id'] in [e['id'] for e in store.pending_events()]
 
 
@@ -272,9 +275,9 @@ def test_paused_requirement_remains_visible_without_liveness(tmp_path):
     pause = store.create_requirement_command('pause', req['id'], 'user asked', 'Stop briefly')
     store.confirm_requirement_command(pause['id'], 'pause-confirmation')
     host = Host(ctx, store=store, board=Board({'id': 'task', 'status': 'blocked'}))
-    snapshot = host.snapshot()
-    assert [item['id'] for item in snapshot['requirements']] == [req['id']]
-    assert snapshot['requirements'][0]['status'] == 'paused'
+    snapshot = host.wake_packet()
+    assert [item['id'] for item in snapshot['requirements']['items']] == [req['id']]
+    assert snapshot['requirements']['items'][0]['status'] == 'paused'
     assert snapshot['progression'][0]['state'] == 'paused'
     assert snapshot['liveness']['due_at'] is None
 

@@ -22,8 +22,9 @@ def test_interactor_can_read_but_not_mutate_the_board():
     assert '`ancor_notify respond`' in skill
     assert '`ancor_requirement respond`' in skill
     assert 'action=pause' in skill and 'action=resume' in skill
-    assert 'high-level `summary`' in skill
-    assert 'high-level points first' in skill
+    assert 'authoritative single-line `title`' in skill
+    assert '`summary` is optional' in skill
+    assert 'show the title and any summary first' in skill
 
 
 def test_coordinator_skill_has_no_user_conversation_flow():

@@ -82,6 +82,30 @@ Unanswered questions are closed automatically when their requirement is
 cancelled, invalidated or accepted, or when their linked task is no longer
 blocked. Closing a question is not an answer and cannot be used as human consent.
 
+## Upgrade an existing store to requirement titles
+
+ANCOR 0.2 makes `title` a required, authoritative field on drafts and
+confirmed requirements. It is not derived from the brief at runtime. The plugin
+fails closed when it opens a legacy store; run the one-time migration before
+starting the updated plugin:
+
+```sh
+python -m ancor.migrate_titles export --db /absolute/path/requirements.db \
+  --out /absolute/path/ancor-titles.json
+# Fill every `title` in the exported drafts and requirements entries.
+python -m ancor.migrate_titles apply --db /absolute/path/requirements.db \
+  --titles /absolute/path/ancor-titles.json
+```
+
+The export contains the exact legacy context and an empty title for every record.
+An agent or human fills every title; the migration deliberately does not derive
+one. `apply` rejects missing, extra, duplicate or invalid titles before writing,
+requires every draft and requirement ID exactly once, and creates a timestamped
+SQLite backup beside the store before rebuilding the two title-bearing tables.
+Requirement IDs, statuses, events, task links and notification state are
+preserved. Stop the Gateway or otherwise quiesce ANCOR before applying the
+migration, then restart it with the updated plugin.
+
 ### Coordinator notification channel
 
 Background questions and completion notices fail closed unless the coordinator
@@ -237,9 +261,9 @@ installation-wide current board. Turn off creator auto-subscription in the ANCOR
 profiles. Do not add user-facing task subscriptions: questions and delivery are
 coordinator decisions, not direct worker event notifications. Audit existing ANCOR
 subscriptions before reusing an old board. This setup flow does not copy business
-state automatically. An existing requirements database can be reused in place:
-`Store` applies only additive schema migrations and does not rewrite requirement,
-event or notification status.
+state automatically. An existing requirements database is reused in place only
+after the explicit title migration above; the plugin does not silently rewrite
+legacy requirement records at startup.
 
 Disable automatic root decomposition for this workflow: the coordinator creates only
 execution tasks, progressively, through the plugin board tool. Native dispatch

@@ -47,7 +47,7 @@ def test_question_requires_blocked_task_and_reuses_one_open_question(tmp_path, m
     assert 'blocked' in running['error'] and 'running' in running['error']
 
     tasks['t1']['status'] = 'blocked'
-    assert call(tools, 'ancor_board', {'action': 'show', 'task_id': 't1'})['task']['status'] == 'blocked'
+    assert call(tools, 'ancor_board', {'action': 'show', 'task_id': 't1'})['status'] == 'blocked'
     first = call(tools, 'ancor_notify', args)
     assert first['id'] == 'q1'
     assert first['state'] == 'pending'
@@ -62,6 +62,19 @@ def test_question_requires_blocked_task_and_reuses_one_open_question(tmp_path, m
     assert retry['state'] == 'pending'
     assert [row['id'] for row in NotificationOutbox.read_existing(
         store.path + '.notifications.db')] == ['q1']
+
+
+def test_draft_requires_authoritative_title(tmp_path, monkeypatch):
+    tools, _, _ = registered(tmp_path, monkeypatch, 'ancor-interactor', {})
+    missing = call(tools, 'ancor_requirement', {
+        'action': 'draft', 'brief': 'Brief', 'acceptance_criteria': 'Criteria'})
+    assert missing['code'] == 'invalid_request'
+    assert missing['missing_fields'] == ['title']
+    prepared = call(tools, 'ancor_requirement', {
+        'action': 'draft', 'title': 'Stable title',
+        'brief': 'Brief', 'acceptance_criteria': 'Criteria'})
+    assert prepared['title'] == 'Stable title'
+    assert 'Title: Stable title' in prepared['clarify_args']['questions'][0]['question']
 
 
 def test_open_question_scope_is_requirement_and_task(tmp_path, monkeypatch):
@@ -89,7 +102,7 @@ def test_coordinator_can_withdraw_superseded_question(tmp_path, monkeypatch):
     assert closed['closed'] is True
     assert closed['close_reason'] == 'new input supplied the label'
     listed = call(tools, 'ancor_notify', {'action': 'list', 'open_only': True})
-    assert listed['count'] == 0
+    assert listed['notifications']['count'] == 0
 
 
 def test_requirement_response_is_idempotent(tmp_path, monkeypatch):
@@ -137,11 +150,11 @@ def test_interactor_can_read_but_not_mutate_board(tmp_path, monkeypatch):
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-interactor', tasks)
     store.link_task(req['id'], 't1')
     listed = call(tools, 'ancor_board', {'action': 'list'})
-    assert [task['id'] for task in listed['tasks']] == ['t1']
+    assert [task['id'] for task in listed['items']] == ['t1']
     shown = call(tools, 'ancor_board', {'action': 'show', 'task_id': 't1'})
-    assert shown['task']['id'] == 't1'
+    assert shown['id'] == 't1'
     context = call(tools, 'ancor_get_context', {})
-    assert [task['id'] for task in context['tasks']] == ['t1']
+    assert [task['id'] for task in context['tasks']['items']] == ['t1']
     denied = call(tools, 'ancor_board', {'action': 'block', 'task_id': 't1', 'reason': 'No'})
     assert denied['code'] == 'forbidden'
 
@@ -153,8 +166,8 @@ def test_expanded_context_reports_paused_state_and_reason(tmp_path, monkeypatch)
     context = call(tools, 'ancor_get_context', {'requirement_id': req['id']})
     assert context['requirement']['status'] == 'paused'
     assert context['progression'][0]['state'] == 'paused'
-    assert context['transitions'][0]['kind'] == 'requirement.paused'
-    assert context['transitions'][0]['reason'] == 'User asked'
+    assert context['transitions']['items'][0]['kind'] == 'requirement.paused'
+    assert context['transitions']['items'][0]['reason_preview'] == 'User asked'
 
 
 def test_notification_tool_output_does_not_expose_transport_error_key(tmp_path, monkeypatch):
@@ -172,7 +185,7 @@ def test_notification_tool_output_does_not_expose_transport_error_key(tmp_path, 
                (json.dumps({'reason_code': 'transport_unavailable'}),))
     db.commit()
     db.close()
-    listed = call(tools, 'ancor_notify', {'action': 'list', 'view': 'full'})
-    row = listed['notifications'][0]
+    listed = call(tools, 'ancor_notify', {'action': 'list', 'id': 'q1'})
+    row = listed['notifications']['items'][0]
     assert row['delivery_error']
     assert 'error' not in row

@@ -1,7 +1,7 @@
 """Coordinator operations over the native CLI."""
 from .board import NativeBoard
 from .service import Service
-from .views import task_summary
+from .views import bounded_latest, collection, task_detail, task_ref
 
 
 _STATUS_ORDER = {
@@ -80,8 +80,10 @@ class Operations:
     def tasks(self, *, requirement_id=None, status=None, include_archived=False):
         """Return compact linked-task summaries without loading each card history."""
         store = self.service.store
+        snapshot = store.snapshot()
         links = {link['task_id']: link['requirement_id']
-                 for link in store.snapshot()['task_links']}
+                 for link in snapshot['task_links']}
+        titles = {req['id']: req['title'] for req in snapshot['requirements']}
         items = []
         for task in self.board.list():
             linked_requirement = links.get(task['id'])
@@ -94,12 +96,31 @@ class Operations:
             archived = bool(task.get('archived_at') or task.get('archived'))
             if archived and not include_archived:
                 continue
-            items.append(task_summary(task, linked_requirement))
+            items.append(task_ref(task, linked_requirement,
+                                  titles.get(linked_requirement)))
         items.sort(key=lambda task: (
             bool(task.get('archived_at') or task.get('archived')),
             _STATUS_ORDER.get(task.get('status'), 50),
             -_recency(task), task['id']))
         return items
+
+    def _receipt(self, detail, requirement_id, changed):
+        task = detail['task']
+        try:
+            requirement_title = self.service.store.get_requirement(
+                requirement_id)['title']
+        except KeyError:
+            requirement_title = None
+        return {
+            'task_id': task['id'],
+            'title': task.get('title'),
+            'status': task.get('status'),
+            'assignee': task.get('assignee'),
+            'requirement_id': requirement_id,
+            'requirement_title': requirement_title,
+            'parents': list(detail.get('parents') or ()),
+            'changed': list(changed),
+        }
 
     @staticmethod
     def _contract(contract):
@@ -165,7 +186,8 @@ class Operations:
         if self.ctx.profile_name != expected and not (
                 self.ctx.profile_name == interactor and action in {'list', 'show'}):
             raise PermissionError('coordinator profile required')
-        if action not in {'create', 'list', 'show', 'block', 'unblock', 'revise', 'comment', 'link', 'unlink', 'edit', 'associate'}:
+        if action not in {'create', 'list', 'show', 'history', 'block', 'unblock',
+                          'revise', 'comment', 'link', 'unlink', 'edit', 'associate'}:
             raise ValueError('unknown board action')
         store = self.service.store
         if action not in {'list', 'show'}:
@@ -206,7 +228,7 @@ class Operations:
             if actual['task']['assignee'] != worker_profile:
                 raise RuntimeError('native task assignee verification failed')
             store.link_task(req['id'], task['id'])
-            return actual
+            return self._receipt(actual, req['id'], ['create'])
         snapshot = store.snapshot()
         links = {link['task_id']: link['requirement_id'] for link in snapshot['task_links']}
         if action == 'list':
@@ -219,8 +241,7 @@ class Operations:
             items = self.tasks(requirement_id=args.get('requirement_id'),
                                status=args.get('status'),
                                include_archived=include_archived)
-            return {'tasks': items[:limit], 'count': len(items),
-                    'returned': min(len(items), limit), 'truncated': len(items) > limit}
+            return collection(items[:limit], total=len(items))
         if action in {'link', 'unlink'}:
             parent, child = args['parent_id'], args['child_id']
             for tid in (parent, child):
@@ -231,13 +252,28 @@ class Operations:
                 if (action == 'link' or tid == child) and store.get_requirement(links[tid])['status'] != 'active':
                     raise ValueError('requirement is not active')
             # Native CLI owns cycle, running-child and run-ownership checks.
-            return self.board.dependency(action, parent, child)
+            actual = self.board.dependency(action, parent, child)
+            return self._receipt(actual, links[child], [action])
         tid = args['task_id']
         if tid not in links:
             raise ValueError('unlinked task')
         detail = self.detail(tid)
         if action == 'show':
-            return detail
+            req = store.get_requirement(links[tid])
+            return task_detail(detail, requirement_id=links[tid],
+                               requirement_title=req['title'])
+        if action == 'history':
+            kind = args.get('kind')
+            if kind not in {'comments', 'events', 'runs'}:
+                raise ValueError('kind must be comments, events or runs')
+            limit = args.get('limit', 20)
+            if type(limit) is not int or not 1 <= limit <= 100:
+                raise ValueError('limit must be an integer between 1 and 100')
+            before_id = args.get('before_id')
+            if before_id is not None and (type(before_id) is not int or before_id < 1):
+                raise ValueError('before_id must be a positive integer')
+            return bounded_latest(detail.get(kind) or (), limit,
+                                  before_id=before_id)
         if action == 'associate':
             return store.associate_task(tid, args['requirement_id'], args['reason'])
         if action == 'revise':
@@ -247,7 +283,7 @@ class Operations:
             if detail['task']['status'] != 'triage' or detail['task'].get('archived_at'):
                 raise ValueError('revise requires an unarchived triage task')
             self.require_quiescence(detail)
-            return self.board.revise(tid, reason)
+            return self._receipt(self.board.revise(tid, reason), links[tid], ['revise'])
         if action == 'edit':
             req = store.get_requirement(links[tid])
             if req['status'] != 'active':
@@ -275,7 +311,7 @@ class Operations:
                     stop_conditions=contract['stop_conditions'],
                     report=contract.get('report') or [
                         'Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
-            return self.board.edit(tid, **fields)
+            return self._receipt(self.board.edit(tid, **fields), links[tid], list(fields))
         text = None
         if action == 'block':
             self.board.block(tid, store._text(args['reason']))
@@ -293,4 +329,4 @@ class Operations:
             raise RuntimeError('native unblock verification failed')
         if action == 'comment' and not any(c['body'] == text and c['author'] == expected for c in actual['comments']):
             raise RuntimeError('native comment verification failed')
-        return actual
+        return self._receipt(actual, links[tid], [action])

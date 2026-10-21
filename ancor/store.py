@@ -8,6 +8,8 @@ import json
 import sqlite3
 from uuid import uuid4
 
+from .views import TITLE_MAX_CHARS
+
 
 class Store:
     def __init__(self, path):
@@ -15,7 +17,7 @@ class Store:
         with self._transaction() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS drafts (
-                    id TEXT PRIMARY KEY, brief TEXT NOT NULL,
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL, brief TEXT NOT NULL,
                     acceptance_criteria TEXT NOT NULL, replacement_of TEXT,
                     summary TEXT);
                 CREATE TABLE IF NOT EXISTS cancellations (
@@ -27,6 +29,7 @@ class Store:
                     confirmation_reference TEXT);
                 CREATE TABLE IF NOT EXISTS requirements (
                     id TEXT PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL,
+                    title TEXT NOT NULL,
                     brief TEXT NOT NULL, acceptance_criteria TEXT NOT NULL,
                     replacement_of TEXT, confirmation_reference TEXT NOT NULL,
                     status TEXT NOT NULL);
@@ -38,7 +41,17 @@ class Store:
                     payload TEXT NOT NULL, source_key TEXT UNIQUE,
                     acknowledged INTEGER NOT NULL DEFAULT 0);
             ''')
+            self._require_title_columns(db)
             self._ensure_columns(db, 'drafts', {'summary': 'TEXT'})
+
+    @staticmethod
+    def _require_title_columns(db):
+        for table in ('drafts', 'requirements'):
+            present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+            if 'title' not in present:
+                raise RuntimeError(
+                    f'ANCOR {table} schema has no title column; run '
+                    '`python -m ancor.migrate_titles` before loading this version')
 
     @staticmethod
     def _ensure_columns(db, table, columns):
@@ -77,13 +90,24 @@ class Store:
         return value
 
     @staticmethod
+    def _title(value):
+        value = Store._text(value).strip()
+        if '\n' in value or '\r' in value:
+            raise ValueError('title must be a single line')
+        if len(value) > TITLE_MAX_CHARS:
+            raise ValueError(f'title must be at most {TITLE_MAX_CHARS} characters')
+        return value
+
+    @staticmethod
     def _get(db, table, identifier):
         row = db.execute(f'SELECT * FROM {table} WHERE id = ?', (identifier,)).fetchone()
         if row is None:
             raise KeyError(identifier)
         return dict(row)
 
-    def create_draft(self, brief, acceptance_criteria, replacement_of=None, summary=None):
+    def create_draft(self, brief, acceptance_criteria, replacement_of=None,
+                     summary=None, *, title):
+        title = self._title(title)
         self._text(brief)
         self._text(acceptance_criteria)
         summary = self._optional_text(summary)
@@ -95,8 +119,9 @@ class Store:
             replacement_of = self._optional_text(replacement_of)
         identifier = uuid4().hex
         with self._transaction() as db:
-            db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?, ?)',
-                       (identifier, brief, acceptance_criteria, replacement_of, summary))
+            db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?)',
+                       (identifier, title, brief, acceptance_criteria,
+                        replacement_of, summary))
             return self._get(db, 'drafts', identifier)
 
     def get_draft(self, draft_id):
@@ -129,12 +154,12 @@ class Store:
         with self._transaction() as db:
             return self._cancellation(self._get(db, 'cancellations', cancellation_id))
 
-    def create_requirement_command(self, action, requirement_id, reason, summary):
+    def create_requirement_command(self, action, requirement_id, reason, summary=None):
         """Create an immutable pause/resume proposal without changing status."""
         if action not in {'pause', 'resume'}:
             raise ValueError('unknown requirement command')
         reason = self._text(reason)
-        summary = self._text(summary)
+        summary = self._optional_text(summary)
         required = 'active' if action == 'pause' else 'paused'
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
@@ -239,9 +264,10 @@ class Store:
             for base in bases:
                 db.execute("UPDATE requirements SET status = 'invalidated' WHERE id = ?", (base['id'],))
             identifier = uuid4().hex
-            db.execute('INSERT INTO requirements VALUES (?, ?, ?, ?, ?, ?, ?)',
-                       (identifier, draft_id, draft['brief'], draft['acceptance_criteria'],
-                        draft['replacement_of'], confirmation_reference, 'active'))
+            db.execute('INSERT INTO requirements VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                       (identifier, draft_id, draft['title'], draft['brief'],
+                        draft['acceptance_criteria'], draft['replacement_of'],
+                        confirmation_reference, 'active'))
             for base in bases:
                 self._add_event(db, 'requirement.invalidated',
                                 {'requirement_id': base['id'], 'replacement_id': identifier})

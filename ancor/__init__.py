@@ -4,20 +4,22 @@ import json
 import logging
 import os
 
-from .views import (draft_summary, event_summaries, notification_detail,
-                    notification_selection, notification_summary,
-                    requirement_summary, transition_summary)
+from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, bounded_latest, collection,
+                    draft_summary, event_summaries,
+                    notification_detail, notification_selection,
+                    notification_summary, requirement_detail, requirement_ref,
+                    transition_summary)
 
 log = logging.getLogger(__name__)
 
 
 _ACTION_FIELDS = {
     'ancor_requirement': {
-        'draft': ['summary', 'brief', 'acceptance_criteria'],
+        'draft': ['title', 'brief', 'acceptance_criteria'],
         'confirm': ['draft_id'],
-        'cancel': ['summary', 'requirement_ids'],
-        'pause': ['requirement_id', 'summary', 'reason'],
-        'resume': ['requirement_id', 'summary', 'reason'],
+        'cancel': ['requirement_ids'],
+        'pause': ['requirement_id', 'reason'],
+        'resume': ['requirement_id', 'reason'],
         'respond': ['requirement_id', 'body'],
     },
     'ancor_notify': {
@@ -30,6 +32,7 @@ _ACTION_FIELDS = {
         'create': ['requirement_id', 'key', 'title', 'contract'],
         'list': [],
         'show': ['task_id'],
+        'history': ['task_id', 'kind'],
         'block': ['task_id', 'reason'],
         'unblock': ['task_id', 'reason'],
         'comment': ['task_id', 'body'],
@@ -244,6 +247,8 @@ def register(ctx, *, scan_runner=None):
         observation = Scheduling(service.store).observation(
             data, all_tasks, notification_rows)
         drafts_by_id = {draft['id']: draft for draft in data['drafts']}
+        progression = {item['requirement_id']: item
+                       for item in observation['progression']}
         expand = ('Call ancor_get_context with requirement_id=<id> for exact requirement text'
                   + (', or event_id=<id> for one complete event' if coordinator else '')
                   + '; call ancor_board show with task_id=<id> for the full contract, '
@@ -266,21 +271,20 @@ def register(ctx, *, scan_runner=None):
             scoped = Scheduling(service.store).observation(
                 filtered, linked, notification_rows)
             result = {
-                'requirement': requirement,
-                'summary': (drafts_by_id.get(requirement['draft_id']) or {}).get('summary'),
-                'tasks': visible,
-                'task_count': len(active),
+                'requirement': requirement_detail(
+                    requirement, drafts_by_id.get(requirement['draft_id'])),
+                'tasks': collection(visible, total=len(active)),
                 'archived_task_count': len(linked) - len(active),
-                'task_truncated': len(visible) < len(active),
-                'notifications': [notification_summary(row) for row
-                                  in notification_selection(relevant)],
-                'notification_count': len(relevant),
+                'notifications': collection(
+                    [notification_summary(row) for row in notification_selection(relevant)],
+                    total=len(relevant)),
                 'open_question_count': sum(
                     row.get('kind') == 'question' and row.get('answer') is None
                     for row in relevant),
-                'notifications_truncated': len(relevant) > 20,
-                'transitions': [transition_summary(event) for event in
-                                service.store.requirement_transitions(requirement_id)],
+                'transitions': bounded_latest(
+                    [transition_summary(event) for event in
+                     service.store.requirement_transitions(requirement_id)],
+                    TRANSITION_LIMIT),
                 'progression': scoped['progression'],
                 'liveness': scoped['liveness'],
                 'scheduled_wakes': scoped['scheduled_wakes'],
@@ -288,28 +292,27 @@ def register(ctx, *, scan_runner=None):
                 **extra,
             }
             if coordinator:
-                result['pending_events'] = event_summaries(events, event_limit)
-                result['pending_event_count'] = len(events)
-                result['pending_events_truncated'] = len(events) > event_limit
+                result['pending_events'] = collection(
+                    event_summaries(events, event_limit), total=len(events))
             else:
-                result['pending_event_count'] = len(events)
+                result['pending_events'] = collection([], total=len(events))
             return result
         confirmed_drafts = {requirement['draft_id'] for requirement in data['requirements']}
+        open_requirements = [requirement for requirement in data['requirements']
+                             if requirement['status'] in {'active', 'paused'}]
         visible = [task for task in all_tasks or [] if not task.get('archived')]
         result = {
-            'requirements': [requirement_summary(
-                requirement, drafts_by_id.get(requirement['draft_id']))
-                for requirement in data['requirements']],
-            'tasks': visible[:task_limit],
-            'linked_task_count': len(all_tasks or []),
-            'task_truncated': len(visible) > task_limit,
-            'notifications': [notification_summary(row) for row
-                              in notification_selection(notification_rows)],
-            'notification_count': len(notification_rows),
+            'requirements': collection(
+                [requirement_ref(requirement, progression.get(requirement['id']))
+                 for requirement in open_requirements]),
+            'tasks': collection(visible[:task_limit], total=len(visible)),
+            'notifications': collection(
+                [notification_summary(row) for row
+                 in notification_selection(notification_rows)],
+                total=len(notification_rows)),
             'open_question_count': sum(
                 row.get('kind') == 'question' and row.get('answer') is None
                 for row in notification_rows),
-            'notifications_truncated': len(notification_rows) > 20,
             'progression': observation['progression'],
             'liveness': observation['liveness'],
             'scheduled_wakes': observation['scheduled_wakes'],
@@ -317,14 +320,16 @@ def register(ctx, *, scan_runner=None):
             **extra,
         }
         if interactor:
-            result['drafts'] = [draft_summary(draft) for draft in data['drafts']
-                                if draft['id'] not in confirmed_drafts]
+            drafts = [draft_summary(draft) for draft in data['drafts']
+                      if draft['id'] not in confirmed_drafts]
+            result['drafts'] = collection(
+                drafts[:DRAFT_LIMIT], total=len(drafts))
         if coordinator:
-            result['pending_events'] = event_summaries(data['pending_events'], event_limit)
-            result['pending_event_count'] = len(data['pending_events'])
-            result['pending_events_truncated'] = len(data['pending_events']) > event_limit
+            result['pending_events'] = collection(
+                event_summaries(data['pending_events'], event_limit),
+                total=len(data['pending_events']))
         else:
-            result['pending_event_count'] = len(data['pending_events'])
+            result['pending_events'] = collection([], total=len(data['pending_events']))
         return result
 
     def notify(args, **native):
@@ -351,11 +356,10 @@ def register(ctx, *, scan_runner=None):
                 raise ValueError('limit must be an integer between 1 and 200')
             total = len(rows)
             rows = rows[-limit:]
-            full = args.get('view') == 'full' or bool(identifier)
-            return {'notifications': [notification_detail(row) for row in rows] if full else
-                    [notification_summary(row) for row in rows],
-                    'count': total, 'returned': len(rows),
-                    'truncated': total > len(rows)}
+            full = bool(identifier)
+            items = ([notification_detail(row) for row in rows] if full else
+                     [notification_summary(row) for row in rows])
+            return {'notifications': collection(items, total=total)}
         box = outbox()
         identifier = args['id']
         if action == 'send':
@@ -485,10 +489,12 @@ def register(ctx, *, scan_runner=None):
     elif interactor:
         definitions = {
             'ancor_requirement': (
-                'Draft, confirm, cancel, pause, resume, or answer an ANCOR requirement. draft, cancel, pause and resume require a high-level summary and create immutable proposals with exact native clarify_args; only the exact submitted native confirmation activates, cancels, pauses or resumes. respond records a human reply as advisory input, never authorization.',
+                'Draft, confirm, cancel, pause, resume, or answer an ANCOR requirement. draft requires an authoritative single-line title plus the exact brief and acceptance criteria; summary is optional. cancel, pause and resume create immutable proposals with exact native clarify_args; only the exact submitted native confirmation activates, cancels, pauses or resumes. respond records a human reply as advisory input, never authorization.',
                 {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond']},
+                 'title': {'type': 'string', 'maxLength': 80,
+                           'description': 'Authoritative single-line requirement label used by every compact list and wake packet.'},
                  'summary': {'type': 'string',
-                             'description': 'High-level, user-facing points shown before the exact stored requirement.'},
+                             'description': 'Optional high-level, user-facing points shown before the exact stored requirement.'},
                  'brief': {'type': 'string'}, 'acceptance_criteria': {'type': 'string'},
                  'replacement_of': {'oneOf': [{'type': 'string'},
                                                {'type': 'array', 'items': {'type': 'string'}}]},
@@ -496,20 +502,21 @@ def register(ctx, *, scan_runner=None):
                  'requirement_ids': {'type': 'array', 'items': {'type': 'string'}},
                  'reason': {'type': 'string'}, 'body': {'type': 'string'}}, ['action']),
             'ancor_get_context': (
-                'Read a compact ANCOR overview: open drafts, requirement previews, linked task summaries, notifications and health. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
+                'Read a compact ANCOR overview: open draft previews, requirement title references, linked task references, notifications and health. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
                 {'requirement_id': {'type': 'string'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, []),
             'ancor_board': (
-                'Read linked native tasks. list returns compact summaries and accepts requirement_id, status, limit and include_archived filters; show returns one full card with contract, comments, runs and events. This role cannot mutate the board.',
-                {'action': {'type': 'string', 'enum': ['list', 'show']},
+                'Read linked native tasks. list returns compact summaries and accepts requirement_id, status, limit and include_archived filters; show returns one card with bounded recent history; history expands comments, events or runs. This role cannot mutate the board.',
+                {'action': {'type': 'string', 'enum': ['list', 'show', 'history']},
+                 'kind': {'type': 'string', 'enum': ['comments', 'events', 'runs']},
+                 'before_id': {'type': 'integer', 'minimum': 1},
                  'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
-                 'status': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'status': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
                  'include_archived': {'type': 'boolean'}}, ['action']),
             'ancor_notify': (
                 'List compact durable notifications, expand one by id, or transcribe a human answer for the matching open question. Filter by requirement_id, task_id, state or open_only. A closed question cannot be resurrected; use requirement respond for new human input. Answers are advisory, never authorization.',
                 {'action': {'type': 'string', 'enum': ['list', 'respond']},
                  'id': {'type': 'string'}, 'answer': {'type': 'string'},
-                 'view': {'type': 'string', 'enum': ['summary', 'full']},
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
                  'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
@@ -517,37 +524,41 @@ def register(ctx, *, scan_runner=None):
     elif coordinator:
         definitions = {
             'ancor_wake': (
-                'Manage durable future one-shot wakes. schedule requires requirement_id, reason, due_at (Unix seconds); replace requires wake_id, reason, due_at; cancel requires wake_id. list optionally filters requirement_id. Never create immediate self-wake loops.',
+                'Manage durable future one-shot wakes. schedule requires requirement_id, reason, due_at (Unix seconds); replace requires wake_id, reason, due_at; cancel requires wake_id. list defaults to pending wakes and optionally filters requirement_id or state. Never create immediate self-wake loops.',
                 {'action': {'type': 'string', 'enum': ['schedule', 'list', 'cancel', 'replace']},
                  'requirement_id': {'type': 'string'}, 'wake_id': {'type': 'string'},
-                 'reason': {'type': 'string'}, 'due_at': {'type': 'number'}}, ['action']),
+                 'reason': {'type': 'string'}, 'due_at': {'type': 'number'},
+                 'state': {'type': 'string', 'enum': ['scheduled', 'queued', 'suppressed',
+                                                      'cancelled', 'handled']},
+                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
             'ancor_notify': (
-                'Durably enqueue a neutral question or accepted completion, list compact notifications, or withdraw an unanswered question that later information made obsolete. Enqueue returns pending; Gateway delivery is asynchronous. A question requires an active requirement, a linked blocked task, and no other open question for that requirement and task; completion requires an accepted requirement and id accept:<requirement_id>. Filter by requirement_id, task_id, state or open_only; view=full or id expands one. Reuse stable IDs; pending is not delivery, and uncertain requires operator reconciliation.',
+                'Durably enqueue a neutral question or accepted completion, list compact notifications, or withdraw an unanswered question that later information made obsolete. Enqueue returns pending; Gateway delivery is asynchronous. A question requires an active requirement, a linked blocked task, and no other open question for that requirement and task; completion requires an accepted requirement and id accept:<requirement_id>. Filter by requirement_id, task_id, state or open_only; only id expands one full notification. Reuse stable IDs; pending is not delivery, and uncertain requires operator reconciliation.',
                 {'action': {'type': 'string', 'enum': ['send', 'list', 'withdraw']},
                  'id': {'type': 'string'},
                  'kind': {'type': 'string', 'enum': ['question', 'completion']},
                  'message': {'type': 'string'}, 'reason': {'type': 'string'},
                  'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
-                 'view': {'type': 'string', 'enum': ['summary', 'full']},
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
             'ancor_board': (
-                'Read and coordinate linked native tasks. list returns compact summaries; show returns one full card. create requires a complete contract; body is optional and defaults to the contract objective; edit with body requires the same contract. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, retire, and associate.',
+                'Read and coordinate linked native tasks. list returns compact summaries; show returns one card with bounded recent history; history expands comments, events or runs for one card. create requires a complete contract; body is optional and defaults to the contract objective; edit with body requires the same contract. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, retire, and associate.',
                 {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock',
-                                                        'comment', 'link', 'unlink', 'edit', 'revise',
+                                                        'history', 'comment', 'link', 'unlink', 'edit', 'revise',
                                                         'retire', 'associate']},
+                 'kind': {'type': 'string', 'enum': ['comments', 'events', 'runs']},
+                 'before_id': {'type': 'integer', 'minimum': 1},
                  'priority': {'type': 'integer'},
                  'parent_ids': {'type': 'array', 'items': {'type': 'string'}},
                  'hold': {'type': 'boolean'},
                  'status': {'type': 'string'},
-                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
                  'include_archived': {'type': 'boolean'},
                  'contract': contract_schema,
                  **{field: {'type': 'string'} for field in
                     ('requirement_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'body', 'reason')}},
                 ['action']),
             'ancor_get_context': (
-                'Read a compact coordination snapshot: pending event summaries, requirement previews, linked task summaries, notifications and health for active or paused requirements. Payloads are previews; pass requirement_id for exact requirement text, ancor_board show for a full task, and ancor_notify id for one full notification. Raise event_limit for a larger event batch and pass event_id to read one complete payload. Acknowledge only explicit event IDs actually handled.',
+                'Read a compact coordination snapshot: pending event summaries, requirement title references, linked task references, notifications and health for active or paused requirements. Payloads are previews; pass requirement_id for exact requirement text, ancor_board show for a full task, and ancor_notify id for one full notification. Raise event_limit for a larger event batch and pass event_id to read one complete payload. Acknowledge only explicit event IDs actually handled.',
                 {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}},
                  'requirement_id': {'type': 'string'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},

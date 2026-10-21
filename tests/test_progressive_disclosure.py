@@ -32,11 +32,11 @@ def test_board_list_is_compact_and_show_expands(tmp_path):
                           {'coordinator_profile': 'ancor-coordinator'}.get(key, default))
     operations = Operations(ctx, store, Board())
     listed = operations.call({'action': 'list'})
-    assert listed['tasks'][0]['id'] == 't1'
-    assert listed['tasks'][0]['requirement_id'] == req['id']
-    assert 'body' not in listed['tasks'][0]
+    assert listed['items'][0]['id'] == 't1'
+    assert listed['items'][0]['requirement_id'] == req['id']
+    assert 'body' not in listed['items'][0]
     shown = operations.call({'action': 'show', 'task_id': 't1'})
-    assert shown['task']['body'].startswith('FULL CONTRACT')
+    assert shown['body'].startswith('FULL CONTRACT')
 
 
 def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
@@ -61,16 +61,13 @@ def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
     call = lambda args: json.loads(tools['ancor_get_context']['handler'](args))
 
     overview = call({})
-    requirement = overview['requirements'][0]
+    requirement = overview['requirements']['items'][0]
     assert requirement['id'] == req['id']
-    assert requirement['summary'] == 'Short summary'
-    assert len(requirement['brief_preview']) < len(brief)
-    assert requirement['truncated'] is True
+    assert requirement['title'] == 'Test requirement'
     assert 'brief' not in requirement
-    assert requirement['brief_truncated'] is True
-    assert requirement['acceptance_criteria_truncated'] is True
-    assert 'body' not in overview['tasks'][0]
-    event = overview['pending_events'][0]
+    assert 'summary' not in requirement
+    assert 'body' not in overview['tasks']['items'][0]
+    event = overview['pending_events']['items'][0]
     assert 'payload' not in event and event['payload_preview']
 
     full_event = call({'event_id': event['id']})
@@ -79,8 +76,8 @@ def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
     expanded = call({'requirement_id': req['id']})
     assert expanded['requirement']['brief'] == brief
     assert expanded['requirement']['acceptance_criteria'] == criteria
-    assert expanded['tasks'][0]['id'] == 't1'
-    assert 'body' not in expanded['tasks'][0]
+    assert expanded['tasks']['items'][0]['id'] == 't1'
+    assert 'body' not in expanded['tasks']['items'][0]
 
 
 def test_notification_list_is_compact_and_id_expands(tmp_path):
@@ -109,14 +106,14 @@ def test_notification_list_is_compact_and_id_expands(tmp_path):
     call = lambda args: json.loads(tools['ancor_notify']['handler'](args))
 
     overview = call({'action': 'list'})
-    row = overview['notifications'][0]
+    row = overview['notifications']['items'][0]
     assert row['id'] == 'q1' and row['answered'] is False
     assert 'message' not in row and row['message_truncated'] is True
-    assert call({'action': 'list', 'open_only': True})['count'] == 1
-    assert call({'action': 'list', 'requirement_id': req['id']})['count'] == 1
-    assert call({'action': 'list', 'task_id': 't1'})['count'] == 1
-    assert call({'action': 'list', 'requirement_id': 'other'})['count'] == 0
-    full = call({'action': 'list', 'id': 'q1'})['notifications'][0]
+    assert call({'action': 'list', 'open_only': True})['notifications']['count'] == 1
+    assert call({'action': 'list', 'requirement_id': req['id']})['notifications']['count'] == 1
+    assert call({'action': 'list', 'task_id': 't1'})['notifications']['count'] == 1
+    assert call({'action': 'list', 'requirement_id': 'other'})['notifications']['count'] == 0
+    full = call({'action': 'list', 'id': 'q1'})['notifications']['items'][0]
     assert full['message'] == message
 
 
@@ -158,10 +155,10 @@ def test_board_list_prioritizes_live_recent_tasks_before_truncation(tmp_path):
                           {'coordinator_profile': 'ancor-coordinator'}.get(key, default))
     operations = Operations(ctx, store, Board())
     listed = operations.call({'action': 'list', 'limit': 2})
-    assert [task['id'] for task in listed['tasks']] == ['new-running', 'old-running']
+    assert [task['id'] for task in listed['items']] == ['new-running', 'old-running']
     assert listed['truncated'] is True
     with_archived = operations.call({'action': 'list', 'include_archived': True})
-    assert with_archived['tasks'][-1]['id'] == 'archived'
+    assert with_archived['items'][-1]['id'] == 'archived'
 
 
 def test_requirement_expansion_hides_archived_tasks(tmp_path, monkeypatch):
@@ -188,8 +185,8 @@ def test_requirement_expansion_hides_archived_tasks(tmp_path, monkeypatch):
     ancor.register(ctx)
     expanded = json.loads(tools['ancor_get_context']['handler'](
         {'requirement_id': req['id']}))
-    assert [task['id'] for task in expanded['tasks']] == ['live']
-    assert expanded['task_count'] == 1
+    assert [task['id'] for task in expanded['tasks']['items']] == ['live']
+    assert expanded['tasks']['count'] == 1
     assert expanded['archived_task_count'] == 1
 
 

@@ -14,7 +14,7 @@ class StoreTests(unittest.TestCase):
         self.path = Path(self.directory.name) / 'store.sqlite'
         self.store = Store(self.path)
 
-    def test_old_draft_schema_is_upgraded_without_losing_rows(self):
+    def test_legacy_schema_requires_explicit_title_migration(self):
         database = Path(self.directory.name) / 'old-store.sqlite'
         db = sqlite3.connect(database)
         try:
@@ -24,20 +24,26 @@ class StoreTests(unittest.TestCase):
                 'acceptance_criteria TEXT NOT NULL, replacement_of TEXT)')
             db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?)',
                        ('old', 'previous brief', 'previous criteria', None))
+            db.execute(
+                'CREATE TABLE requirements ('
+                'id TEXT PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL, '
+                'brief TEXT NOT NULL, acceptance_criteria TEXT NOT NULL, '
+                'replacement_of TEXT, confirmation_reference TEXT NOT NULL, '
+                'status TEXT NOT NULL)')
             db.commit()
         finally:
             db.close()
 
-        store = Store(database)
+        with self.assertRaisesRegex(RuntimeError, 'migrate_titles'):
+            Store(database)
         db = sqlite3.connect(database)
         try:
             columns = {row[1] for row in db.execute('PRAGMA table_info(drafts)')}
+            rows = list(db.execute('SELECT id, brief FROM drafts'))
         finally:
             db.close()
-        self.assertIn('summary', columns)
-        self.assertIsNone(store.get_draft('old')['summary'])
-        draft = store.create_draft('new brief', 'new criteria', summary='short summary')
-        self.assertEqual(draft['summary'], 'short summary')
+        self.assertNotIn('title', columns)
+        self.assertEqual(rows, [('old', 'previous brief')])
 
     def test_concurrent_confirmation_creates_one_requirement_and_event(self):
         draft = self.store.create_draft('brief', 'criteria')

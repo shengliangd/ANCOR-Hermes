@@ -16,6 +16,8 @@ import time
 from .board import NativeBoard
 from .runtime import Coordinator
 from .store import Store
+from .views import (collection, notification_selection, notification_summary,
+                    preview, requirement_ref, task_ref)
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +63,7 @@ class Host:
         self.startup = True
 
         self.coordinator = Coordinator(path.parent / 'ancor-coordinator.lock',
-            pending=self.pending, snapshot=self.snapshot, scan=self.scan,
+            pending=self.pending, snapshot=self.wake_packet, scan=self.scan,
             batch_size=32, retry_base=15,
             command=lambda prompt: coordinator_command(self.profile, prompt))
 
@@ -204,9 +206,10 @@ class Host:
         if self.startup:
             # Runs under the SAME inherited coordinator flock, after discovery.
             # A pending inbox already wakes the coordinator with this current snapshot.
-            data = self.snapshot()
+            data = self.wake_packet()
             pending = [e for e in self.store.pending_events() if e['kind'] != 'host.stalled']
-            if (data['requirements'] or data['notifications'] or data['invalidated_tasks']) and not pending:
+            if (data['requirements']['items'] or data['notifications']['items']
+                    or data['invalidated_tasks']['items']) and not pending:
                 self.store.add_event('host.recovery', {
                     'reason': 'Reconcile durable state after host startup; inspect current context. '
                               'Reuse task keys and notification IDs; never resend sending/uncertain notices. '
@@ -274,10 +277,21 @@ class Host:
                 except Exception:
                     # Failed reads are not evidence that obsolete work is quiet.
                     reason = 'Invalidated task quiescence could not be established; inspect native detail'
-            unresolved.append({'requirement': invalidated[rid], 'task_id': tid, 'reason': reason})
+            shown, truncated = preview(reason, 160)
+            item = {
+                'task_id': tid,
+                'task_title': task.get('title'),
+                'task_status': status,
+                'requirement_id': rid,
+                'requirement_title': invalidated[rid]['title'],
+                'reason_preview': shown,
+            }
+            if truncated:
+                item['reason_truncated'] = True
+            unresolved.append(item)
         return unresolved
 
-    def snapshot(self):
+    def wake_packet(self):
         from .notification import NotificationOutbox
         data = self.store.snapshot()
         notifications = NotificationOutbox.read_existing(self.store.path + '.notifications.db')
@@ -287,18 +301,31 @@ class Host:
                         if r['status'] in {'active', 'paused'} or
                         (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)]
         relevant = {r['id'] for r in requirements}
-        return {**self.scheduling.observation(data, self.tasks, notifications), 'requirements': requirements,
-                'invalidated_tasks': self.invalidated_tasks(data),
-                'acceptances': [e for e in self.store.acceptances()
-                                if e['payload']['requirement_id'] in relevant],
-                'notifications': [n for n in notifications if n['state'] != 'sent' or
-                                  (n['kind'] == 'question' and n['answer'] is None
-                                   and n.get('closed_at') is None)],
-                'task_links': data['task_links'],
-                'board': [{k: t[k] for k in ('id', 'title', 'status', 'assignee', 'blocked_reason',
-                                             'last_heartbeat_at', 'block_kind', 'block_recurrences',
-                                             'created_at', 'started_at') if k in t}
-                          for t in self.tasks]}
+        scoped = {**data, 'requirements': requirements}
+        observation = self.scheduling.observation(scoped, self.tasks, notifications)
+        progression = {item['requirement_id']: item for item in observation['progression']}
+        titles = {r['id']: r['title'] for r in data['requirements']}
+        links = {link['task_id']: link['requirement_id'] for link in data['task_links']
+                 if link['requirement_id'] in relevant}
+        board = [task_ref(task, links[task['id']], titles.get(links[task['id']]))
+                 for task in self.tasks if task['id'] in links]
+        visible_notifications = [n for n in notifications if n['state'] != 'sent' or
+                                 (n['kind'] == 'question' and n['answer'] is None
+                                  and n.get('closed_at') is None)]
+        selected = notification_selection(visible_notifications)
+        return {
+            'requirements': collection(
+                [requirement_ref(r, progression.get(r['id'])) for r in requirements]),
+            'invalidated_tasks': collection(self.invalidated_tasks(data)),
+            'notifications': collection(
+                [notification_summary(row) for row in selected],
+                total=len(visible_notifications)),
+            'board': collection(board),
+            'scheduled_wakes': observation['scheduled_wakes'],
+            'progression': observation['progression'],
+            'liveness': observation['liveness'],
+            'expand': 'Call ancor_get_context for requirement detail, or ancor_board show for one card.',
+        }
 
 
 async def scan_runner(ctx, adapter):

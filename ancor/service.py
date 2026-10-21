@@ -25,20 +25,21 @@ class Service:
     def requirement(self, args):
         action = args['action']
         if action == 'draft':
-            summary = self.store._text(args.get('summary'))
+            summary = self.store._optional_text(args.get('summary'))
             draft = self.store.create_draft(args['brief'], args['acceptance_criteria'],
-                                           args.get('replacement_of'), summary)
+                                           args.get('replacement_of'), summary,
+                                           title=args['title'])
             return self.presentation(draft)
         if action == 'confirm':
             # Preparation only: consent is exclusively consumed by the public post hook.
             return self.presentation(self.store.get_draft(args['draft_id']))
         if action == 'cancel':
-            summary = self.store._text(args.get('summary'))
+            summary = self.store._optional_text(args.get('summary'))
             cancellation = self.store.create_cancellation(
                 args['requirement_ids'], args.get('reason'), summary)
             return self.cancellation_presentation(cancellation)
         if action in {'pause', 'resume'}:
-            summary = self.store._text(args.get('summary'))
+            summary = self.store._optional_text(args.get('summary'))
             command = self.store.create_requirement_command(
                 action, args['requirement_id'], args['reason'], summary)
             return self.command_presentation(command)
@@ -64,6 +65,7 @@ class Service:
         """
         summary = draft['summary'] or 'No high-level summary was provided.'
         text = (f"ANCOR draft {draft['id']}\n"
+                f"Title: {draft['title']}\n"
                 f"High-level summary:\n{summary}\n\n"
                 f"Exact requirement to be stored:\n"
                 f"Replacement of: {draft['replacement_of'] or 'none'}\n"
@@ -85,14 +87,13 @@ class Service:
         for requirement in requirements:
             blocks.append(
                 f"- {requirement['id']}\n"
-                f"  Requirement: {requirement['brief']}\n"
-                f"  Acceptance criteria: {requirement['acceptance_criteria']}")
+                f"  Title: {requirement['title']}")
         summary = cancellation['summary'] or 'No high-level summary was provided.'
         text = (f"ANCOR cancellation {cancellation['id']}\n"
                 f"High-level summary:\n{summary}\n\n"
                 f"Exact cancellation to be stored:\n"
                 f"Reason: {cancellation['reason'] or 'not provided'}\n\n"
-                f"Requirements to cancel:\n" + '\n'.join(blocks))
+                f"Requirements to cancel ({len(requirements)}):\n" + '\n'.join(blocks))
         path = self._write_presentation(cancellation['id'], text)
         question = (text + f"\n\nConfirm cancellation of ANCOR requirements {cancellation['id']}? "
                     'This stops coordination; requirement history remains.')
@@ -113,6 +114,7 @@ class Service:
                 f"High-level summary:\n{summary}\n\n"
                 f"Exact {verb} to be stored:\n"
                 f"Requirement: {requirement['id']}\n"
+                f"Title: {requirement['title']}\n"
                 f"Requirement text:\n{requirement['brief']}\n\n"
                 f"Acceptance criteria:\n{requirement['acceptance_criteria']}\n\n"
                 f"Reason: {command['reason']}")

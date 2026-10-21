@@ -3,6 +3,8 @@ import math
 import time
 from uuid import uuid4
 
+from .views import WAKE_LIMIT, collection, preview, wake_ref
+
 
 class Scheduling:
     INTERVAL = 7200
@@ -28,9 +30,7 @@ class Scheduling:
         with self.store._transaction() as db:
             self._suppress(db)
             if action == 'list':
-                return [dict(r) for r in db.execute(
-                    'SELECT * FROM scheduled_wakes WHERE (? IS NULL OR requirement_id=?) ORDER BY due_at,id',
-                    (args.get('requirement_id'), args.get('requirement_id')))]
+                return self._list(db, args)
             if action not in {'schedule', 'replace', 'cancel'}:
                 raise ValueError('unknown wake action')
             old = None
@@ -56,6 +56,33 @@ class Scheduling:
             identifier = uuid4().hex
             db.execute('INSERT INTO scheduled_wakes VALUES(?,?,?,?,?)', (identifier, rid, reason, due, 'scheduled'))
             return self.store._get(db, 'scheduled_wakes', identifier)
+
+    def _list(self, db, args):
+        requirement_id = args.get('requirement_id')
+        state = args.get('state')
+        limit = args.get('limit', 50)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError('limit must be an integer between 1 and 200')
+        allowed_states = {'scheduled', 'queued', 'suppressed', 'cancelled', 'handled'}
+        if state is None:
+            states = {'scheduled', 'queued'}
+        elif state in allowed_states:
+            states = {state}
+        else:
+            raise ValueError('state must be one of: ' + ', '.join(sorted(allowed_states)))
+        rows = [dict(row) for row in db.execute(
+            'SELECT * FROM scheduled_wakes WHERE (? IS NULL OR requirement_id=?) '
+            'ORDER BY due_at,id', (requirement_id, requirement_id))]
+        rows = [row for row in rows if row['state'] in states]
+        return collection([wake_ref(row) for row in rows[:limit]], total=len(rows))
+
+    def pending_wakes(self, requirement_id=None):
+        with self.store._transaction() as db:
+            self._suppress(db)
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM scheduled_wakes WHERE state IN ('scheduled','queued') "
+                "AND (? IS NULL OR requirement_id=?) ORDER BY due_at,id",
+                (requirement_id, requirement_id))]
 
     def _suppress(self, db):
         db.execute("UPDATE scheduled_wakes SET state='suppressed' WHERE state IN ('scheduled','queued') AND requirement_id IN (SELECT id FROM requirements WHERE status!='active')")
@@ -133,17 +160,25 @@ class Scheduling:
         linked = {}
         for link in data['task_links']:
             linked.setdefault(link['requirement_id'], []).append(by_id.get(link['task_id'], {'id': link['task_id']}))
-        wakes = self.call({'action': 'list'})
+        wakes = self.pending_wakes()
+        scope = {r['id'] for r in data['requirements']}
+        wakes = [wake for wake in wakes if wake['requirement_id'] in scope]
         results = []
         for requirement in data['requirements']:
             rid = requirement['id']
             items = linked.get(rid, [])
-            timers = [{'kind': 'scheduled_wake', **wake} for wake in wakes
+            timers = [{'kind': 'scheduled_wake', **wake_ref(wake)} for wake in wakes
                       if wake['requirement_id'] == rid and wake['state'] in {'scheduled', 'queued'}]
             base = {'requirement_id': rid, 'tasks': [
-                {key: task[key] for key in ('id', 'status', 'last_heartbeat_at', 'blocked_reason',
+                {key: task[key] for key in ('id', 'status', 'last_heartbeat_at',
                                             'block_kind', 'block_recurrences') if key in task}
                 for task in items], 'timers': timers}
+            for task in base['tasks']:
+                if task.get('id') in by_id and by_id[task['id']].get('blocked_reason'):
+                    shown, truncated = preview(by_id[task['id']]['blocked_reason'], 160)
+                    task['blocked_reason_preview'] = shown
+                    if truncated:
+                        task['blocked_reason_truncated'] = True
             if requirement['status'] == 'paused':
                 results.append({**base, 'state': 'paused', 'reason': 'requirement_paused',
                                 'waiting_on': None,
@@ -219,7 +254,10 @@ class Scheduling:
                     db.execute('UPDATE events SET acknowledged=1 WHERE id=?', (row['id'],))
 
     def observation(self, data, tasks=(), notifications=None):
-        wakes = self.call({'action': 'list'})
+        wakes = self.pending_wakes()
+        scope_ids = {r['id'] for r in data['requirements']}
+        wakes = [wake for wake in wakes if wake['requirement_id'] in scope_ids]
+        visible_wakes = wakes[:WAKE_LIMIT]
         with self.store._transaction() as db:
             state = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
         active = [r for r in data['requirements'] if r['status'] == 'active']
@@ -229,9 +267,13 @@ class Scheduling:
             tracked = [r for r in data['requirements'] if r['status'] in {'active', 'paused'}]
             progression = [{'requirement_id': req['id'], 'state': 'unknown', 'reason': 'board_unavailable',
                             'waiting_on': None, 'task_ids': [],
-                            'timers': [{'kind': 'scheduled_wake', **wake} for wake in wakes
+                            'timers': [{'kind': 'scheduled_wake', **wake_ref(wake)} for wake in visible_wakes
                                        if wake['requirement_id'] == req['id'] and wake['state'] in {'scheduled', 'queued'}]}
                            for req in tracked]
         else:
             progression = self.health(data, tasks, notifications)
-        return {'scheduled_wakes': wakes, 'progression': progression, 'liveness': {**state, 'due_at': deadline, 'overdue': deadline is not None and self.clock() >= deadline}}
+        return {'scheduled_wakes': collection(
+                    [wake_ref(wake) for wake in visible_wakes], total=len(wakes)),
+                'progression': progression,
+                'liveness': {**state, 'due_at': deadline,
+                             'overdue': deadline is not None and self.clock() >= deadline}}

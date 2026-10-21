@@ -3,6 +3,8 @@ import json
 import os
 import pytest
 
+EVENT = {'id': 1, 'kind': 'test.input', 'payload': {}}
+
 
 async def wait_file(path):
     for _ in range(300):
@@ -16,7 +18,7 @@ def test_serialization_and_cancellation_reaps_before_unlock(tmp_path):
     async def scenario():
         pid_file = tmp_path / 'pid'
         command = lambda p: [sys.executable, '-c', 'import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)', str(pid_file)]
-        options = dict(pending=lambda n: [{'id': 1}], snapshot=lambda: {}, scan=lambda: None, command=command)
+        options = dict(pending=lambda n: [EVENT], snapshot=lambda: {}, scan=lambda: None, command=command)
         first = Coordinator(tmp_path / 'lock', **options)
         second = Coordinator(tmp_path / 'lock', **options)
         task = asyncio.create_task(first.tick())
@@ -47,7 +49,7 @@ def test_lock_excludes_another_process_opening_same_path(tmp_path):
     probe = 'import fcntl,sys; f=open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX|fcntl.LOCK_NB)'
     result_file = tmp_path / 'result'
     script = 'import subprocess,sys,pathlib; p=subprocess.run([sys.executable,"-c",sys.argv[1],sys.argv[2]],capture_output=True); pathlib.Path(sys.argv[3]).write_text(str(p.returncode))'
-    runner = Coordinator(lock, pending=lambda n: [{'id': 1}], snapshot=lambda: {}, scan=lambda: None, command=lambda p: [sys.executable, '-c', script, probe, str(lock), str(result_file)])
+    runner = Coordinator(lock, pending=lambda n: [EVENT], snapshot=lambda: {}, scan=lambda: None, command=lambda p: [sys.executable, '-c', script, probe, str(lock), str(result_file)])
     assert asyncio.run(runner.tick()) == 'ran'
     assert result_file.read_text() != '0'
     assert subprocess.run([sys.executable, '-c', probe, str(lock)], capture_output=True).returncode == 0
@@ -67,7 +69,7 @@ def test_cancellation_stops_grandchild_before_unlock(tmp_path):
         script = ('import subprocess,sys,time,pathlib; '
                   'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"]); '
                   'pathlib.Path(sys.argv[1]).write_text(str(p.pid)); time.sleep(60)')
-        runner = Coordinator(tmp_path / 'lock', pending=lambda n: [{'id': 1}],
+        runner = Coordinator(tmp_path / 'lock', pending=lambda n: [EVENT],
                              snapshot=lambda: {}, scan=lambda: None,
                              command=lambda p: [sys.executable, '-c', script, str(pid_file)])
         task = asyncio.create_task(runner.tick())
@@ -108,7 +110,7 @@ def test_host_crash_keeps_lock_until_coordinator_exits(tmp_path):
               '\nwhile not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)')
     host_script = (
         'import asyncio,sys; from ancor.runtime import Coordinator; '
-        'c=Coordinator(sys.argv[1], pending=lambda n:[{"id":1}], '
+        'c=Coordinator(sys.argv[1], pending=lambda n:[{"id":1,"kind":"test.input","payload":{}}], '
         'snapshot=lambda:{}, scan=lambda:None, '
         'command=lambda p:[sys.executable,"-c",sys.argv[3],sys.argv[2],sys.argv[4]]); '
         'asyncio.run(c.tick())')
@@ -141,7 +143,7 @@ def test_host_crash_keeps_lock_until_coordinator_exits(tmp_path):
 
 def test_retry_backoff_preserves_pending(tmp_path):
     now = [0.0]
-    runner = Coordinator(tmp_path / 'lock', pending=lambda n: [{'id': 1}], snapshot=lambda: {}, scan=lambda: None, clock=lambda: now[0], retry_base=5, command=lambda p: [sys.executable, '-c', 'raise SystemExit(7)'])
+    runner = Coordinator(tmp_path / 'lock', pending=lambda n: [EVENT], snapshot=lambda: {}, scan=lambda: None, clock=lambda: now[0], retry_base=5, command=lambda p: [sys.executable, '-c', 'raise SystemExit(7)'])
     assert asyncio.run(runner.tick()) == 'failed'
     assert runner.last_error == 'coordinator exited 7'
     assert asyncio.run(runner.tick()) == 'backoff'
@@ -153,7 +155,7 @@ def test_retry_backoff_preserves_pending(tmp_path):
 
 def test_pending_bounded_and_not_automatically_acknowledged(tmp_path):
     output = tmp_path / 'prompt.json'
-    events = [{'id': 1}, {'id': 2}]
+    events = [EVENT, {'id': 2, 'kind': 'test.input', 'payload': {}}]
     limits = []
     def pending(n):
         limits.append(n)
@@ -161,5 +163,7 @@ def test_pending_bounded_and_not_automatically_acknowledged(tmp_path):
     runner = Coordinator(tmp_path / 'coordinator.lock', pending=pending, snapshot=lambda: {'revision': 3}, scan=lambda: None, batch_size=1, command=lambda prompt: [sys.executable, '-c', 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])', str(output), prompt])
     assert asyncio.run(runner.tick()) == 'ran'
     assert limits == [1]
-    assert json.loads(output.read_text().split('\n', 1)[1]) == {'events': [{'id': 1}], 'snapshot': {'revision': 3}}
+    assert json.loads(output.read_text().split('\n', 1)[1]) == {
+        'events': [{'id': 1, 'kind': 'test.input', 'payload_preview': '{}'}],
+        'snapshot': {'revision': 3}}
     assert len(events) == 2

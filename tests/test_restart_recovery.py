@@ -29,7 +29,7 @@ class Board:
 host = Host(Context(), board=Board())
 if sys.argv[2] == 'accept-crash':
     store = host.store
-    req = store.confirm(store.create_draft('Deliver', 'verified artifact')['id'], 'human:exact')
+    req = store.confirm(store.create_draft('Deliver', 'verified artifact', title='Deliver artifact')['id'], 'human:exact')
     store.accept(req['id'], 'preserved verification evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     Path(sys.argv[3]).write_text(req['id'])
@@ -96,11 +96,12 @@ def test_invalidated_orphan_restart(tmp_path, status, retired, run, expected):
     host.scan()
     events = host.pending(32)
     assert [e['kind'] for e in events] == (['host.recovery'] if expected else [])
-    unresolved = host.snapshot()['invalidated_tasks']
+    unresolved = host.wake_packet()['invalidated_tasks']['items']
     if expected:
-        assert unresolved[0]['requirement'] == store.get_requirement(old['id'])
+        assert unresolved[0]['requirement_id'] == old['id']
+        assert unresolved[0]['requirement_title'] == old['title']
         assert unresolved[0]['task_id'] == 'old-worker'
-        assert unresolved[0]['reason']
+        assert unresolved[0]['reason_preview']
         assert 'coordinator decides' in events[0]['payload']['reason']
     else:
         assert unresolved == []
@@ -134,9 +135,12 @@ def test_accepted_before_enqueue_crash_wakes_once_without_resubmission(tmp_path)
         assert result.returncode == 0, result.stdout + result.stderr
         payload = json.loads(output.read_text())
         assert payload['events'][0]['kind'] == 'host.recovery'
-        assert payload['snapshot']['requirements'][0]['status'] == 'accepted'
-        assert payload['snapshot']['requirements'][0]['confirmation_reference'] == 'human:exact'
-        assert payload['snapshot']['acceptances'][0]['payload']['evidence'] == 'preserved verification evidence'
+        requirement = payload['snapshot']['requirements']['items'][0]
+        assert requirement['status'] == 'accepted'
+        assert 'brief' not in requirement
+        restarted = Store(path)
+        assert restarted.get_requirement(requirement['id'])['confirmation_reference'] == 'human:exact'
+        assert restarted.acceptances()[0]['payload']['evidence'] == 'preserved verification evidence'
         assert not Path(str(path) + '.notifications.db').exists(), 'host must not invent a send'
     finally:
         if process.poll() is None:
@@ -166,7 +170,7 @@ def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state)
     events = host.pending(32)
     assert bool(events) == (state != 'sent')
     if state != 'sent':
-        assert host.snapshot()['notifications'][0]['state'] == state
+        assert host.wake_packet()['notifications']['items'][0]['state'] == state
         store.ack_events([e['id'] for e in events])
     for _ in range(5):
         assert host.pending(32) == []
@@ -188,7 +192,9 @@ def test_sent_question_is_not_completion_delivery(tmp_path):
     box.mark_sent(identifier, {'success': True})
     box.respond(identifier, 'yes', 'human:answer')
     host = Host(Context(path), board=Board())
-    assert host.snapshot()['requirements'] == [store.get_requirement(req['id'])]
+    requirements = host.wake_packet()['requirements']['items']
+    assert [row['id'] for row in requirements] == [req['id']]
+    assert requirements[0]['status'] == 'accepted'
     assert [e['kind'] for e in host.pending(32)] == ['host.recovery']
 
 
@@ -220,7 +226,7 @@ def test_interrupted_host_and_coordinator_resume_without_duplicate_flight(tmp_pa
         assert result.returncode == 0, result.stderr
         data = json.loads(output.read_text())
         assert 'host.recovery' in [e['kind'] for e in data['events']]
-        assert data['snapshot']['requirements'] == [req]
+        assert [row['id'] for row in data['snapshot']['requirements']['items']] == [req['id']]
         assert len(store.snapshot()['requirements']) == 1
     finally:
         if process.poll() is None:
@@ -245,9 +251,10 @@ def test_confirmed_demand_restart_requires_no_resubmit(tmp_path, acknowledged):
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
     data = json.loads(output.read_text())
-    assert data['snapshot']['requirements'] == [req]
+    assert [row['id'] for row in data['snapshot']['requirements']['items']] == [req['id']]
     kinds = [e['kind'] for e in data['events']]
-    assert kinds[0] == ('host.stalled' if acknowledged else 'requirement.confirmed')
+    assert ('requirement.confirmed' in kinds) == (not acknowledged)
+    assert 'host.stalled' in kinds
     assert ('host.recovery' in kinds) == acknowledged
 
 

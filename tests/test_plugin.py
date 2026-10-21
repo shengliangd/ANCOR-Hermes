@@ -42,7 +42,8 @@ def test_confirmation_uses_current_chat_without_delivery_configuration(tmp_path,
     from ancor.service import Service
     from ancor.store import Store
     service = Service(None, Store(tmp_path / 'state.db'))
-    draft = service.requirement({'action': 'draft', 'summary': 'Short high-level summary',
+    draft = service.requirement({'action': 'draft', 'title': 'Confirmation delivery',
+                                 'summary': 'Short high-level summary',
                                  'brief': brief, 'acceptance_criteria': 'exact criteria'})
     question = draft['clarify_args']['questions'][0]
     assert Path(draft['draft_file']).read_text() in question['question']
@@ -95,7 +96,7 @@ print('native registration passed; nested clarify unavailable:', result['error']
 from agent.agent_runtime_helpers import invoke_tool
 from ancor.service import Service
 service = Service(ctx)
-draft = service.requirement({'action': 'draft', 'summary': 'Native summary', 'brief': 'Complete native draft', 'acceptance_criteria': 'Verified native hook result'})
+draft = service.requirement({'action': 'draft', 'title': 'Native confirmation', 'summary': 'Native summary', 'brief': 'Complete native draft', 'acceptance_criteria': 'Verified native hook result'})
 assert 'Complete native draft' in draft['clarify_args']['questions'][0]['question']
 seen = []
 ctx.register_hook('post_tool_call', lambda **payload: seen.append(payload))
@@ -135,7 +136,7 @@ def test_only_ancor_roles_have_business_tools():
             assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond']
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['list', 'respond']
             assert set(tools['ancor_get_context']['schema']['parameters']['properties']) == {'requirement_id', 'task_limit'}
-            assert tools['ancor_board']['schema']['parameters']['properties']['action']['enum'] == ['list', 'show']
+            assert tools['ancor_board']['schema']['parameters']['properties']['action']['enum'] == ['list', 'show', 'history']
         elif role == 'ancor-coordinator':
             assert set(tools) == {'ancor_get_context', 'ancor_acceptance', 'ancor_board', 'ancor_wake', 'ancor_notify'}
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
@@ -148,7 +149,8 @@ def confirmation(tmp_path):
     from ancor.service import Service
     from ancor.store import Store
     service = Service(configured_context(), Store(tmp_path / 'state.db'))
-    draft = service.requirement({'action': 'draft', 'summary': 'High-level summary',
+    draft = service.requirement({'action': 'draft', 'title': 'Exact confirmation',
+                                 'summary': 'High-level summary',
                                  'brief': 'Complete brief\nline two', 'acceptance_criteria': 'exact criteria'})
     args = draft['clarify_args']
     question = args['questions'][0]

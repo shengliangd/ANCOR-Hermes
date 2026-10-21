@@ -41,7 +41,7 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     assert not schema['additionalProperties']
     call = lambda name, args: json.loads(tools[name]['handler'](args))
     args = dict(action='schedule', requirement_id=req['id'], reason='external release', due_at=time.time() + 1000)
-    assert call('ancor_wake', {'action': 'list'}) == []
+    assert call('ancor_wake', {'action': 'list'})['items'] == []
     context = call('ancor_get_context', {})
     assert context['progression'][0]['state'] == 'active'
     assert context['progression'][0]['reason'] == 'running_heartbeat'
@@ -49,7 +49,7 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     host = Host(ctx, store=store, board=SimpleNamespace())
     heartbeat = context['progression'][0]['tasks'][0]['last_heartbeat_at']
     host.tasks = [{'id': 'task', 'status': 'running', 'last_heartbeat_at': heartbeat}]
-    assert host.snapshot()['progression'] == context['progression']
+    assert host.wake_packet()['progression'] == context['progression']
     assert 'error' not in call('ancor_wake', args)
     wake = call('ancor_wake', dict(action='schedule', requirement_id=req['id'], reason='external release 2', due_at=time.time() + 2000))
     first = call('ancor_get_context', {})['liveness']
@@ -102,7 +102,8 @@ def test_ack_does_not_depend_on_question_delivery(tmp_path, monkeypatch):
     context = call('ancor_get_context', {})
     assert context['progression'][0]['state'] == 'stalled'
     assert context['progression'][0]['reason'] == 'question_delivery_unconfirmed'
-    Scheduling(store).sync_health(store.snapshot(), tasks, context['notifications'])
+    Scheduling(store).sync_health(store.snapshot(), tasks,
+                                  context['notifications']['items'])
     assert any(e['kind'] == 'host.stalled' for e in store.pending_events())
 
 

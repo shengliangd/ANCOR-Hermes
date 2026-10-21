@@ -18,8 +18,9 @@ User ↔ interactor → immutable draft → explicit confirmation
 
 The interactor prepares and confirms requirements, may read the board to explain progress, then stops at the coordination boundary. It does not mutate the board, schedule workers, wake coordination, or perform acceptance. The coordinator owns those operations. Worker completion is evidence, not requirement acceptance. Pause and resume are confirmed, reversible human decisions; pausing suppresses new work and wakes, and resuming asks the coordinator to re-evaluate existing work.
 
-Confirmation prompts lead with a short high-level summary, followed by the exact
-requirement text that will be stored in ANCOR.
+Every requirement has an authoritative, single-line `title`. Confirmation
+prompts lead with that title and an optional high-level summary, followed by the
+exact requirement text that will be stored in ANCOR.
 
 ## Implementation
 
@@ -57,21 +58,28 @@ card, heartbeats and Kanban lifecycle tools.
 
 ## Model-facing output
 
-Tools default to compact, decision-oriented summaries. Requirement text is shown
-as a preview, board lists omit card bodies and history, notifications carry a
-message preview, and pending events carry a payload preview plus stable IDs.
+Tools default to compact, decision-oriented references. Every collection uses one
+envelope: `items`, `count`, `returned`, and `truncated`. Requirement lists contain
+only identity, title, status, replacement and health; they never contain briefs or
+acceptance criteria. Board lists omit card bodies and history, notifications carry
+bounded previews, and pending events carry a payload preview plus stable IDs.
 
 Expansion is explicit and bounded:
 
-- `ancor_get_context(requirement_id=...)` returns the exact brief and acceptance criteria.
+- `ancor_get_context(requirement_id=...)` returns one requirement's exact brief and acceptance criteria, plus scoped and bounded linked collections.
 - `ancor_get_context(event_id=...)` returns one complete pending event payload.
 - `ancor_board show(task_id=...)` returns one full card with contract, comments, runs and events.
+- `ancor_board history(task_id=..., kind=...)` pages one card's comments, events or runs.
 - `ancor_notify list(requirement_id=...)` scopes the notification history; adding `id` returns one full notification.
 
 Previews are never authoritative for confirmation, acceptance, or transcription.
 List results report total and returned counts so truncation is visible rather than silent.
 Unanswered questions stay visible ahead of recent completion notices, and live or recent
 tasks sort ahead of archived history.
+
+The wake packet follows the same rule: requirements are title references, tasks are
+card references, invalidated work carries a bounded reason preview, and no full brief,
+task body or notification message is copied into the prompt.
 
 ## Health states
 

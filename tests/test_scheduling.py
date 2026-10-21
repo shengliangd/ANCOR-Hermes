@@ -54,7 +54,8 @@ def test_usage_simulation(tmp_path):
     pending = scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='recheck', due_at=100000))
     store.accept(req['id'], 'verified offline')
     scheduler.scan()
-    assert next(w for w in scheduler.call({'action': 'list'}) if w['id'] == pending['id'])['state'] == 'suppressed'
+    listed = scheduler.call({'action': 'list', 'state': 'suppressed'})['items']
+    assert next(w for w in listed if w['id'] == pending['id'])['state'] == 'suppressed'
     store.ack_events([e['id'] for e in store.pending_events()])
     now[0] = 200000
     scheduler.scan()
@@ -73,7 +74,25 @@ def test_invalidation_and_validation(tmp_path):
     wake = scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='x', due_at=101))
     store.confirm(store.create_draft('new', 'criteria', req['id'])['id'], 'yes')
     scheduler.scan()
-    assert scheduler.call({'action': 'list'})[0]['state'] == 'suppressed'
+    listed = scheduler.call({'action': 'list', 'state': 'suppressed'})['items']
+    assert listed[0]['state'] == 'suppressed'
+
+
+def test_wake_list_defaults_to_pending_and_reports_bounds(tmp_path):
+    store = Store(tmp_path / 'db')
+    scheduler = Scheduling(store, lambda: 100)
+    requirement = store.confirm(store.create_draft('wake list', 'verified')['id'], 'yes')
+    wakes = [scheduler.call({'action': 'schedule', 'requirement_id': requirement['id'],
+                             'reason': str(index), 'due_at': 1000 + index})
+             for index in range(3)]
+
+    listed = scheduler.call({'action': 'list', 'limit': 2})
+    assert listed['count'] == 3 and listed['returned'] == 2 and listed['truncated'] is True
+    assert [wake['id'] for wake in listed['items']] == [wake['id'] for wake in wakes[:2]]
+    scheduler.call({'action': 'cancel', 'wake_id': wakes[0]['id']})
+    assert scheduler.call({'action': 'list'})['count'] == 2
+    cancelled = scheduler.call({'action': 'list', 'state': 'cancelled'})
+    assert [wake['id'] for wake in cancelled['items']] == [wakes[0]['id']]
 
 
 def test_running_coordinator_never_overlaps(tmp_path):
@@ -185,7 +204,7 @@ def test_paused_requirement_is_not_stalled_and_suppresses_wakes(tmp_path):
     assert observation['liveness']['due_at'] is None
     assert observation['progression'][0]['state'] == 'paused'
     scheduler.scan()
-    assert next(item for item in scheduler.call({'action': 'list'})
+    assert next(item for item in scheduler.call({'action': 'list', 'state': 'suppressed'})['items']
                 if item['id'] == wake['id'])['state'] == 'suppressed'
 
     resume = store.create_requirement_command('resume', req['id'], 'user ready', 'Continue')

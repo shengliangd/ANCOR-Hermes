@@ -7,6 +7,8 @@ import signal
 import time
 from pathlib import Path
 
+from .views import event_summaries
+
 
 class Coordinator:
     def __init__(self, lock_path, *, pending, snapshot, scan, batch_size=32,
@@ -60,7 +62,11 @@ class Coordinator:
             if not events:
                 return 'idle'
             snapshot = await asyncio.to_thread(self.snapshot)
-            prompt = 'Process these ANCOR events; explicitly acknowledge only handled event IDs.\n' + json.dumps({'events': events, 'snapshot': snapshot}, separators=(',', ':'), ensure_ascii=False)
+            prompt = ('Process these ANCOR events; inspect the compact snapshot, expand only '
+                      'needed requirements or tasks, and explicitly acknowledge only handled event IDs.\n'
+                      + json.dumps({'events': event_summaries(events, self.batch_size),
+                                    'snapshot': snapshot},
+                                   separators=(',', ':'), ensure_ascii=False))
             # flock follows the shared open-file description: a surviving coordinator
             # must retain ownership after a host crash. Close, never LOCK_UN, here.
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(*self.command(prompt), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, close_fds=True, pass_fds=(lock.fileno(),), start_new_session=True))

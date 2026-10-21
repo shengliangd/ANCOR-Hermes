@@ -150,7 +150,8 @@ class Journey:
         return value['error']
 
     def draft(self, brief='Deliver report', criteria='Report has exact requested values', replacement_of=None):
-        args = dict(action='draft', summary='Deliver the requested result',
+        args = dict(action='draft', title='Deliver the requested result',
+                    summary='Deliver the requested result',
                     brief=brief, acceptance_criteria=criteria)
         if replacement_of:
             args['replacement_of'] = replacement_of
@@ -370,7 +371,7 @@ def journey_acceptance(j):
     j.call('notify', **premature)
     j.deliver_notifications()
     assert len(j.sent) == 1
-    assert j.call('notify', action='list')['notifications'][0]['state'] == 'sent'
+    assert j.call('notify', action='list')['notifications']['items'][0]['state'] == 'sent'
 
 
 def journey_restart(j):

@@ -105,13 +105,13 @@ def create_args(req, **extra):
 
 def test_create_with_atomic_parents_and_hold(setup):
     op = operations(setup)
-    parent = op.call(create_args(setup[3]))['task']['id']
+    parent = op.call(create_args(setup[3]))['task_id']
     args = create_args(setup[3], parent_ids=[parent], hold=True)
     args['key'] = 'dependent'
     result = op.call(args)
     kwargs = [call[1] for call in setup[2].calls if call[0] == 'create'][-1]
     assert kwargs['parent_ids'] == [parent] and kwargs['hold'] is True
-    assert result['task']['status'] == 'blocked'
+    assert result['status'] == 'blocked'
     assert result['parents'] == [parent]
 
 
@@ -126,13 +126,14 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     result = op.call(create_args(req))
-    assert result['task']['assignee'] == 'ancor-worker'
-    assert contract()['objective'] in result['task']['body']
-    assert 'Keep exact values' in result['task']['body']
-    assert req['acceptance_criteria'] not in result['task']['body']
-    assert op.call(create_args(req))['task']['id'] == result['task']['id']
+    shown = op.call({'action': 'show', 'task_id': result['task_id']})
+    assert result['assignee'] == 'ancor-worker'
+    assert contract()['objective'] in shown['body']
+    assert 'Keep exact values' in shown['body']
+    assert req['acceptance_criteria'] not in shown['body']
+    assert op.call(create_args(req))['task_id'] == result['task_id']
     assert len(board.tasks) == 1
-    assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': result['task']['id']}]
+    assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': result['task_id']}]
     assert store.get_requirement(req['id'])['status'] == 'active'
 
 
@@ -140,7 +141,8 @@ def test_create_derives_task_text_from_contract_when_body_omitted(setup):
     args = create_args(setup[3])
     del args['body']
     result = operations(setup).call(args)
-    assert 'Task: ' + contract()['objective'] in result['task']['body']
+    shown = operations(setup).call({'action': 'show', 'task_id': result['task_id']})
+    assert 'Task: ' + contract()['objective'] in shown['body']
 
 
 def test_create_requires_a_complete_self_contained_contract(setup):
@@ -163,7 +165,7 @@ def test_create_renders_structured_contract(setup):
         setup[3], contract=contract(inputs=['exact input'], dependencies=['Task A done'],
                                     artifacts=['artifact path'], verification=['check result'],
                                     constraints=['preserve casing'], stop_conditions=['missing approval'])))
-    body = result['task']['body']
+    body = operations(setup).call({'action': 'show', 'task_id': result['task_id']})['body']
     for value in ('Implement the requested result', 'Only the named artifact', 'exact input',
                   'Task A done', 'artifact path', 'check result', 'preserve casing',
                   'missing approval'):
@@ -173,9 +175,9 @@ def test_create_renders_structured_contract(setup):
 def test_scoped_dependencies_across_active_requirements(setup):
     ctx, store, board, req = setup
     op = operations(setup)
-    parent = op.call(create_args(req))['task']['id']
+    parent = op.call(create_args(req))['task_id']
     other = store.confirm(store.create_draft('Other', 'Pass')['id'], 'human:other')
-    child = op.call(create_args(other))['task']['id']
+    child = op.call(create_args(other))['task_id']
     board.tasks[child]['task']['status'] = 'blocked'
     args = dict(action='link', parent_id=parent, child_id=child)
     assert op.call(args)['parents'] == [parent]
@@ -190,9 +192,9 @@ def test_scoped_dependencies_across_active_requirements(setup):
 def test_unlink_obsolete_prerequisite_from_active_child(setup):
     ctx, store, board, req = setup
     op = operations(setup)
-    parent = op.call(create_args(req))['task']['id']
+    parent = op.call(create_args(req))['task_id']
     other = store.confirm(store.create_draft('Other', 'Pass')['id'], 'human:other')
-    child = op.call(create_args(other))['task']['id']
+    child = op.call(create_args(other))['task_id']
     args = dict(action='link', parent_id=parent, child_id=child)
     op.call(args)
     store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'human:change')
@@ -209,12 +211,12 @@ def test_unlink_obsolete_prerequisite_from_active_child(setup):
 def test_revise_is_explicit_reviewed_triage_recovery(setup):
     ctx, store, board, req = setup
     op = operations(setup)
-    tid = op.call(create_args(req))['task']['id']
+    tid = op.call(create_args(req))['task_id']
     board.tasks[tid]['task']['status'] = 'triage'
-    assert op.call({'action': 'show', 'task_id': tid})['task']['status'] == 'triage'
+    assert op.call({'action': 'show', 'task_id': tid})['status'] == 'triage'
     assert not any(call[0] == 'revise' for call in board.calls)
     result = op.call({'action': 'revise', 'task_id': tid, 'reason': 'Coordinator reviewed revised plan'})
-    assert result['task']['status'] == 'ready'
+    assert result['status'] == 'ready'
     assert ('revise', tid, 'Coordinator reviewed revised plan') in board.calls
 
 
@@ -223,7 +225,7 @@ def test_revise_rejects_unsafe_recovery(setup, monkeypatch, fault):
     import os
     ctx, store, board, req = setup
     op = operations(setup)
-    tid = op.call(create_args(req))['task']['id']
+    tid = op.call(create_args(req))['task_id']
     board.tasks[tid]['task']['status'] = 'triage'
     args = dict(action='revise', task_id=tid, reason='Reviewed')
     if fault == 'inactive':
@@ -253,10 +255,12 @@ def test_promote_is_not_exposed(setup):
 def test_edit_keeps_requirement_context_and_association(setup):
     ctx, store, board, req = setup
     op = operations(setup)
-    task = op.call(create_args(req))['task'].copy()
-    args = dict(action='edit', task_id=task['id'], title='Refined', body='New task details', priority=0,
+    created = op.call(create_args(req))
+    task = op.call({'action': 'show', 'task_id': created['task_id']})
+    args = dict(action='edit', task_id=created['task_id'], title='Refined', body='New task details', priority=0,
                 contract=contract())
-    edited = op.call(args)['task']
+    receipt = op.call(args)
+    edited = op.call({'action': 'show', 'task_id': receipt['task_id']})
     assert edited['title'] == 'Refined' and edited['priority'] == 0
     assert NativeBoard.link(edited) == NativeBoard.link(task)
     assert 'Task: New task details' in edited['body']
@@ -270,18 +274,19 @@ def test_edit_keeps_requirement_context_and_association(setup):
 
 def test_edit_body_requires_a_full_contract(setup):
     op = operations(setup)
-    task = op.call(create_args(setup[3]))['task']
+    task = op.call(create_args(setup[3]))
     with pytest.raises(ValueError, match='contract'):
-        op.call(dict(action='edit', task_id=task['id'], body='Changed'))
-    edited = op.call(dict(action='edit', task_id=task['id'], body='Changed',
-                          contract=contract(objective='Replacement objective')))['task']
+        op.call(dict(action='edit', task_id=task['task_id'], body='Changed'))
+    receipt = op.call(dict(action='edit', task_id=task['task_id'], body='Changed',
+                           contract=contract(objective='Replacement objective')))
+    edited = op.call({'action': 'show', 'task_id': receipt['task_id']})
     assert 'Replacement objective' in edited['body'] and 'Task: Changed' in edited['body']
 
 
 @pytest.mark.parametrize('priority', [True, 1.5, '3', None])
 def test_edit_rejects_non_integer_priority(setup, priority):
     op = operations(setup)
-    tid = op.call(create_args(setup[3]))['task']['id']
+    tid = op.call(create_args(setup[3]))['task_id']
     with pytest.raises(ValueError, match='integer'):
         op.call(dict(action='edit', task_id=tid, priority=priority))
 
@@ -305,11 +310,11 @@ def test_new_mutations_are_coordinator_only(setup, action):
 def test_interactor_board_access_is_read_only(setup):
     ctx, store, board, req = setup
     coordinator = operations(setup)
-    tid = coordinator.call(create_args(req))['task']['id']
+    tid = coordinator.call(create_args(req))['task_id']
     ctx.profile_name = 'ancor-interactor'
     op = operations(setup)
-    assert op.call({'action': 'list'})['tasks'][0]['id'] == tid
-    assert op.call({'action': 'show', 'task_id': tid})['task']['id'] == tid
+    assert op.call({'action': 'list'})['items'][0]['id'] == tid
+    assert op.call({'action': 'show', 'task_id': tid})['id'] == tid
     with pytest.raises(PermissionError, match='coordinator'):
         op.call(dict(action='block', task_id=tid, reason='No'))
 
@@ -317,7 +322,7 @@ def test_interactor_board_access_is_read_only(setup):
 @pytest.mark.parametrize('changes', [{}, {'title': ''}, {'body': ''}])
 def test_empty_edits_do_not_mutate(setup, changes):
     op = operations(setup)
-    tid = op.call(create_args(setup[3]))['task']['id']
+    tid = op.call(create_args(setup[3]))['task_id']
     setup[2].calls.clear()
     with pytest.raises(ValueError):
         op.call(dict(action='edit', task_id=tid, **changes))
@@ -327,17 +332,47 @@ def test_empty_edits_do_not_mutate(setup, changes):
 def test_scoped_read_and_mutations(setup):
     ctx, store, board, req = setup
     op = operations(setup)
-    task = op.call(create_args(req))['task']
-    tid = task['id']
-    assert op.call({'action': 'list'})['tasks'][0]['id'] == tid
+    task = op.call(create_args(req))
+    tid = task['task_id']
+    assert op.call({'action': 'list'})['items'][0]['id'] == tid
     assert 'runs' in op.call({'action': 'show', 'task_id': tid})
-    assert op.call({'action': 'block', 'task_id': tid, 'reason': 'Need answer'})['task']['status'] == 'blocked'
+    assert op.call({'action': 'block', 'task_id': tid, 'reason': 'Need answer'})['status'] == 'blocked'
     answer = op.call({'action': 'comment', 'task_id': tid, 'body': 'User answered: use blue'})
-    assert answer['comments'][-1]['body'] == 'User answered: use blue'
-    assert op.call({'action': 'unblock', 'task_id': tid, 'reason': 'Answer recorded'})['task']['status'] == 'ready'
+    assert answer['changed'] == ['comment']
+    shown = op.call({'action': 'show', 'task_id': tid})
+    assert shown['comments']['items'][-1]['body'] == 'User answered: use blue'
+    assert op.call({'action': 'unblock', 'task_id': tid, 'reason': 'Answer recorded'})['status'] == 'ready'
     assert ('unblock', tid, '--reason', 'Answer recorded') in board.calls
     with pytest.raises(ValueError, match='unlinked'):
         op.call({'action': 'block', 'task_id': 'unrelated', 'reason': 'no'})
+
+
+def test_show_and_history_bound_large_task_sections(setup):
+    ctx, store, board, req = setup
+    op = operations(setup)
+    tid = op.call(create_args(req))['task_id']
+    board.tasks[tid]['comments'] = [
+        {'id': index, 'author': 'ancor-coordinator', 'body': f'comment {index}'}
+        for index in range(1, 26)]
+    board.tasks[tid]['events'] = [
+        {'id': index, 'kind': 'test.event'} for index in range(1, 26)]
+    board.tasks[tid]['runs'] = [
+        {'id': index, 'ended_at': index} for index in range(1, 11)]
+
+    shown = op.call({'action': 'show', 'task_id': tid})
+    assert shown['comments']['count'] == 25
+    assert [row['id'] for row in shown['comments']['items']] == list(range(16, 26))
+    assert shown['events']['returned'] == 10
+    assert [row['id'] for row in shown['runs']['items']] == list(range(6, 11))
+
+    page = op.call({'action': 'history', 'task_id': tid,
+                    'kind': 'comments', 'limit': 5})
+    assert page['count'] == 25 and page['returned'] == 5 and page['truncated'] is True
+    assert [row['id'] for row in page['items']] == [21, 22, 23, 24, 25]
+    older = op.call({'action': 'history', 'task_id': tid, 'kind': 'comments',
+                     'limit': 5, 'before_id': 21})
+    assert older['count'] == 20 and older['truncated'] is True
+    assert [row['id'] for row in older['items']] == [16, 17, 18, 19, 20]
 
 
 def test_create_requires_active_requirement_and_coordinator(setup):
@@ -358,17 +393,17 @@ def test_invalidated_worker_does_not_gate_new_work(setup, monkeypatch, target):
     import os
     ctx, store, board, req = setup
     op = operations(setup)
-    tid = op.call(create_args(req))['task']['id']
+    tid = op.call(create_args(req))['task_id']
     board.tasks[tid]['runs'] = [{'id': 1, 'worker_pid': 123, 'ended_at': None}]
     replacement = store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'test-human-2')
     if target == 'independent':
         replacement = store.confirm(store.create_draft('Independent', 'Other tests')['id'], 'test-human-3')
     monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
-    assert op.call(create_args(replacement))['task']['id'] != tid
+    assert op.call(create_args(replacement))['task_id'] != tid
     assert board.show(tid)['status'] == 'running'
     assert not any(call[0] == 'block' for call in board.calls)
     # Stopping affected work remains an explicit coordinator decision.
-    assert op.call({'action': 'block', 'task_id': tid, 'reason': 'Conflicting work'})['task']['status'] == 'blocked'
+    assert op.call({'action': 'block', 'task_id': tid, 'reason': 'Conflicting work'})['status'] == 'blocked'
     with pytest.raises(ValueError, match='active'):
         op.call(create_args(req))
     board.tasks[tid]['runs'] = []
@@ -380,15 +415,15 @@ def test_unblock_is_not_gated_by_other_invalidated_workers(setup, monkeypatch):
     import os
     ctx, store, board, req = setup
     op = operations(setup)
-    old_tid = op.call(create_args(req))['task']['id']
+    old_tid = op.call(create_args(req))['task_id']
     other = store.confirm(store.create_draft('Other', 'Other tests')['id'], 'human:other')
-    tid = op.call(create_args(other))['task']['id']
+    tid = op.call(create_args(other))['task_id']
     op.call({'action': 'block', 'task_id': tid, 'reason': 'Wait for answer'})
     store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'human:change')
     board.tasks[old_tid]['runs'] = [{'worker_pid': 123, 'ended_at': None}]
     monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
     board.calls.clear()
-    assert op.call({'action': 'unblock', 'task_id': tid, 'reason': 'Answered'})['task']['status'] == 'ready'
+    assert op.call({'action': 'unblock', 'task_id': tid, 'reason': 'Answered'})['status'] == 'ready'
     assert board.show(old_tid)['status'] == 'running'
     assert not any(call[0] == 'block' for call in board.calls)
 
@@ -397,7 +432,7 @@ def test_native_metadata_recovers_crash_before_store_link(setup):
     ctx, store, board, req = setup
     task = board.create(req['id'], 1, 'first', title='existing', body='already dispatched', assignee='ancor-worker')
     op = operations(setup)
-    assert op.call({'action': 'comment', 'task_id': task['id'], 'body': 'Recovered'})['task']['id'] == task['id']
+    assert op.call({'action': 'comment', 'task_id': task['id'], 'body': 'Recovered'})['task_id'] == task['id']
     assert store.snapshot()['task_links'][0]['task_id'] == task['id']
 
 
@@ -405,7 +440,7 @@ def test_native_metadata_recovers_crash_before_store_link(setup):
 def test_reads_use_persisted_links_without_reconciliation(setup, monkeypatch, action):
     ctx, store, board, req = setup
     op = operations(setup)
-    linked = op.call(create_args(req))['task']
+    linked = op.call(create_args(req))
     orphan = board.create(req['id'], 1, 'orphan', title='Orphan', body='Unlinked', assignee='ancor-worker')
     before = store.snapshot()
 
@@ -414,9 +449,9 @@ def test_reads_use_persisted_links_without_reconciliation(setup, monkeypatch, ac
 
     monkeypatch.setattr(store, 'link_task', forbidden)
     if action == 'list':
-        assert [item['id'] for item in op.call({'action': action})['tasks']] == [linked['id']]
+        assert [item['id'] for item in op.call({'action': action})['items']] == [linked['task_id']]
     else:
-        assert op.call({'action': action, 'task_id': linked['id']})['task']['id'] == linked['id']
+        assert op.call({'action': action, 'task_id': linked['task_id']})['id'] == linked['task_id']
         with pytest.raises(ValueError, match='unlinked'):
             op.call({'action': action, 'task_id': orphan['id']})
     assert store.snapshot() == before
@@ -425,7 +460,7 @@ def test_reads_use_persisted_links_without_reconciliation(setup, monkeypatch, ac
 def test_unblock_cannot_overlap_its_previous_executor(setup, monkeypatch):
     import os
     op = operations(setup)
-    tid = op.call(create_args(setup[3]))['task']['id']
+    tid = op.call(create_args(setup[3]))['task_id']
     setup[2].tasks[tid]['task']['status'] = 'blocked'
     setup[2].tasks[tid]['runs'] = [{'worker_pid': 234, 'ended_at': 1}]
     monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
@@ -452,7 +487,7 @@ def test_create_uses_configured_worker_and_verifies_readback(setup, existing_ass
             operations(setup).call(create_args(req))
     else:
         result = operations(setup).call(create_args(req))
-        assert result['task']['assignee'] == 'special-worker'
+        assert result['assignee'] == 'special-worker'
     assert [call for call in board.calls if call[0] == 'create'][-1][1]['assignee'] == 'special-worker'
 
 
