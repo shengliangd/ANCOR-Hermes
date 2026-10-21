@@ -4,6 +4,7 @@ description: Durable requirements and interactor/coordinator workflow over nativ
 provides_tools:
   - ancor_requirement
   - ancor_get_context
+  - ancor_ack_events
   - ancor_acceptance
   - ancor_board
   - ancor_notify

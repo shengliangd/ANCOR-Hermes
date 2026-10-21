@@ -76,6 +76,46 @@ def test_ack_rejects_triage_and_host_stalled(tmp_path, monkeypatch):
     assert not [e for e in store.pending_events() if e['kind'] == 'host.stalled']
 
 
+def test_ack_events_is_atomic_idempotent_and_readable_after_ack(tmp_path, monkeypatch):
+    ctx, tools, store, req = registered(tmp_path, monkeypatch)
+    call = lambda name, args: json.loads(tools[name]['handler'](args))
+    first = store.add_event('native.completed', {'task_id': 'task'},
+                            source_key='native:test:ack-1')
+    second = store.add_event('native.completed', {'task_id': 'task'},
+                             source_key='native:test:ack-2')
+
+    missing = call('ancor_ack_events', {'event_ids': [first['id'], 999999]})
+    assert [item['reason'] for item in missing['rejected']] == ['not_found']
+    assert missing['acked'] == []
+    assert not store.events_by_ids([first['id']])[0]['acknowledged']
+
+    acked = call('ancor_ack_events', {
+        'event_ids': [first['id'], second['id']], 'reason': 'fixture handled'})
+    assert acked['acked'] == [first['id'], second['id']]
+    assert acked['rejected'] == []
+    repeated = call('ancor_ack_events', {'event_ids': [first['id']]})
+    assert repeated['already_acked'] == [first['id']]
+    assert repeated['acked'] == []
+
+    read = call('ancor_get_context', {'event_id': first['id']})
+    assert read['event']['id'] == first['id']
+    assert read['event']['acknowledged'] is True
+
+    stalled = store.add_event('host.stalled', {'requirement_id': req['id']},
+                              source_key='stalled:' + req['id'])
+    third = store.add_event('native.completed', {'task_id': 'task'},
+                            source_key='native:test:ack-3')
+    rejected = call('ancor_ack_events', {'event_ids': [stalled['id'], third['id']]})
+    assert [item['reason'] for item in rejected['rejected']] == ['host_owned']
+    assert not store.events_by_ids([third['id']])[0]['acknowledged']
+
+    legacy = store.add_event('native.completed', {'task_id': 'task'},
+                             source_key='native:test:ack-legacy')
+    context = call('ancor_get_context', {'ack_event_ids': [legacy['id']]})
+    assert context['deprecated'] == 'use ancor_ack_events'
+    assert store.events_by_ids([legacy['id']])[0]['acknowledged'] is True
+
+
 def test_ack_does_not_depend_on_question_delivery(tmp_path, monkeypatch):
     ctx, tools, store, req = registered(tmp_path, monkeypatch)
     call = lambda name, args: json.loads(tools[name]['handler'](args))

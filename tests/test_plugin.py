@@ -136,10 +136,14 @@ def test_only_ancor_roles_have_business_tools():
             assert set(tools) == {'ancor_requirement', 'ancor_get_context', 'ancor_board', 'ancor_notify'}
             assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond']
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['list', 'respond']
-            assert set(tools['ancor_get_context']['schema']['parameters']['properties']) == {'requirement_id', 'task_limit'}
+            assert set(tools['ancor_get_context']['schema']['parameters']['properties']) == {
+                'requirement_id', 'task_limit', 'notification_limit',
+                'attention_limit', 'include_done', 'include_archived',
+                'include_closed_notifications'}
             assert tools['ancor_board']['schema']['parameters']['properties']['action']['enum'] == ['list', 'show', 'history']
         elif role == 'ancor-coordinator':
-            assert set(tools) == {'ancor_get_context', 'ancor_acceptance', 'ancor_board', 'ancor_wake', 'ancor_notify'}
+            assert set(tools) == {'ancor_get_context', 'ancor_ack_events', 'ancor_acceptance',
+                                  'ancor_board', 'ancor_wake', 'ancor_notify'}
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
             assert 'contract' in tools['ancor_board']['schema']['parameters']['properties']
         elif role == 'ancor-worker':

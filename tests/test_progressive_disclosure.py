@@ -161,7 +161,7 @@ def test_board_list_prioritizes_live_recent_tasks_before_truncation(tmp_path):
     assert with_archived['items'][-1]['id'] == 'archived'
 
 
-def test_requirement_expansion_hides_archived_tasks(tmp_path, monkeypatch):
+def test_requirement_expansion_keeps_archived_tasks_for_acceptance(tmp_path, monkeypatch):
     tools = {}
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
@@ -185,9 +185,14 @@ def test_requirement_expansion_hides_archived_tasks(tmp_path, monkeypatch):
     ancor.register(ctx)
     expanded = json.loads(tools['ancor_get_context']['handler'](
         {'requirement_id': req['id']}))
-    assert [task['id'] for task in expanded['tasks']['items']] == ['live']
-    assert expanded['tasks']['count'] == 1
+    assert [task['id'] for task in expanded['tasks']['items']] == ['live', 'old']
+    assert expanded['tasks']['count'] == 2
     assert expanded['archived_task_count'] == 1
+    hidden = json.loads(tools['ancor_get_context']['handler'](
+        {'requirement_id': req['id'], 'include_done': False,
+         'include_archived': False}))
+    assert [task['id'] for task in hidden['tasks']['items']] == ['live']
+    assert hidden['counts']['tasks']['terminal'] == 1
 
 
 def test_event_summaries_preview_payload_and_keep_references():
@@ -208,3 +213,54 @@ def test_context_notification_selection_keeps_open_questions_visible():
     assert len(selected) == 20
     assert selected[0]['id'] == 'q-old'
     assert selected[-1]['id'] == 'c24'
+
+
+def test_context_separates_conditions_from_events_and_hides_history_by_default(tmp_path, monkeypatch):
+    tools = {}
+    store_path = tmp_path / 'store.db'
+    config = {'store_path': str(store_path), 'board': 'ancor',
+              'coordinator_profile': 'ancor-coordinator',
+              'human_target': 'test:destination', 'transport_profile': 'default'}
+    ctx = SimpleNamespace(profile_name='ancor-coordinator',
+                          get_config=lambda key, default=None: config.get(key, default),
+                          register_tool=lambda **kw: tools.update({kw['name']: kw}),
+                          register_hook=lambda *args: None,
+                          register_platform_handler=lambda *args: None)
+    store = Store(store_path)
+    req = store.confirm(store.create_draft('Brief', 'Criteria')['id'], 'fixture')
+    store.link_task(req['id'], 'running')
+    store.link_task(req['id'], 'done')
+    store.ack_events([event['id'] for event in store.pending_events()])
+    running = {'id': 'running', 'title': 'Running', 'status': 'running'}
+    done = {'id': 'done', 'title': 'Done', 'status': 'done'}
+    monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [running, done])
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination')
+    box.enqueue('q1', 'question', 'Open question', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='running')
+    box.enqueue('q2', 'question', 'Closed question', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='done')
+    box.close_questions({'q2': 'task_not_blocked'}, closed_by='host')
+    store.add_event('host.stalled', {'requirement_id': req['id']},
+                    source_key='stalled:' + req['id'])
+    native = store.add_event('native.completed', {'task_id': 'done'})
+    ancor.register(ctx)
+    call = lambda args: json.loads(tools['ancor_get_context']['handler'](args))
+
+    overview = call({})
+    assert [task['id'] for task in overview['tasks']['items']] == ['running']
+    assert overview['counts']['tasks']['total'] == 2
+    assert overview['counts']['tasks']['terminal'] == 1
+    assert [row['id'] for row in overview['notifications']['items']] == ['q1']
+    assert overview['counts']['notifications']['closed'] == 1
+    assert [event['id'] for event in overview['pending_events']['items']] == [native['id']]
+    assert [condition['id'] for condition in overview['conditions']] == [
+        'stalled:' + req['id']]
+    assert overview['conditions'][0]['ack_policy'] == 'host_owned'
+    assert overview['tasks']['items'][0]['exact_via']['args']['task_id'] == 'running'
+    assert overview['pending_events']['items'][0]['exact_via']['args']['event_id'] == native['id']
+
+    history = call({'include_done': True, 'include_closed_notifications': True})
+    assert {task['id'] for task in history['tasks']['items']} == {'running', 'done'}
+    assert {row['id'] for row in history['notifications']['items']} == {'q1', 'q2'}

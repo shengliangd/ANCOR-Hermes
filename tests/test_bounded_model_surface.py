@@ -51,12 +51,65 @@ def test_wake_packet_excludes_full_briefs_and_bodies_under_incident_fixture(tmp_
     host.tasks = tasks
     packet = host.wake_packet()
     encoded = json.dumps(packet, ensure_ascii=False)
-    assert len(encoded) < 12000
+    assert len(encoded) < 8192
     assert 'FULL BRIEF' not in encoded
     assert 'FULL CRITERIA' not in encoded
     assert 'FULL TASK BODY' not in encoded
     assert ('FULL MESSAGE ' * 100) not in encoded
     assert 'acceptances' not in packet
+
+
+def test_default_overview_is_bounded_under_history_heavy_fixture(tmp_path, monkeypatch):
+    tools = {}
+    config = {'store_path': str(tmp_path / 'store.db'), 'board': 'ancor',
+              'coordinator_profile': 'ancor-coordinator',
+              'human_target': 'test:destination', 'transport_profile': 'default'}
+    ctx = SimpleNamespace(
+        profile_name='ancor-coordinator',
+        get_config=lambda key, default=None: config.get(key, default),
+        register_tool=lambda **kw: tools.update({kw['name']: kw}),
+        register_hook=lambda *args: None,
+        register_platform_handler=lambda *args: None)
+    store = Store(config['store_path'])
+    requirement = store.confirm(store.create_draft(
+        'BRIEF ' * 2000, 'CRITERIA ' * 2000, title='Bounded overview')['id'],
+        'human:overview')
+    tasks = []
+    for index in range(90):
+        status = 'done' if index < 70 else 'running'
+        task = {'id': f't{index}', 'title': f'Task {index}', 'status': status,
+                'assignee': 'ancor-worker', 'created_at': index}
+        if index >= 80:
+            task['archived_at'] = 100
+            task['status'] = 'done'
+        store.link_task(requirement['id'], task['id'])
+        tasks.append(task)
+    box = NotificationOutbox(str(store.path) + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination')
+    for index in range(20):
+        box.enqueue(f'n{index}', 'question', 'Message ' * 200,
+                    actor='ancor-coordinator',
+                    requirement_id=requirement['id'], task_id=f'question-task-{index}')
+        if index < 14:
+            box.close_questions({f'n{index}': 'fixture history'}, closed_by='host')
+    monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: tasks)
+    ancor.register(ctx)
+
+    result = json.loads(tools['ancor_get_context']['handler']({}))
+    encoded = json.dumps(result, ensure_ascii=False)
+    assert len(encoded) < 10240, len(encoded)
+    assert result['tasks']['count'] == 10
+    assert result['counts']['tasks']['total'] == 90
+    assert result['counts']['tasks']['terminal'] == 80
+    assert result['notifications']['count'] == 6
+    assert result['counts']['notifications']['closed'] == 14
+    assert {item['kind'] for item in result['omitted']} == {
+        'tasks', 'notifications'}
+    omitted = {(item['kind'], item['reason']): item['count']
+               for item in result['omitted']}
+    assert omitted[('tasks', 'done')] == 70
+    assert omitted[('tasks', 'archived')] == 10
 
 
 def test_requirement_expansion_scopes_every_nested_collection(tmp_path, monkeypatch):

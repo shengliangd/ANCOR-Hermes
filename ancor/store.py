@@ -263,6 +263,18 @@ class Store:
             return [self._event(row) for row in db.execute(
                 'SELECT * FROM events WHERE acknowledged = 0 ORDER BY id')]
 
+    def events_by_ids(self, event_ids):
+        """Return retained events by ID, including already acknowledged rows."""
+        identifiers = list(dict.fromkeys(event_ids))
+        if not identifiers:
+            return []
+        placeholders = ','.join('?' for _ in identifiers)
+        with self._transaction() as db:
+            rows = db.execute(
+                f'SELECT * FROM events WHERE id IN ({placeholders}) ORDER BY id',
+                identifiers).fetchall()
+        return [self._event(row) for row in rows]
+
     def ack_events(self, event_ids):
         with self._transaction() as db:
             db.executemany('UPDATE events SET acknowledged = 1 WHERE id = ?',

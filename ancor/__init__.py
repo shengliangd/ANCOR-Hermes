@@ -4,11 +4,14 @@ import json
 import logging
 import os
 
-from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, bounded_latest, collection,
-                    draft_summary, event_summaries,
-                    notification_detail, notification_selection,
-                    notification_summary, requirement_detail, requirement_ref,
-                    transition_summary)
+from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
+                    actionable_notifications, attention_items, bounded_latest,
+                    collection, conditions_with_state, draft_summary,
+                    event_counts, event_summaries, host_condition_state,
+                    is_open_question, notification_counts, notification_detail,
+                    notification_selection, notification_summary, omitted_groups,
+                    requirement_counts, requirement_detail, requirement_ref,
+                    select_tasks, task_counts, task_exact_via, transition_summary)
 
 log = logging.getLogger(__name__)
 
@@ -199,7 +202,7 @@ def register(ctx, *, scan_runner=None):
             event = pending.get(identifier)
             if event is None:
                 continue
-            if event['kind'] == 'host.stalled':
+            if event['kind'] in {'host.stalled', 'host.liveness'}:
                 raise ValueError(f'event {identifier} is host-owned and clears only when the requirement recovers')
             payload = event.get('payload') or {}
             task_id = payload.get('task_id')
@@ -207,17 +210,95 @@ def register(ctx, *, scan_runner=None):
             if event['kind'] == 'native.block_loop_detected' and task.get('status') == 'triage':
                 raise ValueError(f'event {identifier} cannot be acknowledged while {task_id} is in triage')
 
+    def ack_rejections(event_ids, retained, tasks):
+        """Validate an entire ack batch without writing any acknowledgement."""
+        by_id = {event['id']: event for event in retained}
+        task_by_id = {task['id']: task for task in tasks or ()}
+        rejected = []
+        for identifier in event_ids:
+            event = by_id.get(identifier)
+            if event is None:
+                rejected.append({'id': identifier, 'reason': 'not_found',
+                                 'message': f'event {identifier} does not exist'})
+                continue
+            if event['kind'] in {'host.stalled', 'host.liveness'}:
+                rejected.append({
+                    'id': identifier, 'reason': 'host_owned',
+                    'message': f'event {identifier} is host-owned and clears only through host state'})
+                continue
+            payload = event.get('payload') or {}
+            task_id = payload.get('task_id')
+            task = task_by_id.get(task_id, {})
+            if event['kind'] == 'native.block_loop_detected' and task.get('status') == 'triage':
+                rejected.append({
+                    'id': identifier, 'reason': 'triage_block_loop',
+                    'message': f'event {identifier} cannot be acknowledged while {task_id} is in triage'})
+        return rejected
+
+    def ack_events(args, **_native):
+        event_ids = args.get('event_ids')
+        if (not isinstance(event_ids, list) or not event_ids
+                or any(type(identifier) is not int or identifier < 1
+                       for identifier in event_ids)):
+            raise ValueError('event_ids must contain positive integer IDs')
+        retained = service.store.events_by_ids(event_ids)
+        tasks = operations.tasks(include_archived=True)
+        rejected = ack_rejections(event_ids, retained, tasks)
+        if rejected:
+            return {'acked': [], 'already_acked': [], 'rejected': rejected,
+                    'remaining_pending': len(service.store.pending_events())}
+        by_id = {event['id']: event for event in retained}
+        acked, already = [], []
+        for identifier in dict.fromkeys(event_ids):
+            if by_id[identifier]['acknowledged']:
+                already.append(identifier)
+            else:
+                acked.append(identifier)
+        if acked:
+            service.store.ack_events(acked)
+        reason = args.get('reason')
+        if reason is not None:
+            log.info('ANCOR acknowledged %d event(s): %s', len(acked), reason)
+        result = {'acked': acked, 'already_acked': already, 'rejected': [],
+                  'remaining_pending': len(service.store.pending_events())}
+        if reason is not None:
+            result['reason'] = reason
+        return result
+
     def get_context(args, **_native):
         requirement_id = args.get('requirement_id')
-        task_limit = args.get('task_limit', 100)
+        task_limit = args.get('task_limit', 200 if requirement_id else 50)
         if type(task_limit) is not int or not 1 <= task_limit <= 200:
             raise ValueError('task_limit must be an integer between 1 and 200')
+        notification_limit = args.get('notification_limit', 10)
+        if type(notification_limit) is not int or not 1 <= notification_limit <= 200:
+            raise ValueError('notification_limit must be an integer between 1 and 200')
+        attention_limit = args.get('attention_limit', 8)
+        if type(attention_limit) is not int or not 0 <= attention_limit <= 50:
+            raise ValueError('attention_limit must be an integer between 0 and 50')
         event_limit = args.get('event_limit', 100)
         if type(event_limit) is not int or not 1 <= event_limit <= 500:
             raise ValueError('event_limit must be an integer between 1 and 500')
         event_id = args.get('event_id')
         if event_id is not None and (type(event_id) is not int or event_id < 1):
             raise ValueError('event_id must be a positive integer')
+        include_done = args.get('include_done', False)
+        include_archived = args.get('include_archived', False)
+        include_closed_notifications = args.get('include_closed_notifications', False)
+        for name, value in (
+                ('include_done', include_done),
+                ('include_archived', include_archived),
+                ('include_closed_notifications', include_closed_notifications)):
+            if type(value) is not bool:
+                raise ValueError(f'{name} must be a boolean')
+        if event_id is not None:
+            if not coordinator:
+                raise PermissionError('coordinator profile required to inspect events')
+            retained = service.store.events_by_ids([event_id])
+            if not retained:
+                raise KeyError(event_id)
+            return {'event': retained[0],
+                    'expand': 'Use ancor_board show with the payload task_id for full task evidence.'}
         try:
             notification_rows = notifications()
         except ValueError as exc:
@@ -234,15 +315,6 @@ def register(ctx, *, scan_runner=None):
         if args.get('ack_event_ids'):
             validate_acks(args['ack_event_ids'], service.store.snapshot(), all_tasks or [])
         data = service.get_context(args if coordinator else {})
-        if event_id is not None:
-            if not coordinator:
-                raise PermissionError('coordinator profile required to inspect events')
-            event = next((row for row in data['pending_events']
-                          if row['id'] == event_id), None)
-            if event is None:
-                raise KeyError(event_id)
-            return {'event': event,
-                    'expand': 'Use ancor_board show with the payload task_id for full task evidence.'}
         from .scheduling import Scheduling
         observation = Scheduling(service.store).observation(
             data, all_tasks, notification_rows)
@@ -250,19 +322,27 @@ def register(ctx, *, scan_runner=None):
         progression = {item['requirement_id']: item
                        for item in observation['progression']}
         expand = ('Call ancor_get_context with requirement_id=<id> for exact requirement text'
-                  + (', or event_id=<id> for one complete event' if coordinator else '')
+                  + (', event_id=<id> for one complete event, or ancor_ack_events for handled IDs' if coordinator else '')
                   + '; call ancor_board show with task_id=<id> for the full contract, '
                     'comments, runs and events.')
+        deprecated = ({'deprecated': 'use ancor_ack_events'}
+                      if args.get('ack_event_ids') else {})
+        ordinary_events = [event for event in data['pending_events']
+                           if event['kind'] != 'host.stalled']
+        conditions = conditions_with_state(
+            observation['progression'], host_condition_state(service.store.path))
         if requirement_id:
             requirement = service.store.get_requirement(requirement_id)
             linked = [task for task in all_tasks or []
                       if task.get('requirement_id') == requirement_id]
-            active = [task for task in linked if not task.get('archived')]
-            visible = active[:task_limit]
+            selected_tasks = select_tasks(
+                linked, include_done=args.get('include_done', True),
+                include_archived=args.get('include_archived', True))
+            visible = selected_tasks[:task_limit]
             relevant = [row for row in notification_rows
                         if row.get('requirement_id') == requirement_id]
             task_ids = {task['id'] for task in linked}
-            events = [event for event in data['pending_events']
+            events = [event for event in ordinary_events
                       if (event.get('payload') or {}).get('requirement_id') == requirement_id
                       or (event.get('payload') or {}).get('task_id') in task_ids]
             filtered = {**data, 'requirements': [requirement],
@@ -270,54 +350,92 @@ def register(ctx, *, scan_runner=None):
                                        if link['requirement_id'] == requirement_id]}
             scoped = Scheduling(service.store).observation(
                 filtered, linked, notification_rows)
+            acceptance_events = [event for event in service.store.acceptances()
+                                 if (event.get('payload') or {}).get('requirement_id') == requirement_id]
+            selected_notifications = notification_selection(relevant, notification_limit)
             result = {
                 'requirement': requirement_detail(
                     requirement, drafts_by_id.get(requirement['draft_id'])),
-                'tasks': collection(visible, total=len(active)),
-                'archived_task_count': len(linked) - len(active),
+                'tasks': collection(
+                    [{**task, 'exact_via': task_exact_via(task['id'])} for task in visible],
+                    total=len(selected_tasks)),
+                'counts': {'tasks': task_counts(linked),
+                           'notifications': notification_counts(relevant)},
+                'acceptance': acceptance_ref(
+                    requirement, linked,
+                    acceptance_events[-1] if acceptance_events else None),
+                'archived_task_count': sum(
+                    1 for task in linked
+                    if task.get('archived_at') or task.get('archived')),
                 'notifications': collection(
-                    [notification_summary(row) for row in notification_selection(relevant)],
+                    [notification_summary(row, exact_via=True)
+                     for row in selected_notifications],
                     total=len(relevant)),
+                'omitted': omitted_groups(linked, relevant),
                 'open_question_count': sum(
-                    row.get('kind') == 'question' and row.get('answer') is None
-                    for row in relevant),
+                    is_open_question(row) for row in relevant),
                 'transitions': bounded_latest(
                     [transition_summary(event) for event in
                      service.store.requirement_transitions(requirement_id)],
                     TRANSITION_LIMIT),
+                'conditions': [condition for condition in conditions
+                               if condition['requirement_id'] == requirement_id],
                 'progression': scoped['progression'],
                 'liveness': scoped['liveness'],
                 'scheduled_wakes': scoped['scheduled_wakes'],
                 'expand': expand,
                 **extra,
+                **deprecated,
             }
             if coordinator:
                 result['pending_events'] = collection(
-                    event_summaries(events, event_limit), total=len(events))
+                    event_summaries(events, event_limit, exact_via=True), total=len(events))
             else:
                 result['pending_events'] = collection([], total=len(events))
             return result
         confirmed_drafts = {requirement['draft_id'] for requirement in data['requirements']}
         open_requirements = [requirement for requirement in data['requirements']
                              if requirement['status'] in {'active', 'paused'}]
-        visible = [task for task in all_tasks or [] if not task.get('archived')]
+        selected_tasks = select_tasks(
+            all_tasks or [], include_done=include_done,
+            include_archived=include_archived)
+        visible = selected_tasks[:task_limit]
+        notification_source = (notification_rows if include_closed_notifications
+                               else actionable_notifications(notification_rows))
+        selected_notifications = notification_selection(
+            notification_source, notification_limit)
         result = {
             'requirements': collection(
-                [requirement_ref(requirement, progression.get(requirement['id']))
+                [requirement_ref(requirement, progression.get(requirement['id']),
+                                 exact_via=True)
                  for requirement in open_requirements]),
-            'tasks': collection(visible[:task_limit], total=len(visible)),
+            'tasks': collection(
+                [{**task, 'exact_via': task_exact_via(task['id'])} for task in visible],
+                total=len(selected_tasks)),
+            'counts': {
+                'requirements': requirement_counts(data['requirements']),
+                'tasks': task_counts(all_tasks or []),
+                'events': event_counts(ordinary_events),
+                'notifications': notification_counts(notification_rows),
+            },
+            'attention': attention_items(
+                observation['progression'], tasks=all_tasks,
+                notifications=actionable_notifications(notification_rows),
+                events=ordinary_events, limit=attention_limit),
+            'omitted': omitted_groups(all_tasks or [], notification_rows),
+            'conditions': conditions,
             'notifications': collection(
-                [notification_summary(row) for row
-                 in notification_selection(notification_rows)],
-                total=len(notification_rows)),
+                [notification_summary(row, exact_via=True)
+                 for row in selected_notifications],
+                total=len(notification_source)),
             'open_question_count': sum(
-                row.get('kind') == 'question' and row.get('answer') is None
-                for row in notification_rows),
+                is_open_question(row) for row in notification_rows),
             'progression': observation['progression'],
             'liveness': observation['liveness'],
             'scheduled_wakes': observation['scheduled_wakes'],
             'expand': expand,
             **extra,
+            **deprecated,
         }
         if interactor:
             drafts = [draft_summary(draft) for draft in data['drafts']
@@ -326,10 +444,10 @@ def register(ctx, *, scan_runner=None):
                 drafts[:DRAFT_LIMIT], total=len(drafts))
         if coordinator:
             result['pending_events'] = collection(
-                event_summaries(data['pending_events'], event_limit),
-                total=len(data['pending_events']))
+                event_summaries(ordinary_events, event_limit, exact_via=True),
+                total=len(ordinary_events))
         else:
-            result['pending_events'] = collection([], total=len(data['pending_events']))
+            result['pending_events'] = collection([], total=len(ordinary_events))
         return result
 
     def notify(args, **native):
@@ -457,7 +575,8 @@ def register(ctx, *, scan_runner=None):
                 raise ValueError('all linked native tasks must be done before acceptance')
         return service.acceptance(args)
 
-    methods = {'requirement': requirement, 'get_context': get_context, 'notify': notify,
+    methods = {'requirement': requirement, 'get_context': get_context,
+               'ack_events': ack_events, 'notify': notify,
                'acceptance': acceptance, 'board': board_action, 'wake': wake}
     if interactor:
         ctx.register_hook('pre_tool_call', service.pre_tool_call)
@@ -502,9 +621,14 @@ def register(ctx, *, scan_runner=None):
                  'requirement_ids': {'type': 'array', 'items': {'type': 'string'}},
                  'reason': {'type': 'string'}, 'body': {'type': 'string'}}, ['action']),
             'ancor_get_context': (
-                'Read a compact ANCOR overview: open draft previews, requirement title references, linked task references, notifications and health. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
+                'Read a compact ANCOR overview: open draft previews, requirement title references, open task references, counts, attention items, open questions and health. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
                 {'requirement_id': {'type': 'string'},
-                 'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, []),
+                 'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
+                 'include_done': {'type': 'boolean'},
+                 'include_archived': {'type': 'boolean'},
+                 'include_closed_notifications': {'type': 'boolean'}}, []),
             'ancor_board': (
                 'Read linked native tasks. list returns compact summaries and accepts requirement_id, status, limit and include_archived filters; show returns one card with bounded recent history; history expands comments, events or runs. This role cannot mutate the board.',
                 {'action': {'type': 'string', 'enum': ['list', 'show', 'history']},
@@ -558,12 +682,22 @@ def register(ctx, *, scan_runner=None):
                     ('requirement_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'body', 'reason')}},
                 ['action']),
             'ancor_get_context': (
-                'Read a compact coordination snapshot: pending event summaries, requirement title references, linked task references, notifications and health for active or paused requirements. Payloads are previews; pass requirement_id for exact requirement text, ancor_board show for a full task, and ancor_notify id for one full notification. Raise event_limit for a larger event batch and pass event_id to read one complete payload. Acknowledge only explicit event IDs actually handled.',
+                'Read a compact coordination snapshot: counts, attention items, open task references, open questions, host conditions, pending event previews and health for active or paused requirements. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed; set include_done, include_archived or include_closed_notifications only when history is needed. Payloads are previews; pass requirement_id for exact requirement text, ancor_board show for a full task, and ancor_notify id for one full notification. Pass event_id to read one complete event, including one already acknowledged. Use ancor_ack_events for handled IDs; ack_event_ids is deprecated.',
                 {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}},
                  'requirement_id': {'type': 'string'},
+                 'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
+                 'include_done': {'type': 'boolean'},
+                 'include_archived': {'type': 'boolean'},
+                 'include_closed_notifications': {'type': 'boolean'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'event_limit': {'type': 'integer', 'minimum': 1, 'maximum': 500},
                  'event_id': {'type': 'integer', 'minimum': 1}}, []),
+            'ancor_ack_events': (
+                'Atomically acknowledge durable event IDs after acting on them. The whole batch is rejected without writing if any ID is missing, host-owned (host.stalled or host.liveness), or blocked by a triage card. Repeating an acknowledged ID is idempotent and returns it in already_acked.',
+                {'event_ids': {'type': 'array', 'minItems': 1,
+                               'items': {'type': 'integer', 'minimum': 1}},
+                 'reason': {'type': 'string'}}, ['event_ids']),
             'ancor_acceptance': (
                 'Record independent coordinator verification against exact requirement criteria, or reject with a reason.',
                 {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['accept', 'reject']},
@@ -593,6 +727,7 @@ def register(ctx, *, scan_runner=None):
                 if ctx.profile_name != allowed:
                     raise PermissionError('ANCOR role profile required')
                 mutation = (_name == 'ancor_acceptance'
+                            or _name == 'ancor_ack_events'
                             or (_name == 'ancor_wake' and args.get('action') != 'list')
                             or (_name == 'ancor_notify' and args.get('action') == 'send')
                             or (_name == 'ancor_board' and args.get('action') not in {'list', 'show'})

@@ -327,7 +327,10 @@ Acceptance criteria for recovery:
   task with a delivered unanswered human question. Triage, stale heartbeat,
   blocked without an open question, and blocked after its question was answered
   are stalled. Scheduled wakes are timers. `host.stalled` is host-owned, is never
-  manually acknowledged, and clears only when the requirement recovers.
+  manually acknowledged, and clears only when the requirement recovers. The host
+  keeps its condition ledger (`reason`, `since`, `generation`, `last_woken_at`) in
+  `requirements.db.host.json`; an unchanged condition wakes at most once per hour,
+  while a reason change resets the backoff. Ordinary new events do not reset it.
 
 These are durable wake/reconciliation guarantees, not guarantees that an arbitrary
 model successfully completes work. Recovery does not infer acceptance or delivery.

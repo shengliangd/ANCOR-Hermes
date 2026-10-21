@@ -72,10 +72,19 @@ only identity, title, status, replacement and health; they never contain briefs 
 acceptance criteria. Board lists omit card bodies and history, notifications carry
 bounded previews, and pending events carry a payload preview plus stable IDs.
 
+The default overview also suppresses history rather than merely truncating it:
+terminal tasks are excluded unless `include_done` or `include_archived` is set,
+and notifications default to unresolved questions unless
+`include_closed_notifications` is set. `counts` still accounts for every source row,
+`omitted` names each excluded history bucket with an executable follow-up query, and
+`attention` is a short priority-ordered discovery list. Host-owned stalled work is
+returned under `conditions`, never duplicated as an ordinary pending event.
+
 Expansion is explicit and bounded:
 
-- `ancor_get_context(requirement_id=...)` returns one requirement's exact brief and acceptance criteria, plus scoped and bounded linked collections.
-- `ancor_get_context(event_id=...)` returns one complete pending event payload.
+- `ancor_get_context(requirement_id=...)` returns one requirement's exact brief and acceptance criteria, its acceptance status, and all linked tasks by default, including done and archived work needed for verification.
+- `ancor_get_context(event_id=...)` returns one complete pending or already acknowledged event payload without changing its acknowledgement state.
+- `ancor_ack_events(event_ids=[...])` atomically acknowledges handled event IDs. Any missing, host-owned or triage-blocked ID rejects the whole batch; repeated IDs are idempotent.
 - `ancor_board show(task_id=...)` returns one full card with contract, comments, runs and events.
 - `ancor_board history(task_id=..., kind=...)` pages one card's comments, events or runs.
 - `ancor_notify list(requirement_id=...)` scopes the notification history; adding `id` returns one full notification.
@@ -86,8 +95,11 @@ Unanswered questions stay visible ahead of recent completion notices, and live o
 tasks sort ahead of archived history.
 
 The wake packet follows the same rule: requirements are title references, tasks are
-card references, invalidated work carries a bounded reason preview, and no full brief,
-task body or notification message is copied into the prompt.
+non-terminal card references, invalidated work carries a bounded reason preview, and
+no full brief, task body or notification message is copied into the prompt. Stalled
+requirements appear as host conditions with `reason`, `since`, `generation` and
+`last_woken_at`; an unchanged condition is not repeated in a wake more than once per
+hour. Other new events do not reset that backoff.
 
 ## Health states
 
@@ -98,8 +110,9 @@ question. `paused` is a deliberate resting state, not stalled and not liveness. 
 requirements, everything else is `stalled`: triage, stale heartbeat, blocked without an
 open question, blocked after its question was answered or withdrawn, unconfirmed delivery,
 no work, or acceptance pending. A scheduled wake is a timer, not progress. The host
-publishes a `host.stalled` condition event that cannot be acknowledged and clears only when
-real work recovers.
+retains one `host.stalled` condition per requirement in `requirements.db.host.json` and
+surfaces it through `conditions`, not as an ordinary event. It cannot be acknowledged,
+clears only when real work recovers, and increments `generation` when the reason changes.
 
 ## Guarantee boundaries
 
