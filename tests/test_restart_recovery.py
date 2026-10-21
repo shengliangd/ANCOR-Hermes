@@ -170,7 +170,9 @@ def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state)
     events = host.pending(32)
     assert bool(events) == (state != 'sent')
     if state != 'sent':
-        assert host.wake_packet()['notifications']['items'][0]['state'] == state
+        packet = host.wake_packet()
+        assert packet['notifications']['items'] == []
+        assert packet['notification_counts']['delivery_issues'] == 1
         store.ack_events([e['id'] for e in events])
     for _ in range(5):
         assert host.pending(32) == []
@@ -254,7 +256,8 @@ def test_confirmed_demand_restart_requires_no_resubmit(tmp_path, acknowledged):
     assert [row['id'] for row in data['snapshot']['requirements']['items']] == [req['id']]
     kinds = [e['kind'] for e in data['events']]
     assert ('requirement.confirmed' in kinds) == (not acknowledged)
-    assert 'host.stalled' in kinds
+    assert data['snapshot']['conditions']['count'] == 1
+    assert data['snapshot']['conditions']['items'][0]['reason'] == 'no_work'
     assert ('host.recovery' in kinds) == acknowledged
 
 

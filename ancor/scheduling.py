@@ -10,6 +10,7 @@ class Scheduling:
     INTERVAL = 7200
     HEARTBEAT_STALE_SECONDS = 3600
     DELIVERY_GRACE_SECONDS = 210
+    PROGRESSION_TASK_LIMIT = 8
 
     def __init__(self, store, clock=time.time):
         self.store, self.clock = store, clock
@@ -238,6 +239,13 @@ class Scheduling:
             reason = 'no_work' if not items else 'no_active_task'
             results.append({**base, 'state': 'stalled', 'reason': reason,
                             'waiting_on': None, 'task_ids': []})
+        for result in results:
+            if len(result['tasks']) > self.PROGRESSION_TASK_LIMIT:
+                result['tasks'] = result['tasks'][:self.PROGRESSION_TASK_LIMIT]
+                result['tasks_truncated'] = True
+            if len(result['task_ids']) > self.PROGRESSION_TASK_LIMIT:
+                result['task_ids'] = result['task_ids'][:self.PROGRESSION_TASK_LIMIT]
+                result['task_ids_truncated'] = True
         return results
 
     def sync_health(self, data, tasks, notifications):
@@ -252,6 +260,7 @@ class Scheduling:
                                   "WHERE kind='host.stalled' AND acknowledged=0").fetchall():
                 if row['source_key'] not in {'stalled:' + rid for rid in stalled}:
                     db.execute('UPDATE events SET acknowledged=1 WHERE id=?', (row['id'],))
+        return states
 
     def observation(self, data, tasks=(), notifications=None):
         wakes = self.pending_wakes()

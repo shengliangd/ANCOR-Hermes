@@ -16,10 +16,15 @@ import time
 from .board import NativeBoard
 from .runtime import Coordinator
 from .store import Store
-from .views import (collection, notification_selection, notification_summary,
-                    preview, requirement_ref, task_ref)
+from .views import (actionable_notifications, collection,
+                    conditions_with_state, is_terminal_task,
+                    notification_counts, notification_selection,
+                    notification_summary, preview, requirement_ref, task_counts,
+                    task_ref)
 
 log = logging.getLogger(__name__)
+
+CONDITION_BACKOFF_SECONDS = 3600
 
 
 def child_environment(environ=None):
@@ -79,6 +84,38 @@ class Host:
         temporary.write_text(json.dumps(state))
         temporary.replace(self.state_path)
 
+    def update_conditions(self, states):
+        """Retain one backoff ledger entry per stalled requirement."""
+        state = self.state()
+        conditions = state.get('conditions')
+        if not isinstance(conditions, dict):
+            conditions = state['conditions'] = {}
+        stalled = {item['requirement_id']: item.get('reason')
+                   for item in states if item.get('state') == 'stalled'
+                   and item.get('requirement_id')}
+        now = self.clock()
+        changed = False
+        for requirement_id, reason in stalled.items():
+            key = 'stalled:' + requirement_id
+            current = conditions.get(key)
+            if current is None:
+                conditions[key] = {'reason': reason, 'since': now, 'generation': 1,
+                                   'last_woken_at': None}
+                changed = True
+            elif current.get('reason') != reason:
+                conditions[key] = {
+                    'reason': reason, 'since': now,
+                    'generation': int(current.get('generation') or 0) + 1,
+                    'last_woken_at': None}
+                changed = True
+        for key in list(conditions):
+            if key.startswith('stalled:') and key[8:] not in stalled:
+                del conditions[key]
+                changed = True
+        if changed:
+            self.save(state)
+        return state
+
     def scan(self):
         self.scheduling.scan()
         snapshot = self.store.snapshot()
@@ -98,7 +135,8 @@ class Host:
                 tracked.add(task['id'])
         notifications = self.close_stale_notifications(snapshot)
         if not tracked:
-            self.scheduling.sync_health(snapshot, self.tasks, notifications)
+            states = self.scheduling.sync_health(snapshot, self.tasks, notifications)
+            self.update_conditions(states)
             return
         if self.db_path is None:
             from hermes_cli.kanban_db import kanban_db_path
@@ -136,7 +174,9 @@ class Host:
                 cursors[task_id] = event['id']
             if events:
                 self.save(state)
-        self.scheduling.sync_health(self.store.snapshot(), self.tasks, notifications)
+        states = self.scheduling.sync_health(
+            self.store.snapshot(), self.tasks, notifications)
+        self.update_conditions(states)
 
     def notification_outbox(self):
         from .notification import NotificationOutbox
@@ -216,13 +256,28 @@ class Host:
                               'No automatic stop: the coordinator decides how to resolve invalidated tasks.'})
             self.startup = False
         pending = self.store.pending_events()
+        state = self.state()
+        conditions = state.get('conditions')
+        conditions = conditions if isinstance(conditions, dict) else {}
+        stalled_events = [event for event in pending if event['kind'] == 'host.stalled']
+        ordinary = [event for event in pending if event['kind'] != 'host.stalled']
+        now = self.clock()
+        due_conditions = []
+        for event in stalled_events:
+            key = event.get('source_key')
+            condition = conditions.get(key) if key else None
+            last = condition.get('last_woken_at') if condition else None
+            if condition is None or last is None or now - float(last) >= CONDITION_BACKOFF_SECONDS:
+                due_conditions.append(event)
         # Reserve one slot for newest input: a full unchanged head batch must
         # not hide human replies/completions behind its hour-long cooldown.
-        events = pending[:limit] if len(pending) <= limit else pending[:limit - 1] + pending[-1:]
-        # Reserve slots for the two host-owned conditions even behind a large
-        # input backlog: stalled work is more important than ordinary events.
-        reserved = [e for kind in ('host.stalled', 'host.liveness')
-                    for e in [next((row for row in pending if row['kind'] == kind), None)] if e]
+        events = (ordinary[:limit] if len(ordinary) <= limit
+                  else ordinary[:limit - 1] + ordinary[-1:])
+        # Reserve slots for due stalled conditions and liveness even behind a
+        # large input backlog. A recovering condition simply disappears.
+        reserved = due_conditions + [
+            next((row for row in pending if row['kind'] == 'host.liveness'), None)]
+        reserved = [event for event in reserved if event is not None]
         missing = [event for event in reserved if event not in events]
         if missing:
             events = events[:max(0, limit - len(missing))] + missing
@@ -230,7 +285,6 @@ class Host:
         if not events:
             return []
         signature = hashlib.sha256(json.dumps([e['id'] for e in events]).encode()).hexdigest()
-        state = self.state()
         if state.get('batch') != signature:
             state.update(batch=signature, attempts=0, retry_at=0)
         if self.clock() < state.get('retry_at', 0):
@@ -241,6 +295,9 @@ class Host:
             self.save(state)
             return []
         state['attempts'] = state.get('attempts', 0) + 1
+        for event in events:
+            if event['kind'] == 'host.stalled' and event.get('source_key') in conditions:
+                conditions[event['source_key']]['last_woken_at'] = now
         self.save(state)
         return events
 
@@ -307,20 +364,28 @@ class Host:
         titles = {r['id']: r['title'] for r in data['requirements']}
         links = {link['task_id']: link['requirement_id'] for link in data['task_links']
                  if link['requirement_id'] in relevant}
+        linked_tasks = [task for task in self.tasks if task['id'] in links]
         board = [task_ref(task, links[task['id']], titles.get(links[task['id']]))
-                 for task in self.tasks if task['id'] in links]
-        visible_notifications = [n for n in notifications if n['state'] != 'sent' or
-                                 (n['kind'] == 'question' and n['answer'] is None
-                                  and n.get('closed_at') is None)]
-        selected = notification_selection(visible_notifications)
+                 for task in linked_tasks if not is_terminal_task(task)]
+        visible_notifications = actionable_notifications(notifications)
+        selected = notification_selection(visible_notifications, 10)
+        condition_state = self.state().get('conditions')
+        conditions = conditions_with_state(
+            observation['progression'],
+            condition_state if isinstance(condition_state, dict) else {})
+        for condition in conditions:
+            condition['requirement_title'] = titles.get(condition['requirement_id'])
         return {
             'requirements': collection(
                 [requirement_ref(r, progression.get(r['id'])) for r in requirements]),
             'invalidated_tasks': collection(self.invalidated_tasks(data)),
+            'conditions': collection(conditions),
             'notifications': collection(
                 [notification_summary(row) for row in selected],
                 total=len(visible_notifications)),
+            'notification_counts': notification_counts(notifications),
             'board': collection(board),
+            'board_counts': task_counts(linked_tasks),
             'scheduled_wakes': observation['scheduled_wakes'],
             'progression': observation['progression'],
             'liveness': observation['liveness'],

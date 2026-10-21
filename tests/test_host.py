@@ -77,7 +77,8 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     assert event['source_key'] == 'native:test-board:17'
     assert 'attention' in event['payload_preview']
     assert event['task_id'] == 't1'
-    assert payload['snapshot']['board']['items'][0]['status'] == 'done'
+    assert payload['snapshot']['board']['items'] == []
+    assert payload['snapshot']['board_counts']['by_status']['done'] == 1
     assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': 't1'}]
     assert store.pending_events()  # successful exit is NOT an ack
     restarted = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
@@ -280,6 +281,48 @@ def test_paused_requirement_remains_visible_without_liveness(tmp_path):
     assert snapshot['requirements']['items'][0]['status'] == 'paused'
     assert snapshot['progression'][0]['state'] == 'paused'
     assert snapshot['liveness']['due_at'] is None
+
+
+def test_stalled_condition_backs_off_for_one_hour_and_rearms_on_reason_change(tmp_path):
+    now = [1000]
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    requirement = store.confirm(store.create_draft('wait', 'verified')['id'], 'human:1')
+    store.link_task(requirement['id'], 'task')
+    store.ack_events([event['id'] for event in store.pending_events()])
+    task = {'id': 'task', 'status': 'blocked'}
+    host = Host(ctx, store=store, board=Board(task), db_path=tmp_path / 'native.db',
+                clock=lambda: now[0])
+    host.startup = False
+    host.scan()
+    key = 'stalled:' + requirement['id']
+    condition = host.state()['conditions'][key]
+    assert condition == {'reason': 'blocked_without_wait', 'since': 1000,
+                         'generation': 1, 'last_woken_at': None}
+
+    assert [event['kind'] for event in host.pending(32)] == ['host.stalled']
+    assert host.state()['conditions'][key]['last_woken_at'] == 1000
+    assert host.pending(32) == []
+    now[0] = 4599
+    assert host.pending(32) == []
+    now[0] = 4600
+    assert [event['kind'] for event in host.pending(32)] == ['host.stalled']
+    store.add_event('native.completed', {'task_id': 'task'})
+    ordinary = [event['kind'] for event in host.pending(32)]
+    assert ordinary == ['native.completed']
+    assert 'host.stalled' not in ordinary
+
+    task['status'] = 'triage'
+    host.scan()
+    condition = host.state()['conditions'][key]
+    assert condition['reason'] == 'triage'
+    assert condition['generation'] == 2
+    assert condition['last_woken_at'] is None
+    assert [event['kind'] for event in host.pending(32)] == [
+        'native.completed', 'host.stalled']
+    packet = host.wake_packet()
+    assert packet['conditions']['items'][0]['reason'] == 'triage'
+    assert packet['conditions']['items'][0]['generation'] == 2
 
 
 def test_per_task_cursors_preserve_racing_and_newly_discovered_history(tmp_path):

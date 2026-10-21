@@ -10,8 +10,9 @@ import json
 
 TITLE_MAX_CHARS = 80
 DEFAULT_PREVIEW_CHARS = 160
-MESSAGE_PREVIEW_CHARS = 240
+MESSAGE_PREVIEW_CHARS = 150
 ANSWER_PREVIEW_CHARS = 160
+ATTENTION_PREVIEW_CHARS = 80
 EVENT_PAYLOAD_PREVIEW_CHARS = 300
 REASON_PREVIEW_CHARS = 160
 TASK_COMMENT_LIMIT = 10
@@ -20,6 +21,8 @@ TASK_RUN_LIMIT = 5
 TRANSITION_LIMIT = 20
 DRAFT_LIMIT = 20
 WAKE_LIMIT = 50
+TERMINAL_TASK_STATUSES = {'done', 'archived', 'cancelled'}
+OPEN_NOTIFICATION_STATES = {'pending', 'sending', 'uncertain'}
 
 
 def collection(items, total=None):
@@ -51,7 +54,23 @@ def _preview_field(target, field, value, limit=DEFAULT_PREVIEW_CHARS):
             target[field + '_truncated'] = True
 
 
-def requirement_ref(requirement, progression=None):
+def requirement_exact_via(requirement_id):
+    return {'tool': 'ancor_get_context', 'args': {'requirement_id': requirement_id}}
+
+
+def task_exact_via(task_id):
+    return {'tool': 'ancor_board', 'args': {'action': 'show', 'task_id': task_id}}
+
+
+def notification_exact_via(identifier):
+    return {'tool': 'ancor_notify', 'args': {'action': 'list', 'id': identifier}}
+
+
+def event_exact_via(event_id):
+    return {'tool': 'ancor_get_context', 'args': {'event_id': event_id}}
+
+
+def requirement_ref(requirement, progression=None, *, exact_via=False):
     """Identity and health for one requirement in a collection."""
     item = {
         'id': requirement['id'],
@@ -65,6 +84,8 @@ def requirement_ref(requirement, progression=None):
             'reason': progression.get('reason'),
             'waiting_on': progression.get('waiting_on'),
         }
+    if exact_via:
+        item['exact_via'] = requirement_exact_via(requirement['id'])
     return item
 
 
@@ -104,7 +125,7 @@ def draft_summary(draft):
     return item
 
 
-def task_ref(task, requirement_id=None, requirement_title=None):
+def task_ref(task, requirement_id=None, requirement_title=None, *, exact_via=False):
     """Short native-task identity used in all lists and nested references."""
     item = {
         'id': task['id'],
@@ -127,7 +148,212 @@ def task_ref(task, requirement_id=None, requirement_title=None):
                    REASON_PREVIEW_CHARS)
     _preview_field(item, 'last_failure_error', task.get('last_failure_error'),
                    REASON_PREVIEW_CHARS)
+    if exact_via:
+        item['exact_via'] = task_exact_via(task['id'])
     return item
+
+
+def is_terminal_task(task):
+    return (task.get('status') in TERMINAL_TASK_STATUSES
+            or bool(task.get('archived_at') or task.get('archived')))
+
+
+def select_tasks(tasks, *, include_done=False, include_archived=False):
+    """Return linked task refs for the requested terminal-state policy."""
+    selected = []
+    for task in tasks or ():
+        status = task.get('status')
+        archived = status == 'archived' or bool(task.get('archived_at') or task.get('archived'))
+        if archived and not include_archived:
+            continue
+        if status == 'done' and not include_done:
+            continue
+        if status == 'cancelled' and not include_done:
+            continue
+        selected.append(task)
+    return selected
+
+
+def task_counts(tasks):
+    """Count tasks by native status without hiding terminal work."""
+    counts = {}
+    terminal = 0
+    for task in tasks or ():
+        status = task.get('status') or 'unknown'
+        counts[status] = counts.get(status, 0) + 1
+        if is_terminal_task(task):
+            terminal += 1
+    total = sum(counts.values())
+    return {'total': total, 'open': total - terminal, 'terminal': terminal,
+            'by_status': counts}
+
+
+def is_open_question(row):
+    return (row.get('kind') == 'question' and row.get('answer') is None
+            and row.get('closed_at') is None)
+
+
+def actionable_notifications(rows):
+    """Keep unresolved human questions and delivery failures, not history."""
+    return [row for row in rows or () if is_open_question(row)]
+
+
+def notification_counts(rows):
+    rows = list(rows or ())
+    open_questions = [row for row in rows if is_open_question(row)]
+    delivery_issues = [row for row in rows
+                       if row.get('state') in OPEN_NOTIFICATION_STATES
+                       and row.get('closed_at') is None]
+    answered = [row for row in rows
+                if row.get('answer') is not None and row.get('closed_at') is None]
+    closed = [row for row in rows if row.get('closed_at') is not None]
+    return {'total': len(rows), 'open_questions': len(open_questions),
+            'delivery_issues': len(delivery_issues), 'answered': len(answered),
+            'closed': len(closed)}
+
+
+def requirement_counts(requirements):
+    counts = {}
+    for requirement in requirements or ():
+        status = requirement.get('status') or 'unknown'
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def event_counts(events):
+    counts = {}
+    for event in events or ():
+        kind = event.get('kind') or 'unknown'
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def conditions_from_progression(progression):
+    """Expose host-owned stalled conditions without making them ackable events."""
+    conditions = []
+    for item in progression or ():
+        if item.get('state') != 'stalled':
+            continue
+        requirement_id = item.get('requirement_id')
+        if not requirement_id:
+            continue
+        conditions.append({
+            'id': 'stalled:' + requirement_id,
+            'kind': 'stalled',
+            'requirement_id': requirement_id,
+            'state': 'open',
+            'reason': item.get('reason'),
+            'task_ids': list(item.get('task_ids') or ()),
+            'ack_policy': 'host_owned',
+            'since': None,
+            'generation': 0,
+            'last_woken_at': None,
+            'exact_via': requirement_exact_via(requirement_id),
+        })
+    return conditions
+
+
+_ATTENTION_PRIORITY = {
+    'triage': 10,
+    'stale_heartbeat': 20,
+    'question_answered_not_resumed': 25,
+    'question_delivery_unconfirmed': 25,
+    'blocked_without_wait': 30,
+    'question_superseded': 30,
+    'acceptance_pending': 40,
+    'no_work': 50,
+    'no_active_task': 50,
+}
+
+
+def attention_items(progression, tasks=(), notifications=(), events=(), limit=8):
+    """Small, actionable discovery list with a concrete expansion path."""
+    items = []
+    for item in progression or ():
+        if item.get('state') != 'stalled':
+            continue
+        requirement_id = item.get('requirement_id')
+        reason = item.get('reason')
+        items.append({
+            'kind': 'requirement',
+            'id': requirement_id,
+            'requirement_id': requirement_id,
+            'task_ids': list(item.get('task_ids') or ()),
+            'why_code': reason,
+            'preview': reason,
+        })
+    for event in events or ():
+        if event.get('kind') == 'host.stalled':
+            continue
+        summary = event_summary(event, exact_via=True)
+        items.append({
+            'kind': 'event',
+            'id': event['id'],
+            'event_kind': event.get('kind'),
+            'requirement_id': summary.get('requirement_id'),
+            'task_id': summary.get('task_id'),
+            'why_code': event.get('kind'),
+            'preview': preview(summary.get('payload_preview') or event.get('kind'),
+                               ATTENTION_PREVIEW_CHARS)[0],
+        })
+    for row in notifications or ():
+        if not is_open_question(row):
+            continue
+        items.append({
+            'kind': 'notification',
+            'id': row['id'],
+            'requirement_id': row.get('requirement_id'),
+            'task_id': row.get('task_id'),
+            'why_code': 'open_question',
+        })
+    seen = set()
+    unique = []
+    for item in sorted(items, key=lambda row: (
+            _ATTENTION_PRIORITY.get(row.get('why_code'), 35),
+            str(row.get('id')))):
+        key = (item['kind'], str(item.get('id')))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique[:limit]
+
+
+def omitted_groups(tasks, notifications):
+    """Describe excluded history with counts and executable follow-up queries."""
+    task_rows = list(tasks or ())
+    notification_rows = list(notifications or ())
+    omitted = []
+    buckets = {'done': 0, 'archived': 0, 'cancelled': 0}
+    for task in task_rows:
+        if task.get('archived_at') or task.get('archived'):
+            buckets['archived'] += 1
+        elif task.get('status') in {'done', 'cancelled'}:
+            buckets[task['status']] += 1
+    for status in ('done', 'archived', 'cancelled'):
+        count = buckets[status]
+        if count:
+            omitted.append({
+                'kind': 'tasks', 'reason': status, 'count': count,
+                'query': {'tool': 'ancor_board', 'args': (
+                    {'action': 'list', 'include_archived': True}
+                    if status == 'archived' else
+                    {'action': 'list', 'status': status})},
+            })
+    closed = sum(1 for row in notification_rows if row.get('closed_at') is not None)
+    answered = sum(1 for row in notification_rows
+                   if row.get('answer') is not None and row.get('closed_at') is None)
+    if closed:
+        omitted.append({
+            'kind': 'notifications', 'reason': 'closed', 'count': closed,
+            'query': {'tool': 'ancor_notify', 'args': {'action': 'list'}},
+        })
+    if answered:
+        omitted.append({
+            'kind': 'notifications', 'reason': 'answered', 'count': answered,
+            'query': {'tool': 'ancor_notify', 'args': {'action': 'list'}},
+        })
+    return omitted
 
 
 def bounded_latest(items, limit, *, id_key='id', before_id=None):
@@ -176,7 +402,20 @@ def notification_selection(rows, limit=20):
     return [row for row in rows if row['id'] in chosen]
 
 
-def notification_summary(row):
+def acceptance_ref(requirement, tasks=(), acceptance=None):
+    """State whether exact acceptance is recorded, pending, or not yet possible."""
+    tasks = list(tasks or ())
+    done = sum(1 for task in tasks if task.get('status') == 'done')
+    if requirement.get('status') == 'accepted' or acceptance is not None:
+        status = 'accepted'
+    elif tasks and done == len(tasks):
+        status = 'pending'
+    else:
+        status = 'not_ready'
+    return {'status': status, 'tasks_done': done, 'tasks_total': len(tasks)}
+
+
+def notification_summary(row, *, exact_via=False):
     """Project one durable notification for a collection."""
     answer = row.get('answer')
     answer_preview, answer_truncated = preview(answer, ANSWER_PREVIEW_CHARS)
@@ -184,12 +423,14 @@ def notification_summary(row):
         'id': row['id'],
         'kind': row['kind'],
         'state': row['state'],
-        'requirement_id': row.get('requirement_id'),
-        'task_id': row.get('task_id'),
         'answered': answer is not None,
         'closed': bool(row.get('closed_at')),
-        'answer_preview': answer_preview,
     }
+    for field in ('requirement_id', 'task_id'):
+        if row.get(field) is not None:
+            summary[field] = row[field]
+    if answer_preview:
+        summary['answer_preview'] = answer_preview
     _preview_field(summary, 'message', row.get('message'), MESSAGE_PREVIEW_CHARS)
     if row.get('close_reason'):
         _preview_field(summary, 'close_reason', row['close_reason'], REASON_PREVIEW_CHARS)
@@ -204,6 +445,8 @@ def notification_summary(row):
             summary['error_code'] = decoded.get('reason_code') or decoded.get('detail') or 'error'
         except (TypeError, ValueError):
             summary['error_code'] = str(error)[:120]
+    if exact_via:
+        summary['exact_via'] = notification_exact_via(row['id'])
     return summary
 
 
@@ -236,7 +479,7 @@ _EVENT_REFERENCE_KEYS = (
 )
 
 
-def event_summary(event, payload_limit=EVENT_PAYLOAD_PREVIEW_CHARS):
+def event_summary(event, payload_limit=EVENT_PAYLOAD_PREVIEW_CHARS, *, exact_via=False):
     """Project one durable event while retaining its acknowledgement identity."""
     payload = event.get('payload')
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -254,17 +497,19 @@ def event_summary(event, payload_limit=EVENT_PAYLOAD_PREVIEW_CHARS):
         for key in _EVENT_REFERENCE_KEYS:
             if payload.get(key) is not None:
                 summary[key] = payload[key]
+    if exact_via:
+        summary['exact_via'] = event_exact_via(event['id'])
     return summary
 
 
-def event_summaries(events, limit):
-    """Keep host health events and the newest input visible under a tight cap."""
+def event_summaries(events, limit, *, exact_via=False):
+    """Keep host liveness and the newest input visible under a tight cap."""
+    events = [event for event in events or () if event.get('kind') != 'host.stalled']
     if not events:
         return []
-    priority = [event for kind in ('host.stalled', 'host.liveness')
+    priority = [event for kind in ('host.liveness',)
                 for event in events if event['kind'] == kind]
-    rest = [event for event in events if event['kind'] not in
-            {'host.stalled', 'host.liveness'}]
+    rest = [event for event in events if event['kind'] != 'host.liveness']
     ordered = priority + rest
     if len(ordered) > limit:
         ordered = ordered[:max(0, limit - 1)] + [events[-1]]
@@ -274,7 +519,30 @@ def event_summaries(events, limit):
                 seen.add(event['id'])
                 unique.append(event)
         ordered = unique
-    return [event_summary(event) for event in ordered]
+    return [event_summary(event, exact_via=exact_via) for event in ordered]
+
+
+def host_condition_state(store_path):
+    """Read the host's private condition ledger without creating it."""
+    from pathlib import Path
+    try:
+        value = json.loads(Path(str(store_path) + '.host.json').read_text())
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        return {}
+    conditions = value.get('conditions') if isinstance(value, dict) else None
+    return conditions if isinstance(conditions, dict) else {}
+
+
+def conditions_with_state(progression, state=None):
+    """Merge stalled progression with durable host backoff metadata."""
+    state = state if isinstance(state, dict) else {}
+    conditions = conditions_from_progression(progression)
+    for condition in conditions:
+        saved = state.get(condition['id']) or {}
+        for field in ('since', 'generation', 'last_woken_at'):
+            if field in saved:
+                condition[field] = saved[field]
+    return conditions
 
 
 def wake_summary(wake):
