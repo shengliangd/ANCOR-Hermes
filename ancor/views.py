@@ -10,7 +10,7 @@ import json
 
 TITLE_MAX_CHARS = 80
 DEFAULT_PREVIEW_CHARS = 160
-MESSAGE_PREVIEW_CHARS = 150
+MESSAGE_PREVIEW_CHARS = 120
 ANSWER_PREVIEW_CHARS = 160
 ATTENTION_PREVIEW_CHARS = 80
 EVENT_PAYLOAD_PREVIEW_CHARS = 300
@@ -78,6 +78,8 @@ def requirement_ref(requirement, progression=None, *, exact_via=False):
         'status': requirement['status'],
         'replacement_of': requirement.get('replacement_of'),
     }
+    if requirement.get('target_status') is not None:
+        item['target_status'] = requirement['target_status']
     if progression is not None:
         item['progression'] = {
             'state': progression.get('state'),
@@ -95,6 +97,7 @@ def requirement_detail(requirement, draft=None):
         'id': requirement['id'],
         'title': requirement['title'],
         'status': requirement['status'],
+        'target_status': requirement.get('target_status'),
         'replacement_of': requirement.get('replacement_of'),
         'brief': requirement['brief'],
         'acceptance_criteria': requirement['acceptance_criteria'],
@@ -405,7 +408,7 @@ def notification_selection(rows, limit=20):
 def acceptance_ref(requirement, tasks=(), acceptance=None):
     """State whether exact acceptance is recorded, pending, or not yet possible."""
     tasks = list(tasks or ())
-    done = sum(1 for task in tasks if task.get('status') == 'done')
+    done = sum(1 for task in tasks if task.get('status') in {'done', 'archived'})
     if requirement.get('status') == 'accepted' or acceptance is not None:
         status = 'accepted'
     elif tasks and done == len(tasks):
@@ -460,13 +463,16 @@ def notification_detail(row):
 
 
 def transition_summary(event):
-    """Project retained pause/resume history without transport identity."""
+    """Project retained requirement-transition history without transport identity."""
     payload = event.get('payload') or {}
     summary = {
         'id': event['id'],
         'kind': event['kind'],
         'requirement_id': payload.get('requirement_id'),
         'command_id': payload.get('command_id'),
+        'from_status': payload.get('from_status'),
+        'target_status': payload.get('target_status'),
+        'replacement_id': payload.get('replacement_id'),
     }
     for field in ('reason', 'summary'):
         _preview_field(summary, field, payload.get(field), DEFAULT_PREVIEW_CHARS)

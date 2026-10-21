@@ -167,7 +167,7 @@ def test_requirement_expansion_scopes_every_nested_collection(tmp_path, monkeypa
     assert [wake['requirement_id'] for wake in result['scheduled_wakes']['items']] == [first['id']]
     assert [item['requirement_id'] for item in result['progression']] == [first['id']]
     assert [event['id'] for event in result['pending_events']['items']] == [first_event['id']]
-    assert result['transitions']['count'] == 25
+    assert result['transitions']['count'] == 26
     assert result['transitions']['returned'] == 20
     assert result['transitions']['truncated'] is True
     assert {item['requirement_id'] for item in result['transitions']['items']} == {first['id']}

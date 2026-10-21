@@ -15,6 +15,12 @@ class StoreTests(unittest.TestCase):
         self.path = Path(self.directory.name) / 'store.sqlite'
         self.store = Store(self.path)
 
+    def advance(self, requirement):
+        return self.store.finalize_transition(requirement['id'])['requirement']
+
+    def advance_all(self, requirements):
+        return [self.advance(requirement) for requirement in requirements]
+
     def test_legacy_schema_requires_explicit_title_migration(self):
         database = Path(self.directory.name) / 'old-store.sqlite'
         db = sqlite3.connect(database)
@@ -87,7 +93,7 @@ class StoreTests(unittest.TestCase):
         draft = self.store.create_draft('brief', 'criteria')
         requirement = self.store.confirm(draft['id'], 'ref')
         self.assertEqual([e['kind'] for e in self.store.pending_events()],
-                         ['requirement.confirmed'])
+                         ['requirement.activated'])
         self.store.confirm(draft['id'], 'retry')
         self.assertEqual(len(self.store.pending_events()), 1)
         with self.assertRaises(ValueError):
@@ -102,13 +108,16 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.reject(requirement['id'], 'late')
         self.assertEqual([e['kind'] for e in self.store.pending_events()],
-                         ['requirement.confirmed', 'requirement.rejected', 'requirement.accepted'])
+                         ['requirement.activated', 'requirement.rejected', 'requirement.accepted'])
 
     def test_replacement_emits_invalidation_and_blocks_old_acceptance(self):
         old = self.store.confirm(self.store.create_draft('old', 'criteria')['id'], 'ref')
-        self.store.confirm(self.store.create_draft('new', 'criteria', old['id'])['id'], 'ref2')
+        new = self.store.confirm(self.store.create_draft('new', 'criteria', old['id'])['id'], 'ref2')
         self.assertEqual([e['kind'] for e in self.store.pending_events()],
-                         ['requirement.confirmed', 'requirement.invalidated', 'requirement.confirmed'])
+                         ['requirement.activated', 'requirement.transition_requested',
+                          'requirement.staged'])
+        self.assertEqual(self.store.get_requirement(old['id'])['target_status'], 'invalidated')
+        self.assertEqual(new['status'], 'pending')
         with self.assertRaises(ValueError):
             self.store.accept(old['id'], 'obsolete evidence')
 
@@ -128,7 +137,8 @@ class StoreTests(unittest.TestCase):
         first = self.store.create_draft('new', 'criteria', original['id'])
         stale = self.store.create_draft('stale', 'criteria', original['id'])
         replacement = self.store.confirm(first['id'], 'ref2')
-        self.assertEqual(self.store.get_requirement(original['id'])['status'], 'invalidated')
+        self.assertEqual(self.store.get_requirement(original['id'])['target_status'], 'invalidated')
+        self.assertEqual(replacement['status'], 'pending')
         with self.assertRaises(ValueError):
             self.store.confirm(stale['id'], 'ref3')
         self.assertEqual(self.store.confirm(first['id'], 'retry'), replacement)
@@ -145,7 +155,10 @@ class StoreTests(unittest.TestCase):
         cancelled = self.store.confirm(
             self.store.create_draft('cancelled', 'criteria')['id'], 'ref')
         self.store.cancel([cancelled['id']], 'withdrawn')
-        with self.assertRaisesRegex(ValueError, 'replacement bases must be active or paused'):
+        with self.assertRaisesRegex(ValueError, 'replacement bases must be stable'):
+            self.store.create_draft('invalid', 'criteria', cancelled['id'])
+        self.advance(cancelled)
+        with self.assertRaisesRegex(ValueError, 'replacement bases must be stable'):
             self.store.create_draft('invalid', 'criteria', cancelled['id'])
 
     def test_legacy_draft_replacement_fails_confirmation_clearly(self):
@@ -192,7 +205,9 @@ class StoreTests(unittest.TestCase):
 
     def test_cancel_is_durable_and_only_active_requirements_can_cancel(self):
         requirement = self.store.confirm(self.store.create_draft('brief', 'criteria')['id'], 'ref')
-        result = self.store.cancel([requirement['id']], 'user withdrew the request')
+        requested = self.store.cancel([requirement['id']], 'user withdrew the request')
+        self.assertEqual(requested[0]['target_status'], 'cancelled')
+        result = self.advance_all(requested)
         self.assertEqual(result[0]['status'], 'cancelled')
         self.assertEqual(self.store.pending_events()[-1]['kind'], 'requirement.cancelled')
         self.assertEqual(self.store.pending_events()[-1]['payload']['reason'], 'user withdrew the request')
@@ -201,22 +216,24 @@ class StoreTests(unittest.TestCase):
 
     def test_cancel_accepts_one_id_and_returns_one_requirement(self):
         requirement = self.store.confirm(self.store.create_draft('brief', 'criteria')['id'], 'ref')
-        result = self.store.cancel([requirement['id']], 'withdrawn')
+        result = self.advance_all(self.store.cancel([requirement['id']], 'withdrawn'))
         self.assertEqual(result[0]['id'], requirement['id'])
         self.assertEqual(result[0]['status'], 'cancelled')
 
     def test_batch_cancel_and_replacement(self):
         first = self.store.confirm(self.store.create_draft('one', 'criteria')['id'], 'ref1')
         second = self.store.confirm(self.store.create_draft('two', 'criteria')['id'], 'ref2')
-        cancelled = self.store.cancel([first['id'], second['id']], 'withdrawn together')
+        cancelled = self.advance_all(
+            self.store.cancel([first['id'], second['id']], 'withdrawn together'))
         self.assertEqual([r['status'] for r in cancelled], ['cancelled', 'cancelled'])
         a = self.store.confirm(self.store.create_draft('a', 'criteria')['id'], 'ref3')
         b = self.store.confirm(self.store.create_draft('b', 'criteria')['id'], 'ref4')
         draft = self.store.create_draft('combined', 'combined criteria', [a['id'], b['id']])
         combined = self.store.confirm(draft['id'], 'ref5')
-        self.assertEqual(combined['status'], 'active')
-        self.assertEqual(self.store.get_requirement(a['id'])['status'], 'invalidated')
-        self.assertEqual(self.store.get_requirement(b['id'])['status'], 'invalidated')
+        self.assertEqual(combined['status'], 'pending')
+        self.advance(a)
+        self.assertEqual(self.advance(b)['status'], 'invalidated')
+        self.assertEqual(self.store.get_requirement(combined['id'])['status'], 'active')
 
     def test_confirmed_cancellation_is_atomic_and_idempotent(self):
         first = self.store.confirm(self.store.create_draft('one', 'criteria')['id'], 'ref1')
@@ -226,6 +243,8 @@ class StoreTests(unittest.TestCase):
                                                 self.store.get_requirement(second['id']))],
                          ['active', 'active'])
         result = self.store.confirm_cancellation(proposal['id'], 'confirmation-1')
+        self.assertEqual([r['target_status'] for r in result], ['cancelled', 'cancelled'])
+        result = self.advance_all(result)
         self.assertEqual([r['status'] for r in result], ['cancelled', 'cancelled'])
         retry = self.store.confirm_cancellation(proposal['id'], 'confirmation-1')
         self.assertEqual([r['status'] for r in retry], ['cancelled', 'cancelled'])
@@ -250,7 +269,9 @@ class StoreTests(unittest.TestCase):
             'pause', requirement['id'], 'user asked', 'Stop briefly'))
         self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'active')
 
-        paused = self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
+        requested = self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
+        self.assertEqual(requested['target_status'], 'paused')
+        paused = self.advance(requested)
         self.assertEqual(paused['status'], 'paused')
         retry = self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
         self.assertEqual(retry['status'], 'paused')
@@ -264,7 +285,9 @@ class StoreTests(unittest.TestCase):
 
         resume = self.store.create_requirement_command(
             'resume', requirement['id'], 'user ready', 'Continue the work')
-        active = self.store.confirm_requirement_command(resume['id'], 'confirmation-2')
+        requested = self.store.confirm_requirement_command(resume['id'], 'confirmation-2')
+        self.assertEqual(requested['target_status'], 'active')
+        active = self.advance(requested)
         self.assertEqual(active['status'], 'active')
         self.assertEqual(len([e for e in self.store.pending_events()
                               if e['kind'] == 'requirement.resumed']), 1)
@@ -277,21 +300,24 @@ class StoreTests(unittest.TestCase):
             self.store.create_draft('brief', 'criteria')['id'], 'ref')
         pause = self.store.create_requirement_command(
             'pause', requirement['id'], 'user asked', 'Stop briefly')
-        self.store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+        self.advance(self.store.confirm_requirement_command(pause['id'], 'pause-confirmation'))
         self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'paused')
 
         replacement = self.store.confirm(self.store.create_draft(
             'changed', 'new criteria', requirement['id'])['id'], 'replacement-confirmation')
-        self.assertEqual(replacement['status'], 'active')
+        self.assertEqual(replacement['status'], 'pending')
+        self.advance(requirement)
         self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'invalidated')
+        self.assertEqual(self.store.get_requirement(replacement['id'])['status'], 'active')
 
         paused = self.store.confirm(
             self.store.create_draft('cancel me', 'criteria')['id'], 'ref2')
         command = self.store.create_requirement_command(
             'pause', paused['id'], 'user asked', 'Stop briefly')
-        self.store.confirm_requirement_command(command['id'], 'pause-confirmation-2')
+        self.advance(self.store.confirm_requirement_command(command['id'], 'pause-confirmation-2'))
         cancellation = self.store.create_cancellation([paused['id']], 'withdrawn while paused')
-        cancelled = self.store.confirm_cancellation(cancellation['id'], 'cancel-confirmation')
+        cancelled = self.advance_all(
+            self.store.confirm_cancellation(cancellation['id'], 'cancel-confirmation'))
         self.assertEqual(cancelled[0]['status'], 'cancelled')
 
     def test_pause_event_failure_rolls_back_status(self):

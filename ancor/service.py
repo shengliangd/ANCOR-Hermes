@@ -26,6 +26,18 @@ class Service:
             self._store = Store(path)
         return self._store
 
+    @property
+    def native_board(self):
+        if self.board is None:
+            from .board import NativeBoard
+            name = self.ctx.get_config('board')
+            if not name:
+                raise ValueError('configure ANCOR board')
+            self.board = NativeBoard(
+                name, profile=self.ctx.get_config(
+                    'coordinator_profile', 'ancor-coordinator'))
+        return self.board
+
     def requirement(self, args):
         action = args['action']
         if action == 'draft':
@@ -47,6 +59,10 @@ class Service:
             command = self.store.create_requirement_command(
                 action, args['requirement_id'], args['reason'], summary)
             return self.command_presentation(command)
+        if action == 'advance':
+            from .transitions import advance_requirement
+            return advance_requirement(self.store, self.native_board,
+                                       args['requirement_id'])
         raise ValueError('unknown requirement action')
 
     def _write_presentation(self, identifier, text):
@@ -338,8 +354,8 @@ class Service:
 
     def acceptance(self, args):
         requirement = self.store.get_requirement(args['requirement_id'])
-        if requirement['status'] != 'active':
-            raise ValueError('requirement is not active')
+        if requirement['status'] != 'active' or requirement['target_status'] is not None:
+            raise ValueError('requirement is not stably active')
         if args['action'] == 'reject':
             return self.store.reject(requirement['id'], args['reason'])
         if args['action'] != 'accept':
@@ -351,8 +367,25 @@ class Service:
             values = evidence.get(field)
             if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v.strip() for v in values):
                 raise ValueError(f'evidence requires nonempty {field}')
-        links = {x['task_id'] for x in self.store.snapshot()['task_links'] if x['requirement_id'] == requirement['id']}
+        links = {x['task_id'] for x in self.store.snapshot()['task_links']
+                 if x['requirement_id'] == requirement['id']}
         if not set(evidence['task_ids']) <= links:
             raise ValueError('evidence references unlinked tasks')
-        import json
+        if not links:
+            raise ValueError('all linked native tasks must be done or archived before acceptance')
+        tasks = {task['id']: task for task in self.native_board.list()}
+        for task_id in sorted(links):
+            task = tasks.get(task_id)
+            if task is None:
+                raise ValueError('all linked native tasks must be readable before acceptance')
+            status = task.get('status')
+            if status == 'archived':
+                continue
+            if status != 'done':
+                raise ValueError('all linked native tasks must be done before acceptance')
+            actual = self.native_board.archive(
+                task_id,
+                f'ANCOR requirement {requirement["id"]} accepted; archive verified work.')
+            if actual.get('status') != 'archived':
+                raise RuntimeError('native archive verification failed')
         return self.store.accept(requirement['id'], json.dumps(evidence, ensure_ascii=False))

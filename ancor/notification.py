@@ -438,6 +438,11 @@ class NotificationDispatcher:
             requirement = self.resolve_requirement(row['requirement_id'])
         except KeyError:
             return 'close', 'requirement_missing'
+        target = requirement.get('target_status')
+        if target in {'cancelled', 'invalidated'}:
+            return 'close', 'requirement_' + target
+        if target is not None:
+            return 'defer', 'requirement_transition_pending'
         status = requirement.get('status')
         if status == 'paused':
             return 'defer', 'requirement_paused'

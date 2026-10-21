@@ -47,21 +47,8 @@ else:
 '''
 
 
-@pytest.mark.parametrize('status,retired,run,expected', [
-    ('running', False, None, True),
-    ('ready', False, None, True),
-    ('todo', False, None, True),
-    ('review', False, None, True),
-    ('triage', False, None, True),
-    ('blocked', False, None, True),
-    ('blocked', True, {'ended_at': None, 'worker_pid': None}, True),
-    ('blocked', True, {'ended_at': 'ended', 'worker_pid': os.getpid()}, True),
-    ('done', False, None, False),
-    ('blocked', True, None, False),
-])
-def test_invalidated_orphan_restart(tmp_path, status, retired, run, expected):
-    from copy import deepcopy
-    from ancor.retirement import Retirement
+def test_replacement_transition_survives_restart_and_advances(tmp_path):
+    from ancor.transitions import advance_requirement
 
     path = tmp_path / 'store.db'
     ctx = Context(path)
@@ -69,48 +56,58 @@ def test_invalidated_orphan_restart(tmp_path, status, retired, run, expected):
     old = store.confirm(store.create_draft('old', 'checked')['id'], 'human:old')
     new = store.confirm(store.create_draft('new', 'checked', old['id'])['id'], 'human:new')
     store.link_task(old['id'], 'old-worker')
-    board = Board({'id': 'old-worker', 'status': 'blocked'})
-    detail = {'task': board.tasks[0], 'runs': []}
-    calls = []
-    def show(*args):
-        calls.append(args)
-        assert args == ('show', 'old-worker'), 'recovery must never mutate native work'
-        return deepcopy(detail)
-    board._call = show
-    if retired:
-        ctx.profile_name = 'ancor-coordinator'
-        Retirement(ctx, store, board).retire(old['id'], 'old-worker', 'Superseded')
-        ctx.profile_name = 'default'
-    detail['task']['status'] = status
-    detail['runs'] = [run] if run else []
-    before = deepcopy(detail)
-    store.accept(new['id'], 'verified replacement')
-    box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
-                             target='test:destination')
-    box.enqueue('accept:' + new['id'], 'completion', 'Delivered replacement', actor='ancor-coordinator')
-    assert box.claim_next()['state'] == 'sending'
-    box.mark_sent('accept:' + new['id'], {'success': True})
+    store.link_task(new['id'], 'new-worker')
+    board = Board({'id': 'old-worker', 'status': 'running'})
+    board.tasks.append({'id': 'new-worker', 'status': 'running',
+                        'last_heartbeat_at': time.time()})
     store.ack_events([e['id'] for e in store.pending_events()])
 
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
     host.scan()
-    events = host.pending(32)
-    assert [e['kind'] for e in events] == (['host.recovery'] if expected else [])
-    unresolved = host.wake_packet()['invalidated_tasks']['items']
-    if expected:
-        assert unresolved[0]['requirement_id'] == old['id']
-        assert unresolved[0]['requirement_title'] == old['title']
-        assert unresolved[0]['task_id'] == 'old-worker'
-        assert unresolved[0]['reason_preview']
-        assert 'coordinator decides' in events[0]['payload']['reason']
-    else:
-        assert unresolved == []
-    store.ack_events([e['id'] for e in events])
+    snapshot = host.wake_packet()
+    requirements = {row['id']: row for row in snapshot['requirements']['items']}
+    assert requirements[old['id']]['target_status'] == 'invalidated'
+    assert requirements[new['id']]['target_status'] == 'active'
+    assert {row['reason'] for row in snapshot['progression']} == {'transition_pending'}
+    assert snapshot['invalidated_tasks']['items'] == []
+    assert host.pending(32)
+
+    result = advance_requirement(store, board, old['id'])
+    assert result['outcome'] == 'completed'
+    assert store.get_requirement(old['id'])['status'] == 'invalidated'
+    assert store.get_requirement(new['id'])['status'] == 'active'
+    assert board.tasks[0]['status'] == 'archived'
+    assert board.guards == []
+
+    store.ack_events([e['id'] for e in store.pending_events()])
     for _ in range(3):
         host.scan()
         assert host.pending(32) == []
-    assert detail == before
-    assert board.guards == []
+    assert host.wake_packet()['invalidated_tasks']['items'] == []
+
+
+def test_invalidated_drift_is_visible_without_mutating_native_work(tmp_path):
+    from ancor.transitions import advance_requirement
+
+    path = tmp_path / 'store.db'
+    ctx = Context(path)
+    store = Store(path)
+    old = store.confirm(store.create_draft('old', 'checked')['id'], 'human:old')
+    store.confirm(store.create_draft('new', 'checked', old['id'])['id'], 'human:new')
+    store.link_task(old['id'], 'old-worker')
+    board = Board({'id': 'old-worker', 'status': 'running'})
+    advance_requirement(store, board, old['id'])
+    host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
+    host.tasks = board.list()
+    unresolved = host.invalidated_tasks(store.snapshot())
+    assert unresolved == []
+
+    store.link_task(old['id'], 'drifted-worker')
+    host.tasks = [*board.tasks, {'id': 'drifted-worker', 'status': 'running'}]
+    unresolved = host.invalidated_tasks(store.snapshot())
+    assert unresolved[0]['requirement_id'] == old['id']
+    assert unresolved[0]['task_id'] == 'drifted-worker'
+    assert host.tasks[-1]['status'] == 'running'
 
 
 def wait_file(path):
@@ -255,7 +252,7 @@ def test_confirmed_demand_restart_requires_no_resubmit(tmp_path, acknowledged):
     data = json.loads(output.read_text())
     assert [row['id'] for row in data['snapshot']['requirements']['items']] == [req['id']]
     kinds = [e['kind'] for e in data['events']]
-    assert ('requirement.confirmed' in kinds) == (not acknowledged)
+    assert ('requirement.activated' in kinds) == (not acknowledged)
     assert data['snapshot']['conditions']['count'] == 1
     assert data['snapshot']['conditions']['items'][0]['reason'] == 'no_work'
     assert ('host.recovery' in kinds) == acknowledged

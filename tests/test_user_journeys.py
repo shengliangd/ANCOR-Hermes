@@ -137,7 +137,9 @@ class Journey:
         raise AssertionError('notification delivery did not quiesce')
 
     def call(self, tool, **args):
-        context = self.coord if tool in {'board', 'acceptance', 'wake'} else self.ctx
+        context = self.coord if (tool in {'board', 'acceptance', 'wake'}
+                                 or (tool == 'requirement'
+                                     and args.get('action') == 'advance')) else self.ctx
         if tool == 'notify' and args.get('action') == 'respond': context = self.ctx
         value = json.loads(context.dispatch_tool('ancor_' + tool, args))
         assert not value.get('error'), (tool, args, value)
@@ -336,13 +338,20 @@ def journey_replacement(j):
     j.confirm(draft, outcome='cancelled')
     assert j.store.get_requirement(old['id'])['status'] == 'active'
     new = j.confirm(draft)
-    assert j.store.get_requirement(old['id'])['status'] == 'invalidated'
+    staged_old = j.store.get_requirement(old['id'])
+    assert staged_old['status'] == 'active'
+    assert staged_old['target_status'] == 'invalidated'
+    assert new['status'] == 'pending' and new['target_status'] == 'active'
     assert j.status(old_task) == 'running', 'confirmation records invalidation, not automatic stop'
     inactive_error = j.error('board', action='create', requirement_id=old['id'], key='forbidden',
                              title='No', body='No', contract=j.contract('forbidden'))
     assert 'not active' in inactive_error, inactive_error
     j.complete(other_task)
-    j.call('board', action='block', task_id=old_task, reason='Superseded; coordinator stop decision')
+    advanced = j.call('requirement', action='advance', requirement_id=old['id'])
+    assert advanced['outcome'] == 'completed'
+    assert j.store.get_requirement(old['id'])['status'] == 'invalidated'
+    assert j.store.get_requirement(new['id'])['status'] == 'active'
+    assert j.status(old_task) == 'archived'
     new_task = j.create(new, 'replacement')
     j.complete(new_task)
     assert j.status(other_task) == 'done'
@@ -354,8 +363,9 @@ def journey_acceptance(j):
     tid = j.create(req, 'initial')
     abandoned = j.create(req, 'abandoned-alternative')
     j.call('board', action='block', task_id=abandoned, reason='Coordinator chooses replacement approach')
-    j.call('board', action='retire', requirement_id=req['id'], task_id=abandoned,
+    j.call('board', action='archive', task_id=abandoned,
            reason='Alternative abandoned; preserve history, replacement covers criteria')
+    assert j.status(abandoned) == 'archived'
     premature = dict(action='send', id='accept:' + req['id'], requirement_id=req['id'],
                      kind='completion', message='Report delivered')
     assert 'accepted' in j.error('notify', **premature)

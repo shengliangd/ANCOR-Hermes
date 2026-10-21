@@ -23,6 +23,7 @@ _ACTION_FIELDS = {
         'cancel': ['requirement_ids'],
         'pause': ['requirement_id', 'reason'],
         'resume': ['requirement_id', 'reason'],
+        'advance': ['requirement_id'],
         'respond': ['requirement_id', 'body'],
     },
     'ancor_notify': {
@@ -43,7 +44,7 @@ _ACTION_FIELDS = {
         'unlink': ['parent_id', 'child_id'],
         'edit': ['task_id'],
         'revise': ['task_id', 'reason'],
-        'retire': ['requirement_id', 'task_id', 'reason'],
+        'archive': ['task_id', 'reason'],
         'associate': ['task_id', 'requirement_id', 'reason'],
     },
     'ancor_wake': {
@@ -404,7 +405,8 @@ def register(ctx, *, scan_runner=None):
             return result
         confirmed_drafts = {requirement['draft_id'] for requirement in data['requirements']}
         open_requirements = [requirement for requirement in data['requirements']
-                             if requirement['status'] in {'active', 'paused'}]
+                             if (requirement['status'] in {'active', 'paused', 'pending'}
+                                 or requirement.get('target_status') is not None)]
         selected_tasks = select_tasks(
             all_tasks or [], include_done=include_done,
             include_archived=include_archived)
@@ -511,8 +513,8 @@ def register(ctx, *, scan_runner=None):
                 if not task_id:
                     raise ValueError('question requires requirement_id and task_id')
                 req = service.store.get_requirement(requirement_id)
-                if req['status'] != 'active':
-                    raise ValueError('question requires an active requirement')
+                if req['status'] != 'active' or req['target_status'] is not None:
+                    raise ValueError('question requires a stably active requirement')
                 links = {link['task_id'] for link in service.store.snapshot()['task_links']
                          if link['requirement_id'] == req['id']}
                 if task_id not in links:
@@ -568,23 +570,12 @@ def register(ctx, *, scan_runner=None):
             source_key='requirement.response:' + req['id'] + ':' +
             hashlib.sha256(body.encode('utf-8')).hexdigest())
 
-    def retirement():
-        from .retirement import Retirement
-        return Retirement(ctx, service.store, operations.board)
-
     def board_action(args, **_native):
-        if args['action'] == 'retire':
-            return retirement().retire(args['requirement_id'], args['task_id'], args['reason'])
         return operations.call(args)
 
     def acceptance(args, **_native):
         if args['action'] == 'accept':
             operations.reconcile()
-            retired = retirement().effective_retired(args['requirement_id'])
-            links = [link['task_id'] for link in service.store.snapshot()['task_links']
-                     if link['requirement_id'] == args['requirement_id'] and link['task_id'] not in retired]
-            if not links or any(operations.board.show(tid)['status'] != 'done' for tid in links):
-                raise ValueError('all linked native tasks must be done before acceptance')
         return service.acceptance(args)
 
     methods = {'requirement': requirement, 'get_context': get_context,
@@ -620,7 +611,7 @@ def register(ctx, *, scan_runner=None):
     elif interactor:
         definitions = {
             'ancor_requirement': (
-                'Draft, confirm, cancel, pause, resume, or answer an ANCOR requirement. draft requires an authoritative single-line title plus an outcome-oriented brief and observable acceptance criteria; keep implementation method and task decomposition out unless the user made a detail a hard constraint. summary is optional. cancel, pause and resume create immutable proposals with exact native clarify_args; only the exact submitted native confirmation activates, cancels, pauses or resumes. respond records a human reply as advisory input, never authorization.',
+                'Draft, confirm, cancel, pause, resume, or answer an ANCOR requirement. draft requires an authoritative single-line title plus an outcome-oriented brief and observable acceptance criteria; keep implementation method and task decomposition out unless the user made a detail a hard constraint. summary is optional. cancel, pause and resume create immutable proposals with exact native clarify_args; exact confirmation requests a transition, which the coordinator completes after linked cards converge. respond records a human reply as advisory input, never authorization.',
                 {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond']},
                  'title': {'type': 'string', 'maxLength': 80,
                            'description': 'Authoritative single-line requirement label used by every compact list and wake packet.'},
@@ -662,6 +653,10 @@ def register(ctx, *, scan_runner=None):
         }
     elif coordinator:
         definitions = {
+            'ancor_requirement': (
+                'Advance one requested requirement transition after its linked native cards have converged. advance is idempotent: it returns completed, or blocked with concrete card or replacement blockers. It is the only coordinator path that commits a staged pause, resume, cancellation or replacement.',
+                {'action': {'type': 'string', 'enum': ['advance']},
+                 'requirement_id': {'type': 'string'}}, ['action', 'requirement_id']),
             'ancor_wake': (
                 'Manage durable future one-shot wakes. schedule requires requirement_id, reason, due_at (Unix seconds); replace requires wake_id, reason, due_at; cancel requires wake_id. list defaults to pending wakes and optionally filters requirement_id or state. Never create immediate self-wake loops.',
                 {'action': {'type': 'string', 'enum': ['schedule', 'list', 'cancel', 'replace']},
@@ -680,10 +675,10 @@ def register(ctx, *, scan_runner=None):
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
             'ancor_board': (
-                'Read and coordinate linked native tasks. list returns compact summaries; show returns one card with bounded recent history; history expands comments, events or runs for one card. create requires a complete contract; body is optional and defaults to the contract objective; edit with body requires the same contract. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, retire, and associate.',
+                'Read and coordinate linked native tasks. list returns compact summaries; show returns one card with bounded recent history; history expands comments, events or runs for one card. create requires a complete contract; body is optional and defaults to the contract objective; edit with body requires the same contract. archive writes an audit comment and verifies the native terminal state. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, archive, and associate.',
                 {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock',
                                                         'history', 'comment', 'link', 'unlink', 'edit', 'revise',
-                                                        'retire', 'associate']},
+                                                        'archive', 'associate']},
                  'kind': {'type': 'string', 'enum': ['comments', 'events', 'runs']},
                  'before_id': {'type': 'integer', 'minimum': 1},
                  'priority': {'type': 'integer'},
@@ -714,7 +709,7 @@ def register(ctx, *, scan_runner=None):
                                'items': {'type': 'integer', 'minimum': 1}},
                  'reason': {'type': 'string'}}, ['event_ids']),
             'ancor_acceptance': (
-                'Record independent coordinator verification against exact requirement criteria, or reject with a reason.',
+                'Record independent coordinator verification against exact requirement criteria, or reject with a reason. Acceptance requires every linked native card to be done or archived and archives verified done cards before committing.',
                 {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['accept', 'reject']},
                  'evidence': {
                      'type': 'object',
@@ -741,8 +736,11 @@ def register(ctx, *, scan_runner=None):
                 allowed = (interactor_profile if interactor else coordinator_profile)
                 if ctx.profile_name != allowed:
                     raise PermissionError('ANCOR role profile required')
+                if _name == 'ancor_requirement' and coordinator and args.get('action') != 'advance':
+                    raise PermissionError('coordinator may only advance requirements')
                 mutation = (_name == 'ancor_acceptance'
                             or _name == 'ancor_ack_events'
+                            or (_name == 'ancor_requirement' and args.get('action') == 'advance')
                             or (_name == 'ancor_wake' and args.get('action') != 'list')
                             or (_name == 'ancor_notify' and args.get('action') == 'send')
                             or (_name == 'ancor_board' and args.get('action') not in {'list', 'show'})

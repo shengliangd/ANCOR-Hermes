@@ -71,6 +71,11 @@ class Board:
         self.tasks[task_id]['task']['status'] = 'blocked'
         return self.show(task_id)
 
+    def archive(self, task_id, reason):
+        self.calls.append(('archive', task_id, reason))
+        self.tasks[task_id]['task']['status'] = 'archived'
+        return self.show(task_id)
+
 
 @pytest.fixture
 def setup(tmp_path):
@@ -389,8 +394,9 @@ def test_create_requires_active_requirement_and_coordinator(setup):
 
 
 @pytest.mark.parametrize('target', ['replacement', 'independent'])
-def test_invalidated_worker_does_not_gate_new_work(setup, monkeypatch, target):
+def test_invalidated_worker_is_archived_before_new_work(setup, monkeypatch, target):
     import os
+    from ancor.transitions import advance_requirement
     ctx, store, board, req = setup
     op = operations(setup)
     tid = op.call(create_args(req))['task_id']
@@ -399,11 +405,12 @@ def test_invalidated_worker_does_not_gate_new_work(setup, monkeypatch, target):
     if target == 'independent':
         replacement = store.confirm(store.create_draft('Independent', 'Other tests')['id'], 'test-human-3')
     monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
+    result = advance_requirement(store, board, req['id'])
+    assert result['outcome'] == 'completed'
     assert op.call(create_args(replacement))['task_id'] != tid
-    assert board.show(tid)['status'] == 'running'
+    assert board.show(tid)['status'] == 'archived'
     assert not any(call[0] == 'block' for call in board.calls)
-    # Stopping affected work remains an explicit coordinator decision.
-    assert op.call({'action': 'block', 'task_id': tid, 'reason': 'Conflicting work'})['status'] == 'blocked'
+    assert any(call[0] == 'archive' for call in board.calls)
     with pytest.raises(ValueError, match='active'):
         op.call(create_args(req))
     board.tasks[tid]['runs'] = []

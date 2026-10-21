@@ -135,6 +135,9 @@ def test_only_ancor_roles_have_business_tools():
         if role == 'ancor-interactor':
             assert set(tools) == {'ancor_requirement', 'ancor_get_context', 'ancor_board', 'ancor_notify'}
             assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond']
+            forbidden = json.loads(tools['ancor_requirement']['handler']({
+                'action': 'advance', 'requirement_id': 'fixture'}))
+            assert forbidden['code'] == 'forbidden'
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['list', 'respond']
             assert set(tools['ancor_get_context']['schema']['parameters']['properties']) == {
                 'requirement_id', 'task_limit', 'notification_limit',
@@ -142,8 +145,14 @@ def test_only_ancor_roles_have_business_tools():
                 'include_closed_notifications'}
             assert tools['ancor_board']['schema']['parameters']['properties']['action']['enum'] == ['list', 'show', 'history']
         elif role == 'ancor-coordinator':
-            assert set(tools) == {'ancor_get_context', 'ancor_ack_events', 'ancor_acceptance',
+            assert set(tools) == {'ancor_requirement', 'ancor_get_context',
+                                  'ancor_ack_events', 'ancor_acceptance',
                                   'ancor_board', 'ancor_wake', 'ancor_notify'}
+            assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['advance']
+            forbidden = json.loads(tools['ancor_requirement']['handler']({
+                'action': 'draft', 'title': 'No', 'brief': 'No',
+                'acceptance_criteria': 'No'}))
+            assert forbidden['code'] == 'forbidden'
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
             assert 'contract' in tools['ancor_board']['schema']['parameters']['properties']
         elif role == 'ancor-worker':
@@ -296,6 +305,8 @@ def test_cancellation_requires_exact_confirmation_and_is_idempotent(tmp_path):
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
     service.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
     service.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
+    assert service.store.get_requirement(requirement['id'])['target_status'] == 'cancelled'
+    service.store.finalize_transition(requirement['id'])
     assert service.store.get_requirement(requirement['id'])['status'] == 'cancelled'
     cancelled = [event for event in service.store.pending_events()
                  if event['kind'] == 'requirement.cancelled']
@@ -340,6 +351,7 @@ def pause_proposal(tmp_path, action='pause'):
                 'question': question['question'], 'choices_offered': question['choices'],
                 'status': 'answered', 'user_response': question['choices'][1]}]}),
             session_id='pause-s', tool_call_id='pause-c')
+        service.store.finalize_transition(requirement['id'])
     proposal = service.requirement({
         'action': action, 'requirement_id': requirement['id'],
         'summary': 'Resume the confirmed work' if action == 'resume' else 'Stop briefly',
@@ -361,6 +373,8 @@ def test_pause_and_resume_require_exact_confirmation_and_are_idempotent(tmp_path
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
     service.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
     service.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
+    assert service.store.get_requirement(requirement['id'])['target_status'] == 'paused'
+    service.store.finalize_transition(requirement['id'])
     assert service.store.get_requirement(requirement['id'])['status'] == 'paused'
     paused = [event for event in service.store.pending_events()
               if event['kind'] == 'requirement.paused']
@@ -375,6 +389,8 @@ def test_pause_and_resume_require_exact_confirmation_and_are_idempotent(tmp_path
                                   session_id='s2', tool_call_id='c2')
     resume_service.post_tool_call('clarify', resume_args, json.dumps(resume_result),
                                   session_id='s2', tool_call_id='c2')
+    assert resume_service.store.get_requirement(resume_requirement['id'])['target_status'] == 'active'
+    resume_service.store.finalize_transition(resume_requirement['id'])
     assert resume_service.store.get_requirement(resume_requirement['id'])['status'] == 'active'
     resumed = [event for event in resume_service.store.pending_events()
                if event['kind'] == 'requirement.resumed']

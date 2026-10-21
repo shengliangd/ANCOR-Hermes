@@ -153,7 +153,8 @@ def test_ack_allows_blocked_task_from_invalidated_requirement(tmp_path, monkeypa
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [
         {'id': 'task', 'status': 'blocked'}])
     replacement = store.confirm(store.create_draft('replacement', 'verified', req['id'])['id'], 'fixture')
-    assert replacement['status'] == 'active'
+    store.finalize_transition(req['id'])
+    assert store.get_requirement(replacement['id'])['status'] == 'active'
     assert store.get_requirement(req['id'])['status'] == 'invalidated'
     blocked = store.add_event('native.blocked', {'task_id': 'task'},
                               source_key='native:test:obsolete')

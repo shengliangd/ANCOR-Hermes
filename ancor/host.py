@@ -208,6 +208,12 @@ class Host:
             if requirement is None:
                 decisions[row['id']] = 'requirement_missing'
                 continue
+            target = requirement.get('target_status')
+            if target in {'cancelled', 'invalidated'}:
+                decisions[row['id']] = 'requirement_' + target
+                continue
+            if target is not None:
+                continue
             status = requirement['status']
             if status in {'cancelled', 'invalidated', 'accepted'}:
                 decisions[row['id']] = 'requirement_' + status
@@ -302,13 +308,9 @@ class Host:
         return events
 
     def invalidated_tasks(self, data):
-        """Surface obsolete unfinished work, never stop it or infer retirement."""
-        from .operations import Operations
-        from .retirement import Retirement
-
+        """Surface residual drift after an invalidated requirement should be terminal."""
         invalidated = {r['id']: r for r in data['requirements'] if r['status'] == 'invalidated'}
         tasks = {t['id']: t for t in self.tasks}
-        retired = {}
         unresolved = []
         for link in data['task_links']:
             rid, tid = link['requirement_id'], link['task_id']
@@ -316,24 +318,10 @@ class Host:
                 continue
             task = tasks.get(tid, {})
             status = task.get('status')
-            if status in {'todo', 'ready', 'running', 'review', 'triage'}:
-                reason = 'Invalidated requirement still has unfinished ' + status + ' work'
-            else:
-                try:
-                    detail = self.board._call('show', tid)
-                    Operations.require_quiescence(detail)
-                    if any(not run.get('ended_at') for run in detail['runs']):
-                        raise RuntimeError('active run')
-                    if detail['task']['status'] == 'done':
-                        continue
-                    if rid not in retired:
-                        retired[rid] = Retirement(self.ctx, self.store, self.board).effective_retired(rid)
-                    if tid in retired[rid]:
-                        continue
-                    reason = 'Invalidated requirement has unresolved work without safe retirement'
-                except Exception:
-                    # Failed reads are not evidence that obsolete work is quiet.
-                    reason = 'Invalidated task quiescence could not be established; inspect native detail'
+            if status == 'archived':
+                continue
+            reason = ('Invalidated requirement has a linked native task that is not archived'
+                      if status else 'Invalidated requirement linked task is unreadable')
             shown, truncated = preview(reason, 160)
             item = {
                 'task_id': tid,
@@ -355,7 +343,8 @@ class Host:
         delivered = {n['id'] for n in notifications
                      if n['state'] == 'sent' and n['kind'] == 'completion'}
         requirements = [r for r in data['requirements']
-                        if r['status'] in {'active', 'paused'} or
+                        if r['status'] in {'active', 'paused', 'pending'}
+                        or r.get('target_status') is not None or
                         (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)]
         relevant = {r['id'] for r in requirements}
         scoped = {**data, 'requirements': requirements}

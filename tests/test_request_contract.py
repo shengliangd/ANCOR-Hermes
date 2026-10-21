@@ -163,11 +163,13 @@ def test_expanded_context_reports_paused_state_and_reason(tmp_path, monkeypatch)
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-interactor', {})
     pause = store.create_requirement_command('pause', req['id'], 'User asked', 'Stop briefly')
     store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+    store.finalize_transition(req['id'])
     context = call(tools, 'ancor_get_context', {'requirement_id': req['id']})
     assert context['requirement']['status'] == 'paused'
     assert context['progression'][0]['state'] == 'paused'
-    assert context['transitions']['items'][0]['kind'] == 'requirement.paused'
-    assert context['transitions']['items'][0]['reason_preview'] == 'User asked'
+    paused = next(item for item in context['transitions']['items']
+                  if item['kind'] == 'requirement.paused')
+    assert paused['reason_preview'] == 'User asked'
 
 
 def test_notification_tool_output_does_not_expose_transport_error_key(tmp_path, monkeypatch):

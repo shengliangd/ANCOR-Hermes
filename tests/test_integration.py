@@ -58,6 +58,10 @@ def run(argv, **kwargs):
     action = argv[6]
     if action == 'list': value = list(tasks.values())
     elif action == 'show': value = {'task': tasks[argv[7]], 'runs':[], 'comments':[]}
+    elif action == 'comment': return SimpleNamespace(stdout='')
+    elif action == 'archive':
+        tasks[argv[7]]['status'] = 'archived'
+        return SimpleNamespace(stdout='')
     else: raise AssertionError(argv)
     return SimpleNamespace(stdout=json.dumps(value))
 original = NativeBoard.__init__

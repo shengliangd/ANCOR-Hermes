@@ -46,17 +46,17 @@ Examples of lowering a requirement to the result it protects:
 4. Call native `clarify` with the returned `clarify_args` unchanged. A draft, a model assertion, or a conversational reply does not activate the requirement.
 5. Read `ancor_get_context` after confirmation and report the durable state accurately. `ancor_requirement confirm` only re-prepares a draft for confirmation; it is never consent.
 
-For a change, create a new draft with `replacement_of` set to the current requirement ID or IDs. Confirmation invalidates the old requirement and creates the replacement. Never edit an active requirement in place or let a stale draft authorize a new change.
+For a change, create a new draft with `replacement_of` set to the current requirement ID or IDs. Confirmation requests the replacement; the coordinator archives the old cards and activates the new requirement. Never edit an active requirement in place or let a stale draft authorize a new change.
 
 ## 3. Cancel only after explicit confirmation
 
 Call `ancor_requirement` with `action=cancel`, the active or paused `requirement_ids`, an optional `reason`, and an optional high-level `summary`. The call creates an immutable cancellation proposal; it does not cancel anything.
 
-Present the proposal and call native `clarify` with its exact `clarify_args`. Only the exact submitted cancellation choice cancels. A cancelled, timed-out, altered, or ambiguous confirmation leaves every requirement active.
+Present the proposal and call native `clarify` with its exact `clarify_args`. Only the exact submitted cancellation choice requests cancellation; the coordinator completes it after linked cards converge. A cancelled, timed-out, altered, or ambiguous confirmation leaves every requirement active.
 
 ## 4. Pause and resume
 
-Pause and resume are explicit human commands, never autonomous maintenance. When the user asks to pause a specific requirement, call `ancor_requirement` with `action=pause`, the `requirement_id`, and the user's `reason`; `summary` is optional. For resume use `action=resume` with the same fields. Each call creates an immutable proposal; present it and call native `clarify` with the returned `clarify_args` unchanged. Only the exact submitted choice pauses or resumes the requirement.
+Pause and resume are explicit human commands, never autonomous maintenance. When the user asks to pause a specific requirement, call `ancor_requirement` with `action=pause`, the `requirement_id`, and the user's `reason`; `summary` is optional. For resume use `action=resume` with the same fields. Each call creates an immutable proposal; present it and call native `clarify` with the returned `clarify_args` unchanged. Only the exact submitted choice requests the transition; the coordinator commits it after linked work is quiescent.
 
 Pausing stops new coordination for that requirement and asks the coordinator to quiesce its linked tasks; it is reversible and preserves history. Resuming reactivates coordination, but the coordinator must re-evaluate existing work rather than assume it can continue unchanged. Cancellation and replacement are different decisions. A paused requirement is visible in `ancor_get_context` and `ancor_board`; report it as paused, not as progress or failure.
 

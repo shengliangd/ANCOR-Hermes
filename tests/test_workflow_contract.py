@@ -104,7 +104,15 @@ def test_acceptance_schema_matches_service_contract(tmp_path):
             with pytest.raises(ValueError):
                 Service(ctx, store).acceptance({'action': 'accept', 'requirement_id': req['id'],
                                                 'evidence': {**evidence, field: invalid}})
-    result = Service(ctx, store).acceptance({'action': 'accept', 'requirement_id': req['id'], 'evidence': evidence})
+    class Board:
+        def list(self):
+            return [{'id': 'task-one', 'status': 'done'}]
+
+        def archive(self, task_id, reason):
+            return {'id': task_id, 'status': 'archived'}
+
+    result = Service(ctx, store, board=Board()).acceptance(
+        {'action': 'accept', 'requirement_id': req['id'], 'evidence': evidence})
     assert result['status'] == 'accepted'
 
 

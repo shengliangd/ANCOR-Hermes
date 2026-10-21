@@ -43,8 +43,9 @@ class Scheduling:
                 rid = args.get('requirement_id', old['requirement_id'] if old else None)
                 if old and rid != old['requirement_id']:
                     raise ValueError('replacement must retain requirement')
-                if self.store._get(db, 'requirements', rid)['status'] != 'active':
-                    raise ValueError('requirement is not active')
+                requirement = self.store._get(db, 'requirements', rid)
+                if requirement['status'] != 'active' or requirement['target_status'] is not None:
+                    raise ValueError('requirement is not stably active')
                 reason = self.store._text(args['reason'])
                 due = args['due_at']
                 if isinstance(due, bool) or not isinstance(due, (int, float)) or not math.isfinite(due) or due <= now:
@@ -86,7 +87,7 @@ class Scheduling:
                 (requirement_id, requirement_id))]
 
     def _suppress(self, db):
-        db.execute("UPDATE scheduled_wakes SET state='suppressed' WHERE state IN ('scheduled','queued') AND requirement_id IN (SELECT id FROM requirements WHERE status!='active')")
+        db.execute("UPDATE scheduled_wakes SET state='suppressed' WHERE state IN ('scheduled','queued') AND requirement_id IN (SELECT id FROM requirements WHERE status!='active' OR target_status IS NOT NULL)")
         db.execute("UPDATE events SET acknowledged=1 WHERE source_key IN (SELECT 'wake:' || id FROM scheduled_wakes WHERE state IN ('suppressed','cancelled'))")
         db.execute("UPDATE scheduled_wakes SET state='handled' WHERE state='queued' AND EXISTS (SELECT 1 FROM events WHERE source_key='wake:' || scheduled_wakes.id AND acknowledged=1)")
 
@@ -97,7 +98,8 @@ class Scheduling:
             for row in db.execute("SELECT * FROM scheduled_wakes WHERE state='scheduled' AND due_at<=?", (now,)).fetchall():
                 self.store._add_event(db, 'wake.due', dict(row), 'wake:' + row['id'])
                 db.execute("UPDATE scheduled_wakes SET state='queued' WHERE id=?", (row['id'],))
-            active = db.execute("SELECT 1 FROM requirements WHERE status='active' LIMIT 1").fetchone()
+            active = db.execute("SELECT 1 FROM requirements WHERE status='active' "
+                                "OR target_status IS NOT NULL LIMIT 1").fetchone()
             state = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
             if not active:
                 db.execute('UPDATE coordination_clock SET active_since=NULL')
@@ -180,6 +182,11 @@ class Scheduling:
                     task['blocked_reason_preview'] = shown
                     if truncated:
                         task['blocked_reason_truncated'] = True
+            if requirement.get('target_status') is not None:
+                results.append({**base, 'state': 'stalled', 'reason': 'transition_pending',
+                                'waiting_on': {'target_status': requirement['target_status']},
+                                'task_ids': [task['id'] for task in items]})
+                continue
             if requirement['status'] == 'paused':
                 results.append({**base, 'state': 'paused', 'reason': 'requirement_paused',
                                 'waiting_on': None,
@@ -269,11 +276,14 @@ class Scheduling:
         visible_wakes = wakes[:WAKE_LIMIT]
         with self.store._transaction() as db:
             state = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
-        active = [r for r in data['requirements'] if r['status'] == 'active']
+        active = [r for r in data['requirements']
+                  if r['status'] == 'active' or r.get('target_status') is not None]
         anchor = max(state['active_since'] if state['active_since'] is not None else self.clock(), state['last_started'] or 0)
         deadline = anchor + self.INTERVAL if active else None
         if tasks is None:
-            tracked = [r for r in data['requirements'] if r['status'] in {'active', 'paused'}]
+            tracked = [r for r in data['requirements']
+                       if r['status'] in {'active', 'paused', 'pending'}
+                       or r.get('target_status') is not None]
             progression = [{'requirement_id': req['id'], 'state': 'unknown', 'reason': 'board_unavailable',
                             'waiting_on': None, 'task_ids': [],
                             'timers': [{'kind': 'scheduled_wake', **wake_ref(wake)} for wake in visible_wakes

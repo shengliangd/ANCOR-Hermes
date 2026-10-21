@@ -11,6 +11,11 @@ from uuid import uuid4
 from .views import TITLE_MAX_CHARS
 
 
+STABLE_STATUSES = frozenset({'active', 'paused'})
+TERMINAL_STATUSES = frozenset({'accepted', 'cancelled', 'invalidated'})
+TRANSITION_TARGETS = frozenset({'active', 'paused', 'cancelled', 'invalidated'})
+
+
 class Store:
     def __init__(self, path):
         self.path = str(path)
@@ -32,7 +37,7 @@ class Store:
                     title TEXT NOT NULL,
                     brief TEXT NOT NULL, acceptance_criteria TEXT NOT NULL,
                     replacement_of TEXT, confirmation_reference TEXT NOT NULL,
-                    status TEXT NOT NULL);
+                    status TEXT NOT NULL, target_status TEXT);
                 CREATE TABLE IF NOT EXISTS task_links (
                     requirement_id TEXT NOT NULL, task_id TEXT NOT NULL,
                     PRIMARY KEY (requirement_id, task_id));
@@ -43,6 +48,7 @@ class Store:
             ''')
             self._require_title_columns(db)
             self._ensure_columns(db, 'drafts', {'summary': 'TEXT'})
+            self._ensure_columns(db, 'requirements', {'target_status': 'TEXT'})
 
     @staticmethod
     def _require_title_columns(db):
@@ -105,6 +111,11 @@ class Store:
             raise KeyError(identifier)
         return dict(row)
 
+    @staticmethod
+    def _stable(requirement):
+        return (requirement['status'] in STABLE_STATUSES
+                and requirement.get('target_status') is None)
+
     def _require_replacement_bases(self, db, replacement_ids):
         bases = []
         for identifier in replacement_ids:
@@ -116,10 +127,10 @@ class Store:
                         f'replacement_of {identifier} is a draft, not a confirmed requirement') from None
                 raise ValueError(
                     f'replacement_of {identifier} does not reference an existing requirement') from None
-            if base['status'] not in {'active', 'paused'}:
+            if not self._stable(base):
                 raise ValueError(
                     f'replacement_of {identifier} is {base["status"]}; '
-                    'replacement bases must be active or paused') from None
+                    'replacement bases must be stable active or paused requirements') from None
             bases.append(base)
         return bases
 
@@ -165,8 +176,8 @@ class Store:
         identifier = uuid4().hex
         with self._transaction() as db:
             rows = [self._get(db, 'requirements', i) for i in ids]
-            if any(row['status'] not in {'active', 'paused'} for row in rows):
-                raise ValueError('all requirements must be active or paused')
+            if any(not self._stable(row) for row in rows):
+                raise ValueError('all requirements must be stable active or paused')
             db.execute('INSERT INTO cancellations VALUES (?, ?, ?, ?, NULL)',
                        (identifier, json.dumps(ids), reason, summary))
             return self._cancellation(self._get(db, 'cancellations', identifier))
@@ -184,8 +195,8 @@ class Store:
         required = 'active' if action == 'pause' else 'paused'
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
-            if requirement['status'] != required:
-                raise ValueError(f'{action} requires a {required} requirement')
+            if not self._stable(requirement) or requirement['status'] != required:
+                raise ValueError(f'{action} requires a stable {required} requirement')
             existing = db.execute(
                 'SELECT * FROM requirement_commands WHERE action=? AND requirement_id=? '
                 'AND reason=? AND summary=? AND confirmation_reference IS NULL '
@@ -204,7 +215,7 @@ class Store:
             return self._get(db, 'requirement_commands', command_id)
 
     def confirm_requirement_command(self, command_id, confirmation_reference):
-        """Consume one exact pause/resume confirmation atomically and idempotently."""
+        """Request one exact pause/resume transition atomically and idempotently."""
         self._text(confirmation_reference)
         with self._transaction() as db:
             command = self._get(db, 'requirement_commands', command_id)
@@ -213,19 +224,17 @@ class Store:
                 return requirement
             action = command['action']
             target = 'paused' if action == 'pause' else 'active'
-            if requirement['status'] != target:
-                required = 'active' if action == 'pause' else 'paused'
-                if requirement['status'] != required:
-                    raise ValueError(f'{action} requires a {required} requirement')
-                db.execute('UPDATE requirements SET status=? WHERE id=?',
-                           (target, requirement['id']))
-                self._add_event(
-                    db, 'requirement.' + ('paused' if action == 'pause' else 'resumed'), {
-                        'requirement_id': requirement['id'], 'command_id': command_id,
-                        'reason': command['reason'], 'summary': command['summary'],
-                        'confirmation_reference': confirmation_reference},
-                    source_key='requirement.' + action + ':' + command_id)
-                requirement = self._get(db, 'requirements', requirement['id'])
+            required = 'active' if action == 'pause' else 'paused'
+            if not self._stable(requirement) or requirement['status'] != required:
+                raise ValueError(f'{action} requires a stable {required} requirement')
+            db.execute('UPDATE requirements SET target_status=? WHERE id=?',
+                       (target, requirement['id']))
+            self._add_event(db, 'requirement.transition_requested', {
+                'requirement_id': requirement['id'], 'command_id': command_id,
+                'from_status': requirement['status'], 'target_status': target,
+                'reason': command['reason'], 'summary': command['summary'],
+                'confirmation_reference': confirmation_reference})
+            requirement = self._get(db, 'requirements', requirement['id'])
             db.execute('UPDATE requirement_commands SET confirmation_reference=? WHERE id=?',
                        (confirmation_reference, command_id))
             return requirement
@@ -281,6 +290,7 @@ class Store:
                            ((identifier,) for identifier in event_ids))
 
     def confirm(self, draft_id, confirmation_reference):
+        """Stage a confirmed draft and any replaced requirements for transition."""
         self._text(confirmation_reference)
         with self._transaction() as db:
             existing = db.execute('SELECT * FROM requirements WHERE draft_id = ?',
@@ -293,16 +303,31 @@ class Store:
                 replacement_ids = json.loads(draft['replacement_of'])
             bases = self._require_replacement_bases(db, replacement_ids)
             for base in bases:
-                db.execute("UPDATE requirements SET status = 'invalidated' WHERE id = ?", (base['id'],))
+                db.execute("UPDATE requirements SET target_status = 'invalidated' WHERE id = ?",
+                           (base['id'],))
             identifier = uuid4().hex
-            db.execute('INSERT INTO requirements VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            status = 'pending' if bases else 'active'
+            target_status = 'active' if bases else None
+            db.execute('INSERT INTO requirements '
+                       '(id, draft_id, title, brief, acceptance_criteria, replacement_of, '
+                       'confirmation_reference, status, target_status) '
+                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (identifier, draft_id, draft['title'], draft['brief'],
                         draft['acceptance_criteria'], draft['replacement_of'],
-                        confirmation_reference, 'active'))
+                        confirmation_reference, status, target_status))
             for base in bases:
-                self._add_event(db, 'requirement.invalidated',
-                                {'requirement_id': base['id'], 'replacement_id': identifier})
-            self._add_event(db, 'requirement.confirmed', {'requirement_id': identifier})
+                self._add_event(db, 'requirement.transition_requested', {
+                    'requirement_id': base['id'], 'replacement_id': identifier,
+                    'from_status': base['status'], 'target_status': 'invalidated'})
+            if bases:
+                self._add_event(db, 'requirement.staged', {
+                    'requirement_id': identifier, 'draft_id': draft_id,
+                    'replacement_of': draft['replacement_of'],
+                    'target_status': 'active'})
+            else:
+                self._add_event(db, 'requirement.activated', {
+                    'requirement_id': identifier, 'draft_id': draft_id,
+                    'from_status': None, 'target_status': 'active'})
             return self._get(db, 'requirements', identifier)
 
     def link_task(self, requirement_id, task_id):
@@ -331,47 +356,154 @@ class Store:
                 "SELECT * FROM events WHERE kind = 'requirement.accepted' ORDER BY id")]
 
     def requirement_transitions(self, requirement_id=None):
-        """Retain pause/resume history even after its coordination event is handled."""
+        """Retain requirement transition history after its events are handled."""
         with self._transaction() as db:
             events = [self._event(row) for row in db.execute(
                 "SELECT * FROM events WHERE kind IN "
-                "('requirement.paused', 'requirement.resumed') ORDER BY id")]
+                "('requirement.staged', 'requirement.transition_requested', "
+                "'requirement.activated', 'requirement.paused', 'requirement.resumed', "
+                "'requirement.cancelled', 'requirement.invalidated') ORDER BY id")]
         if requirement_id is not None:
             events = [event for event in events
                       if event['payload'].get('requirement_id') == requirement_id]
         return events
 
+    @staticmethod
+    def _replacement_ids(value):
+        if value is None:
+            return []
+        if isinstance(value, str) and value.startswith('['):
+            return json.loads(value)
+        return [value]
+
+    def _transition_event(self, db, requirement, target):
+        requirement_id = requirement['id']
+        payload = {
+            'requirement_id': requirement_id,
+            'from_status': requirement['status'],
+            'target_status': target,
+        }
+        action = {'paused': 'pause', 'active': 'resume'}.get(target)
+        requested = None
+        if action is not None:
+            command = db.execute(
+                'SELECT * FROM requirement_commands WHERE requirement_id=? AND action=? '
+                'AND confirmation_reference IS NOT NULL ORDER BY rowid DESC LIMIT 1',
+                (requirement_id, action)).fetchone()
+            if command:
+                payload.update(command_id=command['id'], reason=command['reason'],
+                               summary=command['summary'],
+                               confirmation_reference=command['confirmation_reference'])
+            else:
+                requested = self._latest_transition_request(db, requirement_id, target)
+                if requested:
+                    payload.update({
+                        key: requested.get(key) for key in
+                        ('command_id', 'reason', 'summary', 'confirmation_reference')
+                        if requested.get(key) is not None})
+        if target == 'cancelled':
+            found = False
+            for row in db.execute(
+                    'SELECT * FROM cancellations WHERE confirmation_reference IS NOT NULL '
+                    'ORDER BY rowid DESC'):
+                identifiers = json.loads(row['requirement_ids'])
+                if requirement_id in identifiers:
+                    payload.update(reason=row['reason'], summary=row['summary'],
+                                   batch_requirement_ids=identifiers,
+                                   confirmation_reference=row['confirmation_reference'])
+                    found = True
+                    break
+            if not found:
+                requested = self._latest_transition_request(db, requirement_id, target)
+                if requested:
+                    payload.update({
+                        key: requested.get(key) for key in
+                        ('reason', 'batch_requirement_ids', 'confirmation_reference')
+                        if requested.get(key) is not None})
+        if target == 'invalidated':
+            for successor in db.execute(
+                    "SELECT * FROM requirements WHERE status='pending' "
+                    "AND target_status='active' ORDER BY rowid"):
+                if requirement_id in self._replacement_ids(successor['replacement_of']):
+                    payload['replacement_id'] = successor['id']
+                    break
+        if target == 'active' and requirement['status'] == 'pending':
+            replacement_ids = self._replacement_ids(requirement['replacement_of'])
+            payload['replacement_of'] = requirement['replacement_of']
+            if replacement_ids:
+                payload['invalidated_requirement_ids'] = replacement_ids
+        kind = ('requirement.paused' if target == 'paused' else
+                'requirement.resumed' if target == 'active' and requirement['status'] == 'paused' else
+                'requirement.activated' if target == 'active' else
+                'requirement.cancelled' if target == 'cancelled' else
+                'requirement.invalidated')
+        return kind, payload
+
+    @staticmethod
+    def _latest_transition_request(db, requirement_id, target):
+        for row in db.execute(
+                "SELECT payload FROM events WHERE kind='requirement.transition_requested' "
+                'ORDER BY id DESC'):
+            payload = json.loads(row['payload'])
+            if (payload.get('requirement_id') == requirement_id
+                    and payload.get('target_status') == target):
+                return payload
+        return None
+
+    def _finalize_one(self, db, requirement):
+        target = requirement.get('target_status')
+        if target is None:
+            return requirement
+        if target not in TRANSITION_TARGETS:
+            raise RuntimeError(f'unknown target requirement status {target!r}')
+        if target == 'active' and requirement['status'] == 'pending':
+            replacement_ids = self._replacement_ids(requirement['replacement_of'])
+            if any(self._get(db, 'requirements', identifier)['status'] != 'invalidated'
+                   for identifier in replacement_ids):
+                raise RuntimeError('replacement bases are not yet invalidated')
+        kind, payload = self._transition_event(db, requirement, target)
+        cursor = db.execute(
+            'UPDATE requirements SET status=?, target_status=NULL '
+            'WHERE id=? AND status=? AND target_status=?',
+            (target, requirement['id'], requirement['status'], target))
+        if cursor.rowcount != 1:
+            raise RuntimeError('requirement transition changed concurrently')
+        self._add_event(db, kind, payload)
+        return self._get(db, 'requirements', requirement['id'])
+
     def accept(self, requirement_id, evidence):
         self._text(evidence)
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
-            if requirement['status'] != 'active':
-                raise ValueError('requirement is not active')
+            if requirement['status'] != 'active' or requirement['target_status'] is not None:
+                raise ValueError('requirement is not stably active')
             db.execute("UPDATE requirements SET status = 'accepted' WHERE id = ?",
                        (requirement_id,))
             self._add_event(db, 'requirement.accepted',
                             {'requirement_id': requirement_id, 'evidence': evidence})
             return self._get(db, 'requirements', requirement_id)
 
-    def _cancel(self, db, requirement_ids, reason):
+    def _request_cancel(self, db, requirement_ids, reason):
         ids = list(dict.fromkeys(requirement_ids))
         if not ids or any(not isinstance(i, str) or not i.strip() for i in ids):
             raise ValueError('requirement_ids must contain nonempty IDs')
         rows = [self._get(db, 'requirements', i) for i in ids]
-        if any(row['status'] not in {'active', 'paused'} for row in rows):
-            raise ValueError('all requirements must be active or paused')
+        if any(not self._stable(row) for row in rows):
+            raise ValueError('all requirements must be stable active or paused')
         for row in rows:
-            db.execute("UPDATE requirements SET status = 'cancelled' WHERE id = ?", (row['id'],))
-            self._add_event(db, 'requirement.cancelled', {
-                'requirement_id': row['id'], 'reason': reason,
+            db.execute("UPDATE requirements SET target_status = 'cancelled' WHERE id = ?",
+                       (row['id'],))
+            self._add_event(db, 'requirement.transition_requested', {
+                'requirement_id': row['id'], 'from_status': row['status'],
+                'target_status': 'cancelled', 'reason': reason,
                 'batch_requirement_ids': ids})
         return [self._get(db, 'requirements', i) for i in ids]
 
     def cancel(self, requirement_ids, reason):
-        """Cancel one or more active requirements atomically."""
+        """Request cancellation of stable requirements; advance commits it."""
         self._text(reason)
         with self._transaction() as db:
-            return self._cancel(db, requirement_ids, reason)
+            return self._request_cancel(db, requirement_ids, reason)
 
     def confirm_cancellation(self, cancellation_id, confirmation_reference):
         """Consume one exact cancellation confirmation idempotently and atomically."""
@@ -381,17 +513,40 @@ class Store:
             ids = json.loads(cancellation['requirement_ids'])
             if cancellation['confirmation_reference'] is not None:
                 return [self._get(db, 'requirements', i) for i in ids]
-            rows = self._cancel(db, ids, cancellation['reason'] or 'User confirmed cancellation')
+            rows = self._request_cancel(
+                db, ids, cancellation['reason'] or 'User confirmed cancellation')
             db.execute('UPDATE cancellations SET confirmation_reference = ? WHERE id = ?',
                        (confirmation_reference, cancellation_id))
             return rows
+
+    def finalize_transition(self, requirement_id):
+        """Commit a verified transition and activate any replacement made ready by it."""
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            if requirement['target_status'] is None:
+                return {'requirement': requirement, 'activated': []}
+            target = requirement['target_status']
+            finalized = self._finalize_one(db, requirement)
+            activated = []
+            if target == 'invalidated':
+                for successor in db.execute(
+                        "SELECT * FROM requirements WHERE status='pending' "
+                        "AND target_status='active' ORDER BY rowid").fetchall():
+                    successor = dict(successor)
+                    replacement_ids = self._replacement_ids(successor['replacement_of'])
+                    if requirement_id not in replacement_ids:
+                        continue
+                    if all(self._get(db, 'requirements', identifier)['status'] == 'invalidated'
+                           for identifier in replacement_ids):
+                        activated.append(self._finalize_one(db, successor))
+            return {'requirement': finalized, 'activated': activated}
 
     def reject(self, requirement_id, reason):
         self._text(reason)
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
-            if requirement['status'] != 'active':
-                raise ValueError('requirement is not active')
+            if requirement['status'] != 'active' or requirement['target_status'] is not None:
+                raise ValueError('requirement is not stably active')
             self._add_event(db, 'requirement.rejected',
                             {'requirement_id': requirement_id, 'reason': reason})
             return requirement
@@ -401,8 +556,8 @@ class Store:
         self._text(task_id); self._text(reason)
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
-            if requirement['status'] != 'active':
-                raise ValueError('association target must be active')
+            if requirement['status'] != 'active' or requirement['target_status'] is not None:
+                raise ValueError('association target must be stably active')
             db.execute('INSERT OR IGNORE INTO task_links VALUES (?, ?)', (requirement_id, task_id))
             self._add_event(db, 'task.associated', {'task_id': task_id, 'requirement_id': requirement_id, 'reason': reason})
             return {'task_id': task_id, 'requirement_id': requirement_id, 'reason': reason}

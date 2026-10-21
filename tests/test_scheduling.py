@@ -190,6 +190,7 @@ def test_paused_requirement_is_not_stalled_and_suppresses_wakes(tmp_path):
                                reason='later', due_at=20_000))
     pause = store.create_requirement_command('pause', req['id'], 'user asked', 'Stop briefly')
     store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+    store.finalize_transition(req['id'])
     data = store.snapshot()
 
     health = scheduler.health(

@@ -34,6 +34,13 @@ class Board:
     def list(self):
         return self.tasks
 
+    def archive(self, task_id, reason):
+        task = next(row for row in self.tasks if row['id'] == task_id)
+        task['status'] = 'archived'
+        self.history.append({'id': len(self.history) + 1, 'task_id': task_id,
+                             'kind': 'archived', 'payload': {'reason': reason}})
+        return task
+
     def events(self, db_path, task_ids, *, after=0, limit=100):
         return [e for e in self.history if e['id'] > after and e['task_id'] in task_ids][:limit]
 
@@ -96,7 +103,7 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     assert board.guards == []
 
 
-def test_invalidated_requirements_wake_coordinator_without_automatic_guard(tmp_path, monkeypatch):
+def test_replacement_transition_wakes_coordinator_without_automatic_guard(tmp_path, monkeypatch):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
     old = store.confirm(store.create_draft('old', 'old')['id'], 'human:old')
@@ -121,16 +128,18 @@ def test_invalidated_requirements_wake_coordinator_without_automatic_guard(tmp_p
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
     assert asyncio.run(host.coordinator.tick()) == 'ran'
     payload = json.loads(calls[0][-1].split('\n', 1)[1])
-    invalidated = [e for e in payload['events'] if e['kind'] == 'requirement.invalidated']
-    assert len(invalidated) == 1
-    assert invalidated[0]['requirement_id'] == old['id']
-    assert new['id'] in invalidated[0]['payload_preview']
+    requested = [e for e in payload['events']
+                 if e['kind'] == 'requirement.transition_requested']
+    assert len(requested) == 1
+    assert requested[0]['requirement_id'] == old['id']
+    assert new['id'] in requested[0]['payload_preview']
     assert board.guards == []
     assert board.tasks[0]['status'] == 'running'
-    assert payload['snapshot']['invalidated_tasks']['items'][0]['task_status'] == 'running'
-    assert payload['snapshot']['board']['items'] == []
-    assert [r['id'] for r in host.wake_packet()['requirements']['items']] == [new['id']]
-    assert invalidated[0]['id'] in [e['id'] for e in store.pending_events()]
+    assert payload['snapshot']['invalidated_tasks']['items'] == []
+    assert requested[0]['id'] in [e['id'] for e in store.pending_events()]
+    requirements = host.wake_packet()['requirements']['items']
+    assert [r['id'] for r in requirements] == [old['id'], new['id']]
+    assert [r['target_status'] for r in requirements] == ['invalidated', 'active']
 
 
 def test_retry_budget_durable_bounded_and_recovers(tmp_path):
@@ -275,6 +284,7 @@ def test_paused_requirement_remains_visible_without_liveness(tmp_path):
     store.link_task(req['id'], 'task')
     pause = store.create_requirement_command('pause', req['id'], 'user asked', 'Stop briefly')
     store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+    store.finalize_transition(req['id'])
     host = Host(ctx, store=store, board=Board({'id': 'task', 'status': 'blocked'}))
     snapshot = host.wake_packet()
     assert [item['id'] for item in snapshot['requirements']['items']] == [req['id']]

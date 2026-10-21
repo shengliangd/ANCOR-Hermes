@@ -1,6 +1,7 @@
 """Coordinator operations over the native CLI."""
 from .board import NativeBoard
 from .service import Service
+from .transitions import require_quiescence as _require_quiescence
 from .views import bounded_latest, collection, task_detail, task_ref
 
 
@@ -164,20 +165,12 @@ class Operations:
     def require_quiescence(detail):
         # Native block clears the task claim and ends the run, but does NOT
         # kill its executor. Inspect retained run PIDs, not terminal status.
-        # PID existence is conservative (including reuse); never signal a kill.
-        import os
-        for run in detail['runs']:
-            pid = run.get('worker_pid')
-            if pid:
-                try:
-                    os.kill(int(pid), 0)
-                except ProcessLookupError:
-                    continue
-                except (PermissionError, ValueError, OSError):
-                    pass
-                raise RuntimeError('worker quiescence not established')
-            if not run.get('ended_at'):
-                raise RuntimeError('worker quiescence not established')
+        _require_quiescence(detail)
+
+    @staticmethod
+    def _require_stable_active(requirement):
+        if requirement['status'] != 'active' or requirement.get('target_status') is not None:
+            raise ValueError('requirement is not stably active')
 
     def call(self, args):
         expected = self.ctx.get_config('coordinator_profile', 'ancor-coordinator')
@@ -187,15 +180,15 @@ class Operations:
                 self.ctx.profile_name == interactor and action in {'list', 'show'}):
             raise PermissionError('coordinator profile required')
         if action not in {'create', 'list', 'show', 'history', 'block', 'unblock',
-                          'revise', 'comment', 'link', 'unlink', 'edit', 'associate'}:
+                          'revise', 'comment', 'link', 'unlink', 'edit', 'archive',
+                          'associate'}:
             raise ValueError('unknown board action')
         store = self.service.store
         if action not in {'list', 'show'}:
             self.reconcile()
         if action == 'create':
             req = store.get_requirement(args['requirement_id'])
-            if req['status'] != 'active':
-                raise ValueError('requirement is not active')
+            self._require_stable_active(req)
             contract = self._contract(args.get('contract'))
             for field in ('key', 'title'):
                 store._text(args[field])
@@ -209,8 +202,7 @@ class Operations:
             for parent in parent_ids:
                 if parent not in linked:
                     raise ValueError('unlinked parent task')
-                if store.get_requirement(linked[parent])['status'] != 'active':
-                    raise ValueError('parent requirement is not active')
+                self._require_stable_active(store.get_requirement(linked[parent]))
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
             body = build_work_contract(
                 objective=contract['objective'], scope=contract['scope'], task=task_text,
@@ -247,10 +239,9 @@ class Operations:
             for tid in (parent, child):
                 if tid not in links:
                     raise ValueError('unlinked task')
-                # Removing an obsolete prerequisite must not strand active work.
-                # Creating an edge still requires both requirements to be active.
-                if (action == 'link' or tid == child) and store.get_requirement(links[tid])['status'] != 'active':
-                    raise ValueError('requirement is not active')
+            self._require_stable_active(store.get_requirement(links[child]))
+            if action == 'link':
+                self._require_stable_active(store.get_requirement(links[parent]))
             # Native CLI owns cycle, running-child and run-ownership checks.
             actual = self.board.dependency(action, parent, child)
             return self._receipt(actual, links[child], [action])
@@ -276,18 +267,20 @@ class Operations:
                                   before_id=before_id)
         if action == 'associate':
             return store.associate_task(tid, args['requirement_id'], args['reason'])
+        if action == 'archive':
+            self.board.archive(tid, store._text(args['reason']))
+            actual = self.detail(tid)
+            return self._receipt(actual, links[tid], ['archive'])
         if action == 'revise':
             reason = store._text(args['reason'])
-            if store.get_requirement(links[tid])['status'] != 'active':
-                raise ValueError('requirement is not active')
+            self._require_stable_active(store.get_requirement(links[tid]))
             if detail['task']['status'] != 'triage' or detail['task'].get('archived_at'):
                 raise ValueError('revise requires an unarchived triage task')
             self.require_quiescence(detail)
             return self._receipt(self.board.revise(tid, reason), links[tid], ['revise'])
         if action == 'edit':
             req = store.get_requirement(links[tid])
-            if req['status'] != 'active':
-                raise ValueError('requirement is not active')
+            self._require_stable_active(req)
             if 'contract' in args and 'body' not in args:
                 raise ValueError('contract edits require body')
             fields = {key: args[key] for key in ('title', 'body', 'priority') if key in args}
@@ -317,8 +310,7 @@ class Operations:
             self.board.block(tid, store._text(args['reason']))
         elif action == 'unblock':
             self.require_quiescence(detail)
-            if store.get_requirement(links[tid])['status'] != 'active':
-                raise ValueError('requirement is not active')
+            self._require_stable_active(store.get_requirement(links[tid]))
             self.board._call('unblock', tid, '--reason', store._text(args['reason']), json_output=False)
         elif action == 'comment':
             text = store._text(args['body']).strip()

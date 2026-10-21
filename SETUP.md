@@ -284,17 +284,21 @@ plugin-imposed length limit. `human_target` and `transport_profile` are only for
 coordinator-selected background questions and completion notices; they are not
 prerequisites for requirement confirmation.
 
-Invalidation records an event. The triggered coordinator decides how to stop, hold or
-replan affected work; event ingestion itself does not block tasks. New work cannot
-be created for an invalidated requirement. There is no global requirement that all
-old workers stop before unrelated work can proceed.
+Confirmation stages a transition instead of committing it immediately. A
+requirement with non-empty `target_status` is frozen: it cannot create, edit,
+unblock or associate cards, or schedule wakes. The coordinator calls
+`ancor_requirement action=advance`; cancellation and replacement use native
+archive on linked cards, and replacement activates the new requirement only
+after every old card is archived. A shared card still used by another stable
+active or paused requirement is reported as a blocker rather than archived.
 
 Pause and resume use the same exact native `clarify` confirmation path as drafts
-and cancellations. A paused requirement is not active: it suppresses scheduled
-wakes, is reported as `paused` rather than `stalled`, and cannot create new work.
-Its coordinator blocks linked running or ready tasks and waits for quiescence;
-resume reactivates the requirement and requires the coordinator to re-evaluate
-existing work before unblocking it. No additional configuration is required.
+and cancellations. Confirmation requests the pause; `advance` blocks linked
+running or ready tasks, verifies executor quiescence, then commits `paused`. A
+paused requirement suppresses scheduled wakes, is reported as `paused` rather
+than `stalled`, and cannot create new work. Resume is staged too: after
+`advance`, the coordinator re-evaluates existing work before unblocking it. No
+additional configuration is required.
 
 ## Restart recovery contract
 

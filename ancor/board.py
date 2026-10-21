@@ -154,6 +154,21 @@ class NativeBoard:
             raise RuntimeError('native block verification failed')
         return task
 
+    def archive(self, task_id, reason):
+        """Write an audit comment, then use native archive and verify it stuck."""
+        reason = reason.strip()
+        if not reason:
+            raise ValueError('archive reason is required')
+        task = self.show(task_id)
+        if task['status'] != 'archived':
+            self._call('comment', task_id, reason, '--author', self.prefix[2],
+                       json_output=False)
+            self._call('archive', task_id, json_output=False)
+        actual = self.show(task_id)
+        if actual['status'] != 'archived':
+            raise RuntimeError('native archive verification failed')
+        return actual
+
     def guard(self, revisions):
         """Best-effort stale revision stop, NOT a pre-dispatch atomic fence.
 
