@@ -52,6 +52,9 @@ update or reinstall the plugin as well (`hermes plugins update ancor` for a
 tracked install, or reinstall from the pinned source URL), then confirm
 `hermes plugins show ancor` and run `hermes plugins doctor ancor`. A tool added
 to the plugin is unavailable until the serving Gateway reloads the plugin.
+The ANCOR inbox scanner is Gateway-lifetime state, so it survives a plugin
+reload; scanner code changes themselves still take effect only after a Gateway
+restart.
 
 After checking out a reviewed commit, sync only the role files; do not replace
 the whole profile:

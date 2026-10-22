@@ -1,4 +1,5 @@
 """Thin profile-scoped Hermes integration. No provisioning during registration."""
+import asyncio
 import hashlib
 import json
 import logging
@@ -156,12 +157,32 @@ def register(ctx, *, scan_runner=None):
     if scan_runner is None:
         from .host import scan_runner
     if ctx.profile_name == ctx.get_config('owner_profile', 'default') and ctx.get_config('gateway_owner', False):
-        pump = None
         def connected(native, adapter):
-            nonlocal pump
-            # Public spawn_task returns an asyncio.Task; reconnect must not fork scans.
-            if pump is None or pump.done():
-                pump = ctx.spawn_task(scan_runner(ctx, adapter), name='ancor:scan')
+            # Hermes owns plugin registrations per discovery generation: force re-discovery
+            # disposes them (including supervised tasks), while same-key plugins are not
+            # re-wired. A Gateway-lifetime task attached to the long-lived adapter keeps the
+            # durable inbox flowing across plugin updates. A Gateway restart still owns the
+            # final lifecycle and reloads the scanner code.
+            current = getattr(adapter, '_ancor_scan_task', None)
+            if current is not None and not current.done():
+                return
+            loop = asyncio.get_running_loop()
+
+            async def supervise():
+                while adapter.is_connected:
+                    try:
+                        await scan_runner(ctx, adapter)
+                        return
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        log.exception('ANCOR scan supervisor failed; retrying')
+                        if not adapter.is_connected:
+                            return
+                        await asyncio.sleep(15)
+
+            task = loop.create_task(supervise(), name='ancor:scan')
+            setattr(adapter, '_ancor_scan_task', task)
         ctx.register_platform_handler('api_server', connected)
     interactor_profile = ctx.get_config('interactor_profile', 'ancor-interactor')
     coordinator_profile = ctx.get_config('coordinator_profile', 'ancor-coordinator')

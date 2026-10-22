@@ -1,8 +1,11 @@
 """Plugin boundaries; native probes run with a disposable Hermes home."""
+import asyncio
 import importlib
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -24,6 +27,63 @@ def test_owner_registers_public_api_lifecycle_only_when_enabled():
     assert [x[0] for x in handlers] == ['api_server']
 
 
+def test_scan_survives_plugin_registration_teardown():
+    import ancor
+
+    class Owner:
+        profile_name = 'default'
+
+        def __init__(self):
+            self.managed = []
+            self.connected = None
+
+        def get_config(self, key, default=None):
+            return True if key == 'gateway_owner' else default
+
+        def register_platform_handler(self, platform, handler):
+            assert platform == 'api_server'
+            self.connected = handler
+
+        def spawn_task(self, coro, *, name=None):
+            task = asyncio.get_running_loop().create_task(coro, name=name)
+            self.managed.append(task)
+            return task
+
+    owner = Owner()
+    adapter = SimpleNamespace(name='api', is_connected=True)
+    started = []
+    stop = asyncio.Event()
+
+    async def runner(ctx, live_adapter):
+        started.append(live_adapter.name)
+        await stop.wait()
+
+    ancor.register(owner, scan_runner=runner)
+
+    async def scenario():
+        owner.connected(None, adapter)
+        await asyncio.sleep(0)
+        assert started == ['api']
+        assert owner.managed == []  # not tied to the plugin registration ledger
+
+        # Plugin force-reload cancels every supervised task; the scanner must survive it.
+        for task in owner.managed:
+            task.cancel()
+        await asyncio.sleep(0)
+        scan = adapter._ancor_scan_task
+        assert not scan.done()
+
+        owner.connected(None, adapter)
+        await asyncio.sleep(0)
+        assert started == ['api']  # reconnect/reload does not fork a second scanner
+
+        stop.set()
+        await scan
+        assert scan.done()
+
+    asyncio.run(scenario())
+
+
 def test_confirmation_cannot_be_model_supplied(tmp_path):
     from ancor.service import Service
     from ancor.store import Store
@@ -33,9 +93,6 @@ def test_confirmation_cannot_be_model_supplied(tmp_path):
     prepared = service.requirement({'action': 'confirm', 'draft_id': draft['id'], 'confirmed': True})
     assert prepared['clarify_args']
     assert store.snapshot()['requirements'] == []
-from types import SimpleNamespace
-
-
 def configured_context():
     return SimpleNamespace(get_config=lambda key, default=None: default)
 

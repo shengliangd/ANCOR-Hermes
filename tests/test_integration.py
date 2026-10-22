@@ -95,18 +95,19 @@ async def verify_owner():
     started = []
     release = asyncio.Event()
     async def runner(ctx, adapter):
-        started.append(adapter)
+        started.append(adapter.name)
         await release.wait()
+    adapter = SimpleNamespace(name='first', is_connected=True)
     ancor.register(owner, scan_runner=runner)
-    owner.connected(None, 'first')
-    owner.connected(None, 'second')
+    owner.connected(None, adapter)
+    owner.connected(None, adapter)
     await asyncio.sleep(0)
     assert started == ['first']
     release.set()
     await asyncio.sleep(0)
-    owner.connected(None, 'third')
+    owner.connected(None, adapter)
     await asyncio.sleep(0)
-    assert started == ['first', 'third']
+    assert started == ['first', 'first']
 asyncio.run(verify_owner())
 print('native registration, coordination gates, replies, acceptance and pump verified')
 '''
