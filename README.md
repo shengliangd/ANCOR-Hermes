@@ -79,6 +79,9 @@ and notifications default to unresolved questions unless
 `omitted` names each excluded history bucket with an executable follow-up query, and
 `attention` is a short priority-ordered discovery list. Host-owned stalled work is
 returned under `conditions`, never duplicated as an ordinary pending event.
+`awaiting_review` separately lists coordinator-accepted requirements whose delivered
+completion notice has not yet been acknowledged by the human-facing role. These are
+open work for the human even though the requirement itself is already accepted.
 
 Expansion is explicit and bounded:
 
@@ -88,12 +91,14 @@ Expansion is explicit and bounded:
 - `ancor_board show(task_id=...)` returns one full card with contract, comments, runs and events.
 - `ancor_board history(task_id=..., kind=...)` pages one card's comments, events or runs.
 - `ancor_notify list(requirement_id=...)` scopes the notification history; adding `id` returns one full notification.
+- `ancor_notify acknowledge(id=accept:<requirement_id>)` closes one delivered completion notice after the human has reviewed it. It does not change requirement state or acceptance evidence.
 - `ancor_note list/get/add/update/delete` maintains coordinator-only working notes on one requirement. Notes are non-authoritative, soft-deleted on removal, and never substitute for requirement text, acceptance evidence or a task contract.
 
 Previews are never authoritative for confirmation, acceptance, or transcription.
 List results report total and returned counts so truncation is visible rather than silent.
-Unanswered questions stay visible ahead of recent completion notices, and live or recent
-tasks sort ahead of archived history.
+Unanswered questions stay visible ahead of recent completion notices, live or recent
+tasks sort ahead of archived history, and unacknowledged completion notices remain in
+`awaiting_review` until the human-facing role records review.
 
 The wake packet follows the same rule: requirements are title references, tasks are
 non-terminal card references, invalidated work carries a bounded reason preview, and

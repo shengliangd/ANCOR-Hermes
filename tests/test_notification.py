@@ -71,6 +71,24 @@ def test_idempotency_and_no_duplicate_delivery(tmp_path):
                        requirement_id='req')
 
 
+def test_completion_acknowledgement_is_idempotent_and_completion_only(tmp_path):
+    outbox = box(tmp_path)
+    outbox.enqueue('c', 'completion', 'Done', actor='coordinator',
+                   requirement_id='req')
+    assert outbox.claim_next()['id'] == 'c'
+    outbox.mark_sent('c', {'success': True})
+    first = outbox.acknowledge_completion('c', actor='interactor')
+    assert first['closed'] is True
+    assert first['closed_by'] == 'interactor'
+    assert first['close_reason'] == 'reviewed_by_human'
+    again = outbox.acknowledge_completion('c', actor='interactor')
+    assert again['closed_at'] == first['closed_at']
+    outbox.enqueue('q', 'question', 'Which label?', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    with pytest.raises(ValueError, match='completion'):
+        outbox.acknowledge_completion('q', actor='interactor')
+
+
 def test_multiple_open_questions_allowed_and_withdraw_closes_one(tmp_path):
     outbox = box(tmp_path)
     outbox.enqueue('q1', 'question', 'Which label?', actor='coordinator',

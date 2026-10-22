@@ -135,10 +135,10 @@ class Scheduling:
 
     def _blocked_wait(self, notifications, requirement_id, task_id, now):
         questions = self._question(notifications, requirement_id, task_id)
-        # A recorded answer is progress even if transport state stayed uncertain.
-        if any(row.get('answer') is not None for row in questions):
-            return 'stalled', 'question_answered_not_resumed'
-        open_questions = [row for row in questions if row.get('closed_at') is None]
+        # Current unanswered questions govern health; an older answered question
+        # must not mask a newer question that is still waiting for the human.
+        open_questions = [row for row in questions
+                          if row.get('answer') is None and row.get('closed_at') is None]
         if any(row.get('state') == 'sent' for row in open_questions):
             return 'waiting', None
         delivering = [row for row in open_questions if row.get('state') in {'pending', 'sending'}]
@@ -151,6 +151,10 @@ class Scheduling:
             return 'stalled', 'question_delivery_unconfirmed'
         if any(row.get('state') == 'uncertain' for row in open_questions):
             return 'stalled', 'question_delivery_unconfirmed'
+        # A recorded answer is progress even if transport state stayed uncertain.
+        if any(row.get('answer') is not None and row.get('closed_at') is None
+               for row in questions):
+            return 'stalled', 'question_answered_not_resumed'
         if any(row.get('closed_at') is not None for row in questions):
             return 'stalled', 'question_superseded'
         return 'stalled', 'blocked_without_wait'

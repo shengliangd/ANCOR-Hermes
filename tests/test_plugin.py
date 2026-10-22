@@ -140,7 +140,8 @@ def test_only_ancor_roles_have_business_tools():
             forbidden = json.loads(tools['ancor_requirement']['handler']({
                 'action': 'advance', 'requirement_id': 'fixture'}))
             assert forbidden['code'] == 'forbidden'
-            assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['list', 'respond']
+            assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == [
+                'list', 'respond', 'acknowledge']
             assert set(tools['ancor_get_context']['schema']['parameters']['properties']) == {
                 'requirement_id', 'task_limit', 'notification_limit',
                 'attention_limit', 'include_done', 'include_archived',

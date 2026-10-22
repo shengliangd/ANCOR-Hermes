@@ -70,10 +70,11 @@ def test_interactor_progress_uses_one_compact_open_work_read():
     text = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
     skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
     assert 'one `ancor_get_context(progress_only=true)` read' in text
-    assert 'compact Markdown table of open work only' in text
+    assert 'compact Markdown table of open work' in text
     assert 'make one `ancor_get_context(progress_only=true)` call' in skill
-    assert 'only requirements that are not closed' in skill
-    assert 'awaiting coordinator acceptance' in skill
+    assert 'combining `requirements` with `awaiting_review`' in skill
+    assert 'coordinator-accepted results whose completion notice' in skill
+    assert '`action=acknowledge`' in skill
     assert 'Do not call `skill_view`, `tool_describe`, a terminal' in skill
 
 

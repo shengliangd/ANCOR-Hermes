@@ -112,6 +112,14 @@ def test_progress_only_returns_open_work_including_acceptance_pending(tmp_path, 
     store.finalize_transition(paused['id'])
     store.accept(accepted['id'], 'verified')
     store.ack_events([event['id'] for event in store.pending_events()])
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination')
+    notice_id = 'accept:' + accepted['id']
+    box.enqueue(notice_id, 'completion', 'Verified delivery is ready for review.',
+                actor='ancor-coordinator', requirement_id=accepted['id'])
+    assert box.claim_next()['id'] == notice_id
+    box.mark_sent(notice_id, {'success': True})
     cards = [
         {'id': 'active-open', 'title': 'Active card', 'status': 'running'},
         {'id': 'awaiting-done', 'title': 'Awaiting card', 'status': 'done'},
@@ -137,6 +145,19 @@ def test_progress_only_returns_open_work_including_acceptance_pending(tmp_path, 
     assert 'pending_events' not in progress
     assert 'notifications' not in progress
     assert progress['counts']['open_requirements'] == 3
+    reviews = {row['id']: row for row in progress['awaiting_review']['items']}
+    assert set(reviews) == {accepted['id']}
+    assert reviews[accepted['id']]['state'] == 'awaiting_review'
+    assert reviews[accepted['id']]['notice_id'] == notice_id
+    assert progress['counts']['awaiting_review'] == 1
+    overview = call({})
+    assert [row['id'] for row in overview['awaiting_review']['items']] == [accepted['id']]
+    assert overview['counts']['awaiting_review'] == 1
+    acknowledged = json.loads(tools['ancor_notify']['handler'](
+        {'action': 'acknowledge', 'id': notice_id}))
+    assert acknowledged['closed'] is True
+    assert acknowledged['close_reason'] == 'reviewed_by_human'
+    assert call({'progress_only': True})['awaiting_review']['count'] == 0
     assert len(json.dumps(progress, ensure_ascii=False)) < len(json.dumps(
         call({}), ensure_ascii=False))
 

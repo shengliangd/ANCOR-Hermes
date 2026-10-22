@@ -146,6 +146,20 @@ def test_answered_uncertain_question_is_progress_not_delivery_failure(tmp_path):
     assert result['reason'] == 'question_answered_not_resumed'
 
 
+def test_new_open_question_is_not_masked_by_older_answered_question(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    store.link_task(req['id'], 'task')
+    answered = {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+                'task_id': 'task', 'state': 'sent', 'answer': 'Earlier answer'}
+    open_question = {'id': 'q2', 'kind': 'question', 'requirement_id': req['id'],
+                     'task_id': 'task', 'state': 'sent', 'answer': None}
+    result = scheduler.health(
+        store.snapshot(), [{'id': 'task', 'status': 'blocked'}],
+        [answered, open_question])[0]
+    assert result['state'] == 'waiting_on_human'
+    assert result['reason'] == 'blocked_waiting_human'
+
+
 def test_question_delivery_grace_and_stale_question(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')

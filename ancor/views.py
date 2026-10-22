@@ -138,6 +138,46 @@ def requirement_progress(requirement, progression=None, tasks=(), notifications=
     return item
 
 
+def awaiting_reviews(requirements, notifications):
+    """Accepted requirements whose delivered completion notice is not acknowledged."""
+    accepted = {requirement['id']: requirement for requirement in requirements or ()
+                if requirement.get('status') == 'accepted'}
+    latest = {}
+    for row in notifications or ():
+        if (row.get('kind') != 'completion' or row.get('state') != 'sent'
+                or row.get('closed_at') is not None):
+            continue
+        requirement = accepted.get(row.get('requirement_id'))
+        if requirement is not None:
+            latest[requirement['id']] = row
+    items = []
+    for requirement_id, row in latest.items():
+        result_preview, truncated = preview(row.get('message'), DEFAULT_PREVIEW_CHARS)
+        item = {
+            'id': requirement_id,
+            'title': accepted[requirement_id]['title'],
+            'status': 'accepted',
+            'state': 'awaiting_review',
+            'reason': 'completion_pending_review',
+            'notice_id': row['id'],
+            'result_preview': result_preview,
+            'acknowledge_via': {
+                'tool': 'ancor_notify',
+                'args': {'action': 'acknowledge', 'id': row['id']},
+            },
+        }
+        completed_at = row.get('delivery_started_at') or row.get('queued_at')
+        if completed_at is not None:
+            item['completed_at'] = completed_at
+        if truncated:
+            item['result_truncated'] = True
+        items.append(item)
+    items.sort(key=lambda item: (item.get('completed_at') is not None,
+                                 item.get('completed_at') or 0, item['id']),
+               reverse=True)
+    return items
+
+
 def requirement_detail(requirement, draft=None):
     """Exact, single-requirement detail. Only this projection exposes brief/ac."""
     item = {

@@ -406,6 +406,23 @@ class NotificationOutbox:
         self._coordinator(actor)
         return self.close_question(identifier, closed_by=actor, reason=reason)
 
+    def acknowledge_completion(self, identifier, *, actor):
+        """Mark a delivered completion notice as reviewed by the human-facing role."""
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError('acknowledging actor required')
+        with self._db() as db:
+            row = self._row(db, identifier)
+            if row['kind'] != 'completion':
+                raise ValueError('only completion notices can be acknowledged')
+            if row['closed_at'] is not None:
+                return row
+            if row['state'] != 'sent':
+                raise ValueError('completion notice has not been delivered')
+            db.execute('UPDATE human_notifications SET closed_at=?,closed_by=?,close_reason=? '
+                       'WHERE id=? AND closed_at IS NULL',
+                       (self.clock(), actor, 'reviewed_by_human', identifier))
+            return self._row(db, identifier)
+
 
 class NotificationDispatcher:
     """One Gateway-owned delivery loop; transport-neutral and non-blocking."""
