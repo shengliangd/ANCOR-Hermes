@@ -9,7 +9,9 @@ import pytest
 def test_manifest_declares_tools():
     path = Path(__file__).parents[1] / 'ancor/plugin.yaml'
     assert path.exists(), 'manifest missing'
-    assert 'provides_tools:' in path.read_text()
+    manifest = path.read_text()
+    assert 'provides_tools:' in manifest
+    assert '  - transform_tool_result' in manifest
 
 
 def test_owner_registers_public_api_lifecycle_only_when_enabled():
@@ -147,7 +149,8 @@ def test_only_ancor_roles_have_business_tools():
         elif role == 'ancor-coordinator':
             assert set(tools) == {'ancor_requirement', 'ancor_get_context',
                                   'ancor_ack_events', 'ancor_acceptance',
-                                  'ancor_board', 'ancor_wake', 'ancor_notify'}
+                                  'ancor_board', 'ancor_wake', 'ancor_notify',
+                                  'ancor_note'}
             assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['advance']
             forbidden = json.loads(tools['ancor_requirement']['handler']({
                 'action': 'draft', 'title': 'No', 'brief': 'No',
@@ -155,6 +158,8 @@ def test_only_ancor_roles_have_business_tools():
             assert forbidden['code'] == 'forbidden'
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
             assert 'contract' in tools['ancor_board']['schema']['parameters']['properties']
+            assert tools['ancor_note']['schema']['parameters']['properties']['action']['enum'] == [
+                'list', 'get', 'add', 'update', 'delete']
         elif role == 'ancor-worker':
             assert not tools
 

@@ -15,6 +15,7 @@ ANSWER_PREVIEW_CHARS = 160
 ATTENTION_PREVIEW_CHARS = 80
 EVENT_PAYLOAD_PREVIEW_CHARS = 300
 REASON_PREVIEW_CHARS = 160
+NOTE_PREVIEW_CHARS = 240
 TASK_COMMENT_LIMIT = 10
 TASK_EVENT_LIMIT = 10
 TASK_RUN_LIMIT = 5
@@ -104,6 +105,40 @@ def requirement_detail(requirement, draft=None):
     }
     if draft and draft.get('summary'):
         item['summary'] = draft['summary']
+    return item
+
+
+def note_summary(note):
+    """Compact requirement-note reference; full text requires note_detail."""
+    body_preview, truncated = preview(note['body'], NOTE_PREVIEW_CHARS)
+    item = {
+        'id': note['id'],
+        'requirement_id': note['requirement_id'],
+        'body_preview': body_preview,
+        'revision': note['revision'],
+        'created_at': note['created_at'],
+        'updated_at': note['updated_at'],
+    }
+    if truncated:
+        item['body_truncated'] = True
+    if note.get('deleted_at') is not None:
+        item['deleted'] = True
+    return item
+
+
+def note_detail(note):
+    """Full requirement note, including soft-deleted history."""
+    item = {
+        'id': note['id'],
+        'requirement_id': note['requirement_id'],
+        'body': note['body'],
+        'revision': note['revision'],
+        'created_at': note['created_at'],
+        'updated_at': note['updated_at'],
+    }
+    if note.get('deleted_at') is not None:
+        item['deleted'] = True
+        item['deleted_at'] = note['deleted_at']
     return item
 
 

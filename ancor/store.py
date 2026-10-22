@@ -6,6 +6,7 @@ of human consent. Returned dictionaries are detached copies, never live state.
 from contextlib import contextmanager
 import json
 import sqlite3
+import time
 from uuid import uuid4
 
 from .views import TITLE_MAX_CHARS
@@ -14,6 +15,7 @@ from .views import TITLE_MAX_CHARS
 STABLE_STATUSES = frozenset({'active', 'paused'})
 TERMINAL_STATUSES = frozenset({'accepted', 'cancelled', 'invalidated'})
 TRANSITION_TARGETS = frozenset({'active', 'paused', 'cancelled', 'invalidated'})
+NOTE_MAX_CHARS = 16000
 
 
 class Store:
@@ -41,6 +43,13 @@ class Store:
                 CREATE TABLE IF NOT EXISTS task_links (
                     requirement_id TEXT NOT NULL, task_id TEXT NOT NULL,
                     PRIMARY KEY (requirement_id, task_id));
+                CREATE TABLE IF NOT EXISTS requirement_notes (
+                    id TEXT PRIMARY KEY, requirement_id TEXT NOT NULL,
+                    body TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+                    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                    deleted_at INTEGER);
+                CREATE INDEX IF NOT EXISTS requirement_notes_scope
+                    ON requirement_notes(requirement_id, deleted_at, updated_at);
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
                     payload TEXT NOT NULL, source_key TEXT UNIQUE,
@@ -242,6 +251,91 @@ class Store:
     def get_requirement(self, requirement_id):
         with self._transaction() as db:
             return self._get(db, 'requirements', requirement_id)
+
+    @staticmethod
+    def _note_body(value):
+        body = Store._text(value)
+        if len(body) > NOTE_MAX_CHARS:
+            raise ValueError(f'note body must be at most {NOTE_MAX_CHARS} characters')
+        return body
+
+    @staticmethod
+    def _require_note_mutable(requirement):
+        if not Store._stable(requirement):
+            raise ValueError(
+                'notes can be changed only while the requirement is stable active or paused')
+
+    def _get_note(self, db, requirement_id, note_id):
+        row = db.execute(
+            'SELECT * FROM requirement_notes WHERE id=? AND requirement_id=?',
+            (note_id, requirement_id)).fetchone()
+        if row is None:
+            raise KeyError(note_id)
+        return dict(row)
+
+    def add_note(self, requirement_id, body):
+        body = self._note_body(body)
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            self._require_note_mutable(requirement)
+            now = int(time.time())
+            identifier = uuid4().hex
+            db.execute(
+                'INSERT INTO requirement_notes '
+                '(id, requirement_id, body, revision, created_at, updated_at, deleted_at) '
+                'VALUES (?, ?, ?, 1, ?, ?, NULL)',
+                (identifier, requirement_id, body, now, now))
+            return self._get_note(db, requirement_id, identifier)
+
+    def get_note(self, requirement_id, note_id):
+        with self._transaction() as db:
+            self._get(db, 'requirements', requirement_id)
+            return self._get_note(db, requirement_id, note_id)
+
+    def list_notes(self, requirement_id, limit=50, include_deleted=False):
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError('limit must be an integer between 1 and 200')
+        if type(include_deleted) is not bool:
+            raise ValueError('include_deleted must be a boolean')
+        with self._transaction() as db:
+            self._get(db, 'requirements', requirement_id)
+            where = 'requirement_id=?' + ('' if include_deleted else ' AND deleted_at IS NULL')
+            total = db.execute(
+                f'SELECT COUNT(*) FROM requirement_notes WHERE {where}',
+                (requirement_id,)).fetchone()[0]
+            rows = db.execute(
+                f'SELECT * FROM requirement_notes WHERE {where} '
+                'ORDER BY updated_at DESC, rowid DESC LIMIT ?',
+                (requirement_id, limit)).fetchall()
+            return {'items': [dict(row) for row in rows], 'count': total}
+
+    def update_note(self, requirement_id, note_id, body):
+        body = self._note_body(body)
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            self._require_note_mutable(requirement)
+            note = self._get_note(db, requirement_id, note_id)
+            if note['deleted_at'] is not None:
+                raise ValueError('deleted note cannot be updated')
+            db.execute(
+                'UPDATE requirement_notes SET body=?, revision=revision+1, updated_at=? '
+                'WHERE id=? AND requirement_id=?',
+                (body, int(time.time()), note_id, requirement_id))
+            return self._get_note(db, requirement_id, note_id)
+
+    def delete_note(self, requirement_id, note_id):
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            self._require_note_mutable(requirement)
+            note = self._get_note(db, requirement_id, note_id)
+            if note['deleted_at'] is not None:
+                return note
+            now = int(time.time())
+            db.execute(
+                'UPDATE requirement_notes SET deleted_at=?, revision=revision+1, updated_at=? '
+                'WHERE id=? AND requirement_id=?',
+                (now, now, note_id, requirement_id))
+            return self._get_note(db, requirement_id, note_id)
 
     @staticmethod
     def _event(row):

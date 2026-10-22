@@ -32,7 +32,7 @@ exact requirement text that will be stored in ANCOR.
 
 ## Implementation
 
-- `ancor/store.py`: immutable drafts, transactional requirements, task links and durable events.
+- `ancor/store.py`: immutable drafts, transactional requirements, task links, coordinator working notes and durable events.
 - `ancor/runtime.py`: one awaited coordinator process under a cross-process lock.
 - `ancor/host.py`: Gateway-owned event reconciliation and bounded retries.
 - `ancor/board.py`: native Kanban adapter; no native SQL writes.
@@ -88,6 +88,7 @@ Expansion is explicit and bounded:
 - `ancor_board show(task_id=...)` returns one full card with contract, comments, runs and events.
 - `ancor_board history(task_id=..., kind=...)` pages one card's comments, events or runs.
 - `ancor_notify list(requirement_id=...)` scopes the notification history; adding `id` returns one full notification.
+- `ancor_note list/get/add/update/delete` maintains coordinator-only working notes on one requirement. Notes are non-authoritative, soft-deleted on removal, and never substitute for requirement text, acceptance evidence or a task contract.
 
 Previews are never authoritative for confirmation, acceptance, or transcription.
 List results report total and returned counts so truncation is visible rather than silent.

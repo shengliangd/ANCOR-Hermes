@@ -28,6 +28,69 @@ native task card is the complete execution contract for that bounded task, not a
 copy of the whole requirement. This is cooperative behavior,
 not process isolation.
 
+Load each role skill on every session, including one-shot coordinator runs:
+
+```sh
+hermes -p ancor-coordinator config set skills.auto_load '["ancor-coordination"]'
+hermes -p ancor-worker config set skills.auto_load '["ancor-worker"]'
+```
+
+The coordinator is spawned as a one-shot CLI process, so relying on the model to
+call `skill_view` on demand is not sufficient. Read the setting back after
+installation.
+
+## Sync role files after a source update
+
+Installing the plugin does not update the profile copies of `SOUL.md` or the
+role skills. Treat those copies as a separate deployment artifact. Updating the
+source checkout without syncing them leaves the running roles on old
+instructions even when the plugin code is current.
+
+Plugin code and role files are also separate copies. Updating the source
+checkout does not update `~/.hermes/plugins/ancor`. After a reviewed change,
+update or reinstall the plugin as well (`hermes plugins update ancor` for a
+tracked install, or reinstall from the pinned source URL), then confirm
+`hermes plugins show ancor` and run `hermes plugins doctor ancor`. A tool added
+to the plugin is unavailable until the serving Gateway reloads the plugin.
+
+After checking out a reviewed commit, sync only the role files; do not replace
+the whole profile:
+
+```sh
+ROOT=/absolute/path/to/ANCOR-Hermes
+BACKUP="$HOME/.hermes/profiles/.ancor-backup-$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$BACKUP/ancor-coordinator" "$BACKUP/ancor-worker"
+
+cp -a "$HOME/.hermes/profiles/ancor-coordinator/SOUL.md" "$BACKUP/ancor-coordinator/SOUL.md"
+cp -a "$HOME/.hermes/profiles/ancor-coordinator/skills/ancor-coordination/SKILL.md" "$BACKUP/ancor-coordinator/SKILL.md"
+cp -a "$HOME/.hermes/profiles/ancor-worker/SOUL.md" "$BACKUP/ancor-worker/SOUL.md"
+cp -a "$HOME/.hermes/profiles/ancor-worker/skills/ancor-worker/SKILL.md" "$BACKUP/ancor-worker/SKILL.md"
+
+mkdir -p "$HOME/.hermes/profiles/ancor-coordinator/skills/ancor-coordination"
+mkdir -p "$HOME/.hermes/profiles/ancor-worker/skills/ancor-worker"
+cp "$ROOT/roles/ancor-coordinator/SOUL.md" "$HOME/.hermes/profiles/ancor-coordinator/SOUL.md"
+cp "$ROOT/skills/ancor-coordination/SKILL.md" "$HOME/.hermes/profiles/ancor-coordinator/skills/ancor-coordination/SKILL.md"
+cp "$ROOT/roles/ancor-worker/SOUL.md" "$HOME/.hermes/profiles/ancor-worker/SOUL.md"
+cp "$ROOT/skills/ancor-worker/SKILL.md" "$HOME/.hermes/profiles/ancor-worker/skills/ancor-worker/SKILL.md"
+```
+
+Verify the installed copies and the auto-load setting before restarting any
+session:
+
+```sh
+diff -q "$ROOT/roles/ancor-coordinator/SOUL.md" "$HOME/.hermes/profiles/ancor-coordinator/SOUL.md"
+diff -q "$ROOT/skills/ancor-coordination/SKILL.md" "$HOME/.hermes/profiles/ancor-coordinator/skills/ancor-coordination/SKILL.md"
+diff -q "$ROOT/roles/ancor-worker/SOUL.md" "$HOME/.hermes/profiles/ancor-worker/SOUL.md"
+diff -q "$ROOT/skills/ancor-worker/SKILL.md" "$HOME/.hermes/profiles/ancor-worker/skills/ancor-worker/SKILL.md"
+hermes -p ancor-coordinator config get skills.auto_load
+hermes -p ancor-worker config get skills.auto_load
+```
+
+The coordinator reads these files when it spawns a new one-shot session. A
+coordinator process already in flight keeps the prompt it started with; the next
+spawn uses the synced files. Restart existing role sessions and the serving
+Gateway after syncing a changed installation so no cached profile state survives.
+
 ## Disable automatic self-improvement
 
 Keep ANCOR role instructions and skills fixed to the reviewed repository version.

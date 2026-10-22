@@ -57,6 +57,13 @@ _ACTION_FIELDS = {
         'accept': ['requirement_id', 'evidence'],
         'reject': ['requirement_id', 'reason'],
     },
+    'ancor_note': {
+        'list': ['requirement_id'],
+        'get': ['requirement_id', 'note_id'],
+        'add': ['requirement_id', 'body'],
+        'update': ['requirement_id', 'note_id', 'body'],
+        'delete': ['requirement_id', 'note_id'],
+    },
 }
 
 
@@ -289,6 +296,9 @@ def register(ctx, *, scan_runner=None):
         event_limit = args.get('event_limit', 100)
         if type(event_limit) is not int or not 1 <= event_limit <= 500:
             raise ValueError('event_limit must be an integer between 1 and 500')
+        note_limit = args.get('note_limit', 20)
+        if coordinator and (type(note_limit) is not int or not 1 <= note_limit <= 200):
+            raise ValueError('note_limit must be an integer between 1 and 200')
         event_id = args.get('event_id')
         if event_id is not None and (type(event_id) is not int or event_id < 1):
             raise ValueError('event_id must be a positive integer')
@@ -400,6 +410,9 @@ def register(ctx, *, scan_runner=None):
             if coordinator:
                 result['pending_events'] = collection(
                     event_summaries(events, event_limit, exact_via=True), total=len(events))
+                result['notes'] = service.note({
+                    'action': 'list', 'requirement_id': requirement_id,
+                    'limit': note_limit})
             else:
                 result['pending_events'] = collection([], total=len(events))
             return result
@@ -578,9 +591,13 @@ def register(ctx, *, scan_runner=None):
             operations.reconcile()
         return service.acceptance(args)
 
+    def note(args, **_native):
+        return service.note(args)
+
     methods = {'requirement': requirement, 'get_context': get_context,
                'ack_events': ack_events, 'notify': notify,
-               'acceptance': acceptance, 'board': board_action, 'wake': wake}
+               'acceptance': acceptance, 'board': board_action, 'wake': wake,
+               'note': note}
     if interactor:
         ctx.register_hook('pre_tool_call', service.pre_tool_call)
         ctx.register_hook('post_tool_call', service.post_tool_call)
@@ -607,6 +624,8 @@ def register(ctx, *, scan_runner=None):
     }
     if worker:
         # Workers use native Kanban's task-scoped tools and the task card contract.
+        from .worker_context import transform_kanban_show_result
+        ctx.register_hook('transform_tool_result', transform_kanban_show_result)
         definitions = {}
     elif interactor:
         definitions = {
@@ -657,6 +676,14 @@ def register(ctx, *, scan_runner=None):
                 'Advance one requested requirement transition after its linked native cards have converged. advance is idempotent: it returns completed, or blocked with concrete card or replacement blockers. It is the only coordinator path that commits a staged pause, resume, cancellation or replacement.',
                 {'action': {'type': 'string', 'enum': ['advance']},
                  'requirement_id': {'type': 'string'}}, ['action', 'requirement_id']),
+            'ancor_note': (
+                'Maintain requirement-scoped working notes. Notes are durable coordination memory, not requirement text, authorization, acceptance evidence, or a task contract. list returns bounded previews; get returns one full note. add, update and delete require a stable active or paused requirement; delete is a soft delete and revisions are retained. Never store credentials or secrets.',
+                {'action': {'type': 'string', 'enum': ['list', 'get', 'add', 'update', 'delete']},
+                 'requirement_id': {'type': 'string'}, 'note_id': {'type': 'string'},
+                 'body': {'type': 'string'},
+                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
+                 'include_deleted': {'type': 'boolean'}},
+                ['action', 'requirement_id']),
             'ancor_wake': (
                 'Manage durable future one-shot wakes. schedule requires requirement_id, reason, due_at (Unix seconds); replace requires wake_id, reason, due_at; cancel requires wake_id. list defaults to pending wakes and optionally filters requirement_id or state. Never create immediate self-wake loops.',
                 {'action': {'type': 'string', 'enum': ['schedule', 'list', 'cancel', 'replace']},
@@ -666,7 +693,7 @@ def register(ctx, *, scan_runner=None):
                                                       'cancelled', 'handled']},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
             'ancor_notify': (
-                'Durably enqueue a neutral question or accepted completion, list compact notifications, or withdraw an unanswered question that later information made obsolete. Enqueue returns pending; Gateway delivery is asynchronous. A question requires an active requirement, a linked blocked task, and no other open question for that requirement and task; completion requires an accepted requirement and id accept:<requirement_id>. Filter by requirement_id, task_id, state or open_only; only id expands one full notification. Reuse stable IDs; pending is not delivery, and uncertain requires operator reconciliation.',
+                'Durably enqueue a neutral question or accepted completion, list compact notifications, or withdraw an unanswered question that later information made obsolete. Enqueue returns pending; Gateway delivery is asynchronous. A question requires an active requirement and a linked blocked task; multiple distinct questions may remain open for the same requirement or task. Completion requires an accepted requirement and id accept:<requirement_id>. Filter by requirement_id, task_id, state or open_only; only id expands one full notification. Reuse a stable ID for the same question; pending is not delivery, and uncertain requires operator reconciliation.',
                 {'action': {'type': 'string', 'enum': ['send', 'list', 'withdraw']},
                  'id': {'type': 'string'},
                  'kind': {'type': 'string', 'enum': ['question', 'completion']},
@@ -702,7 +729,8 @@ def register(ctx, *, scan_runner=None):
                  'include_closed_notifications': {'type': 'boolean'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'event_limit': {'type': 'integer', 'minimum': 1, 'maximum': 500},
-                 'event_id': {'type': 'integer', 'minimum': 1}}, []),
+                 'event_id': {'type': 'integer', 'minimum': 1},
+                 'note_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, []),
             'ancor_ack_events': (
                 'Atomically acknowledge durable event IDs after acting on them. The whole batch is rejected without writing if any ID is missing, host-owned (host.stalled or host.liveness), or blocked by a triage card. Repeating an acknowledged ID is idempotent and returns it in already_acked.',
                 {'event_ids': {'type': 'array', 'minItems': 1,
@@ -742,6 +770,7 @@ def register(ctx, *, scan_runner=None):
                             or _name == 'ancor_ack_events'
                             or (_name == 'ancor_requirement' and args.get('action') == 'advance')
                             or (_name == 'ancor_wake' and args.get('action') != 'list')
+                            or (_name == 'ancor_note' and args.get('action') in {'add', 'update', 'delete'})
                             or (_name == 'ancor_notify' and args.get('action') == 'send')
                             or (_name == 'ancor_board' and args.get('action') not in {'list', 'show'})
                             or (_name == 'ancor_get_context' and bool(args.get('ack_event_ids'))))

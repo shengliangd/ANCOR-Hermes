@@ -6,6 +6,8 @@ import logging
 import sqlite3
 import re
 
+from .views import collection, note_detail, note_summary
+
 
 log = logging.getLogger(__name__)
 
@@ -351,6 +353,26 @@ class Service:
             raise ValueError('ack_event_ids must contain positive integer IDs')
         self.store.ack_events(ids)
         return self.store.snapshot()
+
+    def note(self, args):
+        action = args['action']
+        requirement_id = args['requirement_id']
+        if action == 'list':
+            result = self.store.list_notes(
+                requirement_id, limit=args.get('limit', 50),
+                include_deleted=args.get('include_deleted', False))
+            return collection([note_summary(note) for note in result['items']],
+                              total=result['count'])
+        if action == 'get':
+            return note_detail(self.store.get_note(requirement_id, args['note_id']))
+        if action == 'add':
+            return note_detail(self.store.add_note(requirement_id, args['body']))
+        if action == 'update':
+            return note_detail(self.store.update_note(
+                requirement_id, args['note_id'], args['body']))
+        if action == 'delete':
+            return note_detail(self.store.delete_note(requirement_id, args['note_id']))
+        raise ValueError('unknown note action')
 
     def acceptance(self, args):
         requirement = self.store.get_requirement(args['requirement_id'])

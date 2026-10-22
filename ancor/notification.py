@@ -216,17 +216,6 @@ class NotificationOutbox:
         if 'MEDIA:' in message:
             raise ValueError('notifications are text-only; MEDIA markers forbidden')
         with self._db() as db:
-            if kind == 'question' and requirement_id is not None and task_id is not None:
-                open_question = db.execute(
-                    "SELECT id FROM human_notifications WHERE kind='question' "
-                    'AND answer IS NULL AND closed_at IS NULL '
-                    'AND requirement_id=? AND task_id=? AND id<>?',
-                    (requirement_id, task_id, identifier)).fetchone()
-                if open_question:
-                    raise RuntimeError(
-                        f'open question {open_question[0]} already exists for '
-                        f'requirement {requirement_id} task {task_id}; '
-                        'respond to it, withdraw it, or reuse that ID')
             db.execute('INSERT OR IGNORE INTO human_notifications '
                        '(id, kind, message, target, state, requirement_id, task_id, queued_at) '
                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',

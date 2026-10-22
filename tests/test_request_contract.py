@@ -35,7 +35,7 @@ def call(tools, name, args, **kwargs):
     return json.loads(tools[name]['handler'](args, **kwargs))
 
 
-def test_question_requires_blocked_task_and_reuses_one_open_question(tmp_path, monkeypatch):
+def test_question_requires_blocked_task_and_allows_multiple_open_questions(tmp_path, monkeypatch):
     tasks = {'t1': {'id': 't1', 'status': 'running'}}
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-coordinator', tasks)
     store.link_task(req['id'], 't1')
@@ -52,16 +52,16 @@ def test_question_requires_blocked_task_and_reuses_one_open_question(tmp_path, m
     assert first['id'] == 'q1'
     assert first['state'] == 'pending'
 
-    duplicate = call(tools, 'ancor_notify', dict(args, id='q2'))
-    assert duplicate['code'] == 'state_conflict'
-    assert 'q1' in duplicate['error']
+    second = call(tools, 'ancor_notify', dict(args, id='q2', message='Which owner?'))
+    assert second['id'] == 'q2'
+    assert second['state'] == 'pending'
 
     tasks['t1']['status'] = 'running'
     retry = call(tools, 'ancor_notify', args)
     assert retry['id'] == 'q1'
     assert retry['state'] == 'pending'
     assert [row['id'] for row in NotificationOutbox.read_existing(
-        store.path + '.notifications.db')] == ['q1']
+        store.path + '.notifications.db')] == ['q1', 'q2']
 
 
 def test_draft_requires_authoritative_title(tmp_path, monkeypatch):

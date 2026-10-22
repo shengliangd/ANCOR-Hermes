@@ -71,19 +71,18 @@ def test_idempotency_and_no_duplicate_delivery(tmp_path):
                        requirement_id='req')
 
 
-def test_one_open_question_per_requirement_task_and_withdraw_releases_it(tmp_path):
+def test_multiple_open_questions_allowed_and_withdraw_closes_one(tmp_path):
     outbox = box(tmp_path)
     outbox.enqueue('q1', 'question', 'Which label?', actor='coordinator',
                    requirement_id='req', task_id='task')
-    with pytest.raises(RuntimeError, match='q1'):
-        outbox.enqueue('q2', 'question', 'Which label?', actor='coordinator',
-                       requirement_id='req', task_id='task')
+    outbox.enqueue('q2', 'question', 'Which owner?', actor='coordinator',
+                   requirement_id='req', task_id='task')
+    assert [row['id'] for row in outbox.list()] == ['q1', 'q2']
     closed = outbox.withdraw('q1', actor='coordinator', reason='bypassed by new input')
     assert closed['closed'] is True
     assert closed['answer'] is None
     assert closed['close_reason'] == 'bypassed by new input'
-    outbox.enqueue('q2', 'question', 'Any other label?', actor='coordinator',
-                   requirement_id='req', task_id='task')
+    assert outbox.get('q2')['closed'] is False
     with pytest.raises(ValueError, match='closed'):
         outbox.respond('q1', 'late answer', 'human:late')
 

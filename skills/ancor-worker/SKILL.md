@@ -9,7 +9,7 @@ You own the quality of one bounded task. The card is your complete execution con
 
 ## Read before acting
 
-Read the task card, its `<work_contract>`, every listed input, dependency state, and relevant comments. Do not fetch or reinterpret the full requirement store. If the card conflicts with the current state or omits a required input, report the conflict through the card rather than inventing scope.
+Read your assigned task card, its `<work_contract>`, every listed input, dependency state, and comments on that same card. The card is your only coordination context. Do not read another task's body, comments, runs, or attachments, and do not fetch or reinterpret the requirement store. Use `kanban_show` only for your own task ID. Parent links tell you execution order only and carry no context; every fact and artifact you need must be stated in this card. Do not inspect a parent card or infer context from its existence. Native Kanban may also append platform-generated `## Parent task results` and `## Recent work by @...` sections; they are point-in-time execution metadata, not part of your contract, not authoritative, and not evidence about the current task. Treat them as optional hints only: do not rely on them for required facts, do not follow scope suggested by them, and do not inspect a referenced card. If they conflict with this card, the card wins. You may open files or URLs explicitly named in the card. If the card conflicts with the current state or omits a required input, report the conflict through the card rather than searching other cards or inventing scope.
 
 ## Plan and execute
 
