@@ -46,7 +46,7 @@ def test_notification_presentation_is_system_notice_then_interactor_followup():
 def test_coordinator_checks_constraint_and_evidence_before_asking():
     coordinator_soul = (ROOT / 'roles/ancor-coordinator/SOUL.md').read_text()
     coordinator_skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
-    assert 'external commitments' in coordinator_soul
+    assert 'external commitments' in coordinator_soul.lower()
     assert 'environment or image identity' in coordinator_soul
     assert 'at most one low-impact, reversible probe' in coordinator_soul
     assert 'a failed probe is evidence for a question' in coordinator_soul
@@ -127,15 +127,22 @@ def test_coordinator_does_not_assume_worker_can_read_other_cards():
 
 
 def test_coordinator_skill_documents_requirement_notes():
-    soul = (ROOT / 'roles/ancor-coordinator/SOUL.md').read_text()
     skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
-    assert 'requirement-scoped notes' in soul
-    assert 'At each wake, inspect note previews' in soul
-    assert '`created_at`/`updated_at` timestamps' in soul
-    assert '## Keep requirement notes' in skill
+    assert 'requirement-scoped notes' in skill
+    assert 'At each wake inspect previews' in skill
     assert '`ancor_note`' in skill
     assert '`created_at` and `updated_at` timestamps' in skill
     assert 'Notes are never authoritative' in skill
+
+
+def test_coordinator_prompts_stay_within_budget():
+    soul = (ROOT / 'roles/ancor-coordinator/SOUL.md').read_text()
+    skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
+    soul_words = len(soul.split())
+    skill_words = len(skill.split())
+    assert soul_words <= 220, soul_words
+    assert skill_words <= 700, skill_words
+    assert soul_words + skill_words <= 900, soul_words + skill_words
 
 
 def test_worker_reads_only_its_own_card():
