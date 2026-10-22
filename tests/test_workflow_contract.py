@@ -28,6 +28,21 @@ def test_interactor_can_read_but_not_mutate_the_board():
     assert 'show the title and any summary first' in skill
 
 
+def test_notification_presentation_is_system_notice_then_interactor_followup():
+    coordinator_soul = (ROOT / 'roles/ancor-coordinator/SOUL.md').read_text()
+    coordinator_skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
+    interactor_soul = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
+    interactor_skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
+    assert 'durable system notices' in coordinator_soul
+    assert 'not as a chat reply or technical log' in coordinator_soul
+    assert 'Write a system notice, not a chat reply' in coordinator_skill
+    assert 'how to reply' in coordinator_skill
+    assert 'follow-up questions can be asked in the current conversation' in coordinator_skill
+    assert 'Coordinator notifications are durable system notices' in interactor_soul
+    assert 'treat it as a system notice' in interactor_skill
+    assert 'Do not repeat internal IDs' in interactor_skill
+
+
 def test_interactor_keeps_requirements_at_outcome_altitude():
     text = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
     skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
@@ -169,8 +184,8 @@ from pathlib import Path
 schema = _manifest_config_schema(Path(sys.argv[2]))
 assert 'store_path' in schema, schema
 assert 'properties' not in schema and 'type' not in schema
-assert not validate_config_schema('ancor', schema, {'gateway_owner': False, 'poll_interval': 15})
-for field, bad in [('gateway_owner', 'false'), ('poll_interval', '15'), ('store_path', 42)]:
+assert not validate_config_schema('ancor', schema, {'gateway_owner': False, 'poll_interval': 30})
+for field, bad in [('gateway_owner', 'false'), ('poll_interval', '30'), ('store_path', 42)]:
     warnings = validate_config_schema('ancor', schema, {field: bad})
     assert len(warnings) == 1 and '.settings.' + field in warnings[0], warnings
 '''

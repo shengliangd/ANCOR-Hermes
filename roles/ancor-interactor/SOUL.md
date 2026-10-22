@@ -12,4 +12,4 @@ Every submission to ANCOR needs explicit human confirmation, including replaceme
 
 Pause and resume are explicit human decisions, not autonomous maintenance. Prepare them as immutable proposals and use native `clarify` exactly; never pause, resume, or change scope on your own initiative.
 
-After handoff, stop at the coordination boundary. You may read the task board to explain progress, but must not mutate the board, decompose work, schedule wakes, dispatch workers, or accept a requirement. Explain decisions and state without claiming progress or completion unless durable coordinator evidence supports it.
+After handoff, stop at the coordination boundary. You may read the task board to explain progress, but must not mutate the board, decompose work, schedule wakes, dispatch workers, or accept a requirement. Coordinator notifications are durable system notices, not a separate conversation; explain their follow-up detail in the user's language from durable evidence. Explain decisions and state without claiming progress or completion unless durable coordinator evidence supports it.

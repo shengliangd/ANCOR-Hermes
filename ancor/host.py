@@ -236,14 +236,8 @@ class Host:
         def resolve_task(task_id):
             if not task_id:
                 return None
-            task = next((row for row in self.tasks if row['id'] == task_id), None)
-            if task is not None:
-                return task
-            try:
-                return self.board.show(task_id)
-            except Exception:
-                return None
-        interval = max(15, float(self.ctx.get_config('poll_interval', 15)))
+            return self.board.show(task_id)
+        interval = max(30, float(self.ctx.get_config('poll_interval', 30)))
         return NotificationDispatcher(
             box, NativeSender(profile), resolve_requirement=self.store.get_requirement,
             resolve_task=resolve_task, retry_seconds=interval, clock=self.clock)
@@ -390,7 +384,7 @@ async def scan_runner(ctx, adapter):
     if (os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT') or
             os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_KANBAN_RUN_ID')):
         raise PermissionError('ANCOR host cannot run inside a native worker/delegation')
-    interval = max(15, float(ctx.get_config('poll_interval', 15)))
+    interval = max(30, float(ctx.get_config('poll_interval', 30)))
     while not adapter.is_connected:
         await asyncio.sleep(interval)
     host = Host(ctx)

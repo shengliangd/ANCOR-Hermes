@@ -411,7 +411,7 @@ class NotificationDispatcher:
     """One Gateway-owned delivery loop; transport-neutral and non-blocking."""
 
     def __init__(self, outbox, sender, *, resolve_requirement, resolve_task,
-                 retry_seconds=15.0, timeout=180.0, clock=time.time):
+                 retry_seconds=30.0, timeout=180.0, clock=time.time):
         self.outbox = outbox
         self.sender = sender
         self.resolve_requirement = resolve_requirement

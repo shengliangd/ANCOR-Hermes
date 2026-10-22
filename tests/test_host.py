@@ -34,6 +34,9 @@ class Board:
     def list(self):
         return self.tasks
 
+    def show(self, task_id):
+        return next(row for row in self.tasks if row['id'] == task_id)
+
     def archive(self, task_id, reason):
         task = next(row for row in self.tasks if row['id'] == task_id)
         task['status'] = 'archived'
@@ -197,7 +200,63 @@ def test_lifecycle_waits_for_native_connected_property(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, 'sleep', sleep)
     asyncio.run(scan_runner(Context(tmp_path / 'store.db'), adapter))
     assert ticks == [True]
-    assert sleeps == [15, 15]
+    assert sleeps == [30, 30]
+
+
+def test_notification_dispatcher_reads_fresh_task_state(tmp_path):
+    from ancor.notification import NotificationOutbox
+    ctx = Context(tmp_path / 'store.db')
+    ctx.config.update(human_target='test:destination', transport_profile='default')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human')
+    store.link_task(req['id'], 'task')
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination')
+    box.enqueue('q1', 'question', 'Which value?', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='task')
+    stale = {'id': 'task', 'status': 'triage'}
+    live = {'id': 'task', 'status': 'blocked'}
+    board = Board(stale)
+    board.show = lambda task_id: live
+    host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
+    host.tasks = [stale]
+    dispatcher = host.notification_dispatcher()
+    dispatcher.sender = lambda target, message: {'success': True, 'message_id': 'native-1'}
+    assert asyncio.run(dispatcher.deliver_once()) is True
+    row = box.get('q1')
+    assert row['state'] == 'sent'
+    assert row['receipt']['message_id'] == 'native-1'
+
+
+def test_notification_dispatcher_defers_when_task_state_unavailable(tmp_path):
+    from ancor.notification import NotificationOutbox
+    ctx = Context(tmp_path / 'store.db')
+    ctx.config.update(human_target='test:destination', transport_profile='default')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human')
+    store.link_task(req['id'], 'task')
+    box = NotificationOutbox(store.path + '.notifications.db',
+                             coordinator_profile='ancor-coordinator',
+                             target='test:destination')
+    box.enqueue('q1', 'question', 'Which value?', actor='ancor-coordinator',
+                requirement_id=req['id'], task_id='task')
+    board = Board({'id': 'task', 'status': 'blocked'})
+    def unavailable(task_id):
+        raise RuntimeError('native read failed')
+    board.show = unavailable
+    host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
+    host.tasks = [{'id': 'task', 'status': 'blocked'}]
+    dispatcher = host.notification_dispatcher()
+    calls = []
+    dispatcher.sender = lambda target, message: calls.append((target, message)) or {
+        'success': True, 'message_id': 'native-1'}
+    assert asyncio.run(dispatcher.deliver_once()) is True
+    row = box.get('q1')
+    assert row['state'] == 'pending'
+    assert row['closed'] is False
+    assert json.loads(row['error'])['reason_code'] == 'eligibility_unavailable'
+    assert calls == []
 
 
 def test_host_closes_questions_for_terminal_requirement(tmp_path):

@@ -35,7 +35,7 @@ config_schema:
     default: ancor-worker
   poll_interval:
     type: number
-    default: 15
+    default: 30
   human_target:
     type: string
   transport_profile:

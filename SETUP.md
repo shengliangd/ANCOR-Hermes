@@ -129,7 +129,7 @@ plugin doctor before starting:
 | `worker_profile` | all three | `ancor-worker` |
 | `owner_profile` | all three | Actual Gateway-owning profile |
 | `gateway_owner` | owner only | `true`; keep `false` in role profiles |
-| `poll_interval` | owner | At least 15 seconds |
+| `poll_interval` | owner | At least 30 seconds |
 | `human_target` | coordinator | Explicit native `platform:destination` |
 | `transport_profile` | owner | Served Gateway profile owning that transport |
 
@@ -280,7 +280,7 @@ installation the owner is `default`; substitute the real owner name everywhere.
 OWNER=default
 hermes -p "$OWNER" config set plugins.entries.ancor.settings.owner_profile "$OWNER"
 hermes -p "$OWNER" config set plugins.entries.ancor.settings.gateway_owner true
-hermes -p "$OWNER" config set plugins.entries.ancor.settings.poll_interval 15
+hermes -p "$OWNER" config set plugins.entries.ancor.settings.poll_interval 30
 hermes -p "$OWNER" config set platforms.api_server.enabled true
 ```
 
@@ -307,7 +307,7 @@ Before calling the Gateway ready, verify all of the following:
 
 - `owner_profile` names the profile that serves the Gateway, and only that profile
   has `gateway_owner=true`.
-- That profile has `api_server` enabled and connected, with `poll_interval >= 15`.
+- That profile has `api_server` enabled and connected, with `poll_interval >= 30`.
 - The `ancor` plugin and the correct role toolsets are enabled in the owner and in
   all three role profiles.
 - Each role's `hermes -p <role> tools list` matches the matrix: coordinator and
