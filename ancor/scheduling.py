@@ -186,6 +186,17 @@ class Scheduling:
                     task['blocked_reason_preview'] = shown
                     if truncated:
                         task['blocked_reason_truncated'] = True
+            blocked = [task for task in items if task.get('status') == 'blocked']
+            blocked_health = [(task, *self._blocked_wait(notifications, rid, task['id'], now))
+                              for task in blocked]
+            waiting = [(task, reason) for task, state, reason in blocked_health if state == 'waiting']
+            if waiting:
+                questions = [row for task, _ in waiting for row in self._question(
+                    notifications, rid, task['id'], open_only=True)]
+                base['human_waiting'] = {
+                    'task_ids': [task['id'] for task, _ in waiting],
+                    'question_ids': [row['id'] for row in questions],
+                }
             if requirement.get('target_status') is not None:
                 results.append({**base, 'state': 'stalled', 'reason': 'transition_pending',
                                 'waiting_on': {'target_status': requirement['target_status']},
@@ -209,9 +220,6 @@ class Scheduling:
                 results.append({**base, 'state': 'stalled', 'reason': 'triage',
                                 'waiting_on': None, 'task_ids': [task['id'] for task in triage]})
                 continue
-            blocked = [task for task in items if task.get('status') == 'blocked']
-            blocked_health = [(task, *self._blocked_wait(notifications, rid, task['id'], now))
-                              for task in blocked]
             invalid_blocked = [item for item in blocked_health if item[1] == 'stalled']
             if invalid_blocked:
                 task, _, reason = invalid_blocked[0]
@@ -240,10 +248,7 @@ class Scheduling:
                 results.append({**base, 'state': 'active', 'reason': 'ready',
                                 'waiting_on': None, 'task_ids': [task['id'] for task in ready]})
                 continue
-            waiting = [(task, reason) for task, state, reason in blocked_health if state == 'waiting']
             if waiting:
-                questions = [row for task, _ in waiting for row in self._question(
-                    notifications, rid, task['id'], open_only=True)]
                 results.append({**base, 'state': 'waiting_on_human', 'reason': 'blocked_waiting_human',
                                 'waiting_on': {'question_ids': [row['id'] for row in questions]},
                                 'task_ids': [task['id'] for task, _ in waiting]})

@@ -87,6 +87,8 @@ def requirement_ref(requirement, progression=None, *, exact_via=False):
             'reason': progression.get('reason'),
             'waiting_on': progression.get('waiting_on'),
         }
+        if progression.get('human_waiting'):
+            item['progression']['human_waiting'] = progression['human_waiting']
     if exact_via:
         item['exact_via'] = requirement_exact_via(requirement['id'])
     return item
@@ -109,6 +111,9 @@ def requirement_progress(requirement, progression=None, tasks=(), notifications=
     waiting_on = progression.get('waiting_on')
     if waiting_on:
         item['waiting_on'] = waiting_on
+    human_waiting = progression.get('human_waiting')
+    if human_waiting:
+        item['human_waiting'] = human_waiting
     open_questions = sum(
         1 for row in notifications
         if row.get('requirement_id') == requirement['id'] and is_open_question(row))

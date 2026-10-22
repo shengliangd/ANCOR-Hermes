@@ -112,7 +112,10 @@ hour. Other new events do not reset that backoff.
 `progression` reports health per active, paused or awaiting-acceptance requirement. `active` requires a running
 task with a fresh heartbeat, ready work, or a question still inside its short delivery
 window. `waiting_on_human` requires a blocked task with a delivered, unanswered, open
-question. `paused` is a deliberate resting state, not stalled and not liveness.
+question. A `human_waiting` list can accompany any of these states: it identifies blocked
+cards whose questions are waiting for a human without claiming the whole requirement is
+blocked. One card waiting on a human must not stop independently executable linked work.
+`paused` is a deliberate resting state, not stalled and not liveness.
 `awaiting_acceptance` is the human gate: it is open work but not a coordinator stall.
 For active
 requirements, everything else is `stalled`: triage, stale heartbeat, blocked without an

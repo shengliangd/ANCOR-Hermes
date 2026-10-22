@@ -137,6 +137,28 @@ def test_health_distinguishes_triage_blocked_wait_and_stale_heartbeat(tmp_path):
     assert scheduler.health(data, [{'id': 'task', 'status': 'ready'}], [])[0]['state'] == 'active'
 
 
+def test_human_waiting_is_observable_while_other_work_is_active(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    store.link_task(req['id'], 'running')
+    store.link_task(req['id'], 'blocked')
+    questions = [
+        {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+         'task_id': 'blocked', 'state': 'sent', 'answer': None},
+        {'id': 'q2', 'kind': 'question', 'requirement_id': req['id'],
+         'task_id': 'blocked', 'state': 'sent', 'answer': None},
+    ]
+    result = scheduler.health(
+        store.snapshot(),
+        [{'id': 'running', 'status': 'running', 'last_heartbeat_at': 9_999},
+         {'id': 'blocked', 'status': 'blocked'}],
+        questions)[0]
+    assert result['state'] == 'active'
+    assert result['reason'] == 'running_heartbeat'
+    assert result['task_ids'] == ['running']
+    assert result['human_waiting'] == {
+        'task_ids': ['blocked'], 'question_ids': ['q1', 'q2']}
+
+
 def test_answered_uncertain_question_is_progress_not_delivery_failure(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')

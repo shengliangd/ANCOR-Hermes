@@ -6,12 +6,24 @@ import ancor
 from ancor.notification import NotificationOutbox
 from ancor.operations import Operations
 from ancor.store import Store
+from ancor.views import requirement_progress, requirement_ref
 
 
 def task(body='FULL CONTRACT'):
     return {'id': 't1', 'title': 'Bounded task', 'status': 'running',
             'assignee': 'ancor-worker', 'created_at': 1, 'last_heartbeat_at': 2,
             'body': body}
+
+
+def test_human_waiting_is_preserved_in_compact_projections():
+    requirement = {'id': 'r1', 'title': 'Parallel work', 'status': 'active'}
+    human_waiting = {'task_ids': ['blocked'], 'question_ids': ['q1', 'q2']}
+    progression = {'state': 'active', 'reason': 'running_heartbeat',
+                   'waiting_on': None, 'human_waiting': human_waiting,
+                   'task_ids': ['running']}
+    reference = requirement_ref(requirement, progression)
+    assert reference['progression']['human_waiting'] == human_waiting
+    assert requirement_progress(requirement, progression)['human_waiting'] == human_waiting
 
 
 def test_board_list_is_compact_and_show_expands(tmp_path):
