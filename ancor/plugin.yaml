@@ -1,5 +1,5 @@
 name: ancor
-version: 0.4.1
+version: 0.4.2
 description: Durable requirements and interactor/coordinator workflow over native Hermes Kanban.
 provides_tools:
   - ancor_requirement

@@ -27,8 +27,10 @@ def test_owner_registers_public_api_lifecycle_only_when_enabled():
     assert [x[0] for x in handlers] == ['api_server']
 
 
-def test_scan_survives_plugin_registration_teardown():
+def test_scan_waits_for_connection_and_survives_plugin_registration_teardown(monkeypatch):
     import ancor
+
+    monkeypatch.setattr(ancor, '_SCAN_CONNECTION_POLL_SECONDS', 0.01)
 
     class Owner:
         profile_name = 'default'
@@ -50,7 +52,7 @@ def test_scan_survives_plugin_registration_teardown():
             return task
 
     owner = Owner()
-    adapter = SimpleNamespace(name='api', is_connected=True)
+    adapter = SimpleNamespace(name='api', is_connected=False)
     started = []
     stop = asyncio.Event()
 
@@ -63,6 +65,9 @@ def test_scan_survives_plugin_registration_teardown():
     async def scenario():
         owner.connected(None, adapter)
         await asyncio.sleep(0)
+        assert started == []
+        adapter.is_connected = True
+        await asyncio.sleep(0.02)
         assert started == ['api']
         assert owner.managed == []  # not tied to the plugin registration ledger
 

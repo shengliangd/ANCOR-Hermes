@@ -16,6 +16,8 @@ from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
 
 log = logging.getLogger(__name__)
 
+_SCAN_CONNECTION_POLL_SECONDS = 1.0
+
 
 _ACTION_FIELDS = {
     'ancor_requirement': {
@@ -169,6 +171,8 @@ def register(ctx, *, scan_runner=None):
             loop = asyncio.get_running_loop()
 
             async def supervise():
+                while not adapter.is_connected:
+                    await asyncio.sleep(_SCAN_CONNECTION_POLL_SECONDS)
                 while adapter.is_connected:
                     try:
                         await scan_runner(ctx, adapter)
