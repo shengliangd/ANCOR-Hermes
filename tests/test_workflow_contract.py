@@ -43,6 +43,16 @@ def test_notification_presentation_is_system_notice_then_interactor_followup():
     assert 'Do not repeat internal IDs' in interactor_skill
 
 
+def test_coordinator_checks_constraint_and_evidence_before_asking():
+    coordinator_soul = (ROOT / 'roles/ancor-coordinator/SOUL.md').read_text()
+    coordinator_skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
+    assert 'Before asking, test the constraint' in coordinator_soul
+    assert 'Then try self-service' in coordinator_soul
+    assert '**Test the constraint.**' in coordinator_skill
+    assert '**Try self-service.**' in coordinator_skill
+    assert 'choose the default and record it' in coordinator_skill
+
+
 def test_interactor_keeps_requirements_at_outcome_altitude():
     text = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
     skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
