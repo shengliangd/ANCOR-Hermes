@@ -182,6 +182,25 @@ class Journey:
     def requirement(self, **kwargs):
         return self.confirm(self.draft(**kwargs))
 
+    def confirm_human(self, proposal, expected_status):
+        from agent.agent_runtime_helpers import invoke_tool
+        from types import SimpleNamespace
+        self.calls += 1
+        shown = []
+        def surface(questions):
+            shown.extend(questions)
+            return {'outcome': 'submitted',
+                    'answers': {'q0': questions[0]['choices_offered'][1]}}
+        agent = SimpleNamespace(session_id='journey-session', _memory_manager=None,
+                                clarify_callback=surface)
+        result = json.loads(invoke_tool(agent, 'clarify', proposal['clarify_args'], '',
+                                       tool_call_id='journey-call-' + str(self.calls)))
+        assert shown and 'confirm' in shown[0]['question'].lower()
+        assert result.get('outcome') == 'submitted', result
+        requirement = self.store.get_requirement(proposal['requirement_id'])
+        assert requirement['status'] == expected_status, requirement
+        return requirement
+
     def create(self, req, key):
         detail = self.call('board', action='create', requirement_id=req['id'], key=key,
                            title='Execute ' + key, body='Produce and verify ' + key,
@@ -368,7 +387,7 @@ def journey_acceptance(j):
     assert j.status(abandoned) == 'archived'
     premature = dict(action='send', id='accept:' + req['id'], requirement_id=req['id'],
                      kind='completion', message='Report delivered')
-    assert 'accepted' in j.error('notify', **premature)
+    assert 'awaiting human acceptance' in j.error('notify', **premature)
     j.complete(tid)
     j.call('acceptance', action='reject', requirement_id=req['id'], reason='Independent check found missing total')
     assert j.store.get_requirement(req['id'])['status'] == 'active'
@@ -376,12 +395,13 @@ def journey_acceptance(j):
     evidence = j.evidence(req, [tid, repair])
     assert 'all linked native tasks' in j.error('acceptance', action='accept', requirement_id=req['id'], evidence=evidence)
     j.complete(repair)
-    assert j.call('acceptance', action='accept', requirement_id=req['id'], evidence=evidence)['status'] == 'accepted'
-    j.call('notify', **premature)
+    assert j.call('acceptance', action='accept', requirement_id=req['id'], evidence=evidence)['status'] == 'awaiting_acceptance'
     j.call('notify', **premature)
     j.deliver_notifications()
     assert len(j.sent) == 1
-    assert j.call('notify', action='list')['notifications']['items'][0]['state'] == 'sent'
+    acceptance = j.call('requirement', action='accept', requirement_id=req['id'])
+    j.confirm_human(acceptance, 'accepted')
+    assert j.call('notify', action='list')['notifications']['items'][0]['state'] == 'closed'
 
 
 def journey_restart(j):

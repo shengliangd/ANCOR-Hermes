@@ -80,7 +80,7 @@ def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
     assert 'body' not in expanded['tasks']['items'][0]
 
 
-def test_progress_only_returns_open_work_including_acceptance_pending(tmp_path, monkeypatch):
+def test_progress_only_returns_open_work_including_human_acceptance(tmp_path, monkeypatch):
     tools = {}
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
@@ -110,14 +110,16 @@ def test_progress_only_returns_open_work_including_acceptance_pending(tmp_path, 
         'pause', paused['id'], 'User asked', 'Stop briefly')
     store.confirm_requirement_command(command['id'], 'pause-confirmation')
     store.finalize_transition(paused['id'])
-    store.accept(accepted['id'], 'verified')
+    store.submit_acceptance(awaiting['id'], 'awaiting verification evidence')
+    store.submit_acceptance(accepted['id'], 'accepted verification evidence')
+    store.accept(accepted['id'], 'human:accepted')
     store.ack_events([event['id'] for event in store.pending_events()])
     box = NotificationOutbox(store.path + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
-    notice_id = 'accept:' + accepted['id']
-    box.enqueue(notice_id, 'completion', 'Verified delivery is ready for review.',
-                actor='ancor-coordinator', requirement_id=accepted['id'])
+    notice_id = 'accept:' + awaiting['id']
+    box.enqueue(notice_id, 'completion', 'Verified delivery is ready for human acceptance.',
+                actor='ancor-coordinator', requirement_id=awaiting['id'])
     assert box.claim_next()['id'] == notice_id
     box.mark_sent(notice_id, {'success': True})
     cards = [
@@ -133,11 +135,7 @@ def test_progress_only_returns_open_work_including_acceptance_pending(tmp_path, 
 
     progress = call({'progress_only': True})
     rows = {row['id']: row for row in progress['requirements']['items']}
-    assert set(rows) == {active['id'], awaiting['id'], paused['id']}
-    assert accepted['id'] not in rows
-    assert rows[awaiting['id']]['reason'] == 'acceptance_pending'
-    assert rows[awaiting['id']]['tasks'] == {'open': 0, 'total': 1}
-    assert rows[awaiting['id']]['focus']['id'] == 'awaiting-done'
+    assert set(rows) == {active['id'], paused['id']}
     assert rows[paused['id']]['state'] == 'paused'
     assert rows[paused['id']]['focus']['blocked_reason_preview'].startswith(
         'Waiting for the paused')
@@ -145,19 +143,22 @@ def test_progress_only_returns_open_work_including_acceptance_pending(tmp_path, 
     assert 'pending_events' not in progress
     assert 'notifications' not in progress
     assert progress['counts']['open_requirements'] == 3
-    reviews = {row['id']: row for row in progress['awaiting_review']['items']}
-    assert set(reviews) == {accepted['id']}
-    assert reviews[accepted['id']]['state'] == 'awaiting_review'
-    assert reviews[accepted['id']]['notice_id'] == notice_id
-    assert progress['counts']['awaiting_review'] == 1
+    reviews = {row['id']: row for row in progress['awaiting_acceptance']['items']}
+    assert set(reviews) == {awaiting['id']}
+    assert reviews[awaiting['id']]['status'] == 'awaiting_acceptance'
+    assert reviews[awaiting['id']]['state'] == 'awaiting_human_acceptance'
+    assert reviews[awaiting['id']]['notice_id'] == notice_id
+    assert reviews[awaiting['id']]['accept_via']['args']['action'] == 'accept'
+    assert progress['counts']['awaiting_acceptance'] == 1
     overview = call({})
-    assert [row['id'] for row in overview['awaiting_review']['items']] == [accepted['id']]
-    assert overview['counts']['awaiting_review'] == 1
-    acknowledged = json.loads(tools['ancor_notify']['handler'](
-        {'action': 'acknowledge', 'id': notice_id}))
-    assert acknowledged['closed'] is True
-    assert acknowledged['close_reason'] == 'reviewed_by_human'
-    assert call({'progress_only': True})['awaiting_review']['count'] == 0
+    assert [row['id'] for row in overview['awaiting_acceptance']['items']] == [awaiting['id']]
+    assert overview['counts']['awaiting_acceptance'] == 1
+
+    decision = store.create_human_decision(awaiting['id'], 'accept')
+    store.confirm_human_decision(decision['id'], 'human:accept')
+    after = call({'progress_only': True})
+    assert after['awaiting_acceptance']['count'] == 0
+    assert after['counts']['open_requirements'] == 2
     assert len(json.dumps(progress, ensure_ascii=False)) < len(json.dumps(
         call({}), ensure_ascii=False))
 

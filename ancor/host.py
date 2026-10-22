@@ -189,7 +189,7 @@ class Host:
             coordinator_profile=self.profile, target=target, clock=self.clock)
 
     def close_stale_notifications(self, snapshot=None):
-        """Close unanswered questions whose structural reason has disappeared."""
+        """Close questions and completion notices whose structural reason disappeared."""
         from .notification import NotificationOutbox
         path = Path(self.store.path + '.notifications.db')
         if not path.exists():
@@ -225,6 +225,26 @@ class Host:
             box.close_questions(decisions, closed_by='host')
             log.info('ANCOR closed %d stale question(s): %s', len(decisions),
                      ', '.join(f'{key}={value}' for key, value in sorted(decisions.items())))
+        completion_requirements = {}
+        orphaned_completions = {}
+        for row in box.list():
+            if (row['kind'] != 'completion' or row.get('closed_at') is not None):
+                continue
+            requirement = requirements.get(row.get('requirement_id'))
+            if requirement is None:
+                if row.get('requirement_id'):
+                    completion_requirements.setdefault(
+                        row.get('requirement_id'), 'requirement_missing')
+                else:
+                    orphaned_completions[row['id']] = 'requirement_missing'
+            elif requirement.get('status') != 'awaiting_acceptance' or requirement.get('target_status'):
+                completion_requirements.setdefault(
+                    row.get('requirement_id'), 'completion_no_longer_pending')
+        for notification_id, reason in orphaned_completions.items():
+            box.close_delivery(notification_id, closed_by='host', reason=reason)
+        for requirement_id, reason in completion_requirements.items():
+            if requirement_id:
+                box.close_completions(requirement_id, closed_by='host', reason=reason)
         return box.list()
 
     def notification_dispatcher(self):
@@ -336,10 +356,16 @@ class Host:
         notifications = NotificationOutbox.read_existing(self.store.path + '.notifications.db')
         delivered = {n['id'] for n in notifications
                      if n['state'] == 'sent' and n['kind'] == 'completion'}
+        pending_completion = {n['requirement_id'] for n in notifications
+                              if n['kind'] == 'completion'
+                              and n.get('closed_at') is None
+                              and n.get('requirement_id')}
         requirements = [r for r in data['requirements']
                         if r['status'] in {'active', 'paused', 'pending'}
                         or r.get('target_status') is not None or
-                        (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)]
+                        (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)
+                        or (r['status'] == 'awaiting_acceptance'
+                            and r['id'] not in pending_completion)]
         relevant = {r['id'] for r in requirements}
         scoped = {**data, 'requirements': requirements}
         observation = self.scheduling.observation(scoped, self.tasks, notifications)

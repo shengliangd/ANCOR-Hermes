@@ -16,12 +16,15 @@ def test_note_crud_is_revisioned_and_soft_deleted(tmp_path):
     first = store.add_note(requirement['id'], 'verified input: /tmp/input.csv')
     second = store.add_note(requirement['id'], 'attempted route: script --dry-run')
     assert first['revision'] == second['revision'] == 1
+    assert isinstance(first['created_at'], int) and isinstance(first['updated_at'], int)
     assert store.list_notes(requirement['id'])['count'] == 2
 
     updated = store.update_note(
         requirement['id'], first['id'], 'verified input: /tmp/input-v2.csv')
     assert updated['body'] == 'verified input: /tmp/input-v2.csv'
     assert updated['revision'] == 2
+    assert updated['created_at'] == first['created_at']
+    assert updated['updated_at'] >= first['updated_at']
 
     deleted = store.delete_note(requirement['id'], first['id'])
     assert deleted['revision'] == 3
@@ -92,11 +95,15 @@ def test_note_tool_is_coordinator_only_and_context_lists_previews(tmp_path, monk
         'action': 'list', 'requirement_id': requirement['id']})
     assert listed['count'] == 1
     assert listed['items'][0]['body_preview'] == 'verified artifact: /tmp/report.csv'
+    assert isinstance(listed['items'][0]['created_at'], int)
+    assert isinstance(listed['items'][0]['updated_at'], int)
     assert 'body' not in listed['items'][0]
 
     context = call(tools, 'ancor_get_context', {'requirement_id': requirement['id']})
     assert context['notes']['count'] == 1
     assert context['notes']['items'][0]['body_preview'].startswith('verified artifact')
+    assert context['notes']['items'][0]['created_at'] == listed['items'][0]['created_at']
+    assert context['notes']['items'][0]['updated_at'] == listed['items'][0]['updated_at']
 
     full = call(tools, 'ancor_note', {
         'action': 'get', 'requirement_id': requirement['id'],

@@ -81,7 +81,7 @@ args = {'requirement_id':req['id'], 'action':'accept', 'evidence':evidence}
 assert 'all linked native tasks' in call('ancor_acceptance', args)['error']
 assert store.get_requirement(req['id'])['status'] == 'active'
 tasks['two']['status'] = 'done'
-assert call('ancor_acceptance', args)['status'] == 'accepted'
+assert call('ancor_acceptance', args)['status'] == 'awaiting_acceptance'
 assert 'error' not in call('ancor_get_context', {'ack_event_ids':[event['id']]})
 assert event['id'] not in [e['id'] for e in store.pending_events()]
 # Public supervised task handle supports reconnect dedup and restart after exit.

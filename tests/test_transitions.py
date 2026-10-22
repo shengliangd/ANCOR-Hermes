@@ -221,11 +221,13 @@ def test_acceptance_archives_done_cards_and_rejects_nonterminal_cards(tmp_path):
     observed = []
     board.on_archive = lambda task_id: observed.append(
         store.get_requirement(req['id'])['status'])
-    accepted = service.acceptance({'action': 'accept', 'requirement_id': req['id'],
+    verified = service.acceptance({'action': 'verify', 'requirement_id': req['id'],
                                    'evidence': evidence})
-    assert accepted['status'] == 'accepted'
+    assert verified['status'] == 'awaiting_acceptance'
     assert observed == ['active', 'active']
     assert {row['status'] for row in board.list()} == {'archived'}
+    accepted = store.accept(req['id'], 'human:accepted')
+    assert accepted['status'] == 'accepted'
 
 
 def test_staged_transition_suppresses_wakes_and_defers_questions(tmp_path):

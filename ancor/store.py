@@ -13,6 +13,7 @@ from .views import TITLE_MAX_CHARS
 
 
 STABLE_STATUSES = frozenset({'active', 'paused'})
+AWAITING_ACCEPTANCE = 'awaiting_acceptance'
 TERMINAL_STATUSES = frozenset({'accepted', 'cancelled', 'invalidated'})
 TRANSITION_TARGETS = frozenset({'active', 'paused', 'cancelled', 'invalidated'})
 NOTE_MAX_CHARS = 16000
@@ -58,6 +59,54 @@ class Store:
             self._require_title_columns(db)
             self._ensure_columns(db, 'drafts', {'summary': 'TEXT'})
             self._ensure_columns(db, 'requirements', {'target_status': 'TEXT'})
+            self._migrate_legacy_acceptances(db)
+
+    @staticmethod
+    def _migrate_legacy_acceptances(db):
+        """Move coordinator-only acceptance into the current human gate.
+
+        Older releases committed ``accepted`` without recording a final human
+        decision. Preserve that event, add durable verification evidence, and
+        reopen the requirement for human acceptance. The source key makes the
+        migration idempotent and the new event stays acknowledged so it does
+        not create coordinator attention.
+        """
+        for row in db.execute(
+                "SELECT * FROM requirements WHERE status='accepted' ORDER BY rowid"):
+            requirement = dict(row)
+            accepted = None
+            for event_row in db.execute(
+                    "SELECT * FROM events WHERE kind='requirement.accepted' "
+                    'ORDER BY id DESC'):
+                event = Store._event(event_row)
+                if event['payload'].get('requirement_id') == requirement['id']:
+                    accepted = event
+                    break
+            if (accepted is None
+                    or accepted['payload'].get('verification_event_id') is not None):
+                continue
+            source_key = ('migration.legacy-coordinator-acceptance:'
+                          + str(accepted['id']))
+            existing = db.execute(
+                'SELECT id FROM events WHERE source_key=?', (source_key,)).fetchone()
+            if existing is None:
+                evidence = accepted['payload'].get('evidence')
+                if evidence is None:
+                    evidence = ('Legacy coordinator acceptance event '
+                                f"{accepted['id']} preserved; no evidence text was stored.")
+                Store._add_event(
+                    db, 'requirement.verified', {
+                        'requirement_id': requirement['id'],
+                        'evidence': evidence,
+                        'status': AWAITING_ACCEPTANCE,
+                        'migrated_from_event_id': accepted['id'],
+                        'migration_reason': 'legacy coordinator acceptance required '
+                                            'the human final gate',
+                    }, source_key=source_key, acknowledged=True)
+            db.execute(
+                "UPDATE requirements SET status=?, target_status=NULL "
+                "WHERE id=? AND status='accepted'",
+                (AWAITING_ACCEPTANCE, requirement['id']))
 
     @staticmethod
     def _require_title_columns(db):
@@ -248,6 +297,82 @@ class Store:
                        (confirmation_reference, command_id))
             return requirement
 
+    def create_human_decision(self, requirement_id, action, feedback=None):
+        """Prepare an immutable human accept/request-changes proposal."""
+        if action not in {'accept', 'request_changes'}:
+            raise ValueError('unknown human acceptance decision')
+        feedback = self._optional_text(feedback)
+        if action == 'request_changes' and feedback is None:
+            raise ValueError('request_changes requires feedback')
+        if action == 'accept' and feedback is not None:
+            raise ValueError('accept does not accept feedback; use request_changes')
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            if (requirement['status'] != AWAITING_ACCEPTANCE
+                    or requirement['target_status'] is not None):
+                raise ValueError('requirement is not awaiting human acceptance')
+            if self._latest_verification(db, requirement_id) is None:
+                raise ValueError('coordinator verification evidence is missing')
+            stored_action = ('human_accept' if action == 'accept'
+                             else 'human_request_changes')
+            existing = db.execute(
+                'SELECT * FROM requirement_commands WHERE action=? AND requirement_id=? '
+                'AND reason IS ? AND confirmation_reference IS NULL '
+                'ORDER BY rowid LIMIT 1',
+                (stored_action, requirement_id, feedback)).fetchone()
+            if existing:
+                return dict(existing)
+            identifier = uuid4().hex
+            db.execute('INSERT INTO requirement_commands VALUES (?, ?, ?, ?, ?, NULL)',
+                       (identifier, stored_action, requirement_id, feedback, None))
+            return dict(db.execute('SELECT * FROM requirement_commands WHERE id=?',
+                                   (identifier,)).fetchone())
+
+    def latest_verification(self, requirement_id):
+        with self._transaction() as db:
+            return self._latest_verification(db, requirement_id)
+
+    def confirm_human_decision(self, command_id, confirmation_reference):
+        """Commit one exact human acceptance decision idempotently."""
+        self._text(confirmation_reference)
+        with self._transaction() as db:
+            command = self._get(db, 'requirement_commands', command_id)
+            if command['action'] not in {'human_accept', 'human_request_changes'}:
+                raise ValueError('not a human acceptance decision')
+            requirement = self._get(db, 'requirements', command['requirement_id'])
+            if command['confirmation_reference'] is not None:
+                return requirement
+            if (requirement['status'] != AWAITING_ACCEPTANCE
+                    or requirement['target_status'] is not None):
+                raise ValueError('requirement is not awaiting human acceptance')
+            verification = self._latest_verification(db, requirement['id'])
+            if verification is None:
+                raise ValueError('coordinator verification evidence is missing')
+            if command['action'] == 'human_accept':
+                db.execute("UPDATE requirements SET status='accepted', target_status=NULL "
+                           'WHERE id=?', (requirement['id'],))
+                self._add_event(
+                    db, 'requirement.accepted',
+                    {'requirement_id': requirement['id'],
+                     'evidence': verification['payload']['evidence'],
+                     'verification_event_id': verification['id'],
+                     'confirmation_reference': confirmation_reference,
+                     'command_id': command_id},
+                    acknowledged=True)
+            else:
+                db.execute("UPDATE requirements SET status='active', target_status=NULL "
+                           'WHERE id=?', (requirement['id'],))
+                self._add_event(
+                    db, 'requirement.changes_requested',
+                    {'requirement_id': requirement['id'],
+                     'feedback': command['reason'],
+                     'verification_event_id': verification['id'],
+                     'confirmation_reference': confirmation_reference,
+                     'command_id': command_id})
+            db.execute('UPDATE requirement_commands SET confirmation_reference=? WHERE id=?',
+                       (confirmation_reference, command_id))
+            return self._get(db, 'requirements', requirement['id'])
+
     def get_requirement(self, requirement_id):
         with self._transaction() as db:
             return self._get(db, 'requirements', requirement_id)
@@ -344,18 +469,20 @@ class Store:
         event['acknowledged'] = bool(event['acknowledged'])
         return event
 
-    def _add_event(self, db, kind, payload, source_key=None):
-        self._text(kind)
+    @staticmethod
+    def _add_event(db, kind, payload, source_key=None, *, acknowledged=False):
+        Store._text(kind)
         if source_key is not None:
-            self._text(source_key)
+            Store._text(source_key)
             existing = db.execute('SELECT * FROM events WHERE source_key = ?',
                                   (source_key,)).fetchone()
             if existing:
-                return self._event(existing)
-        cursor = db.execute('INSERT INTO events (kind, payload, source_key) VALUES (?, ?, ?)',
-                            (kind, json.dumps(payload), source_key))
-        return self._event(db.execute('SELECT * FROM events WHERE id = ?',
-                                     (cursor.lastrowid,)).fetchone())
+                return Store._event(existing)
+        cursor = db.execute(
+            'INSERT INTO events (kind, payload, source_key, acknowledged) VALUES (?, ?, ?, ?)',
+            (kind, json.dumps(payload), source_key, int(acknowledged)))
+        return Store._event(db.execute('SELECT * FROM events WHERE id = ?',
+                                       (cursor.lastrowid,)).fetchone())
 
     def add_event(self, kind, payload, source_key=None):
         with self._transaction() as db:
@@ -444,10 +571,12 @@ class Store:
             }
 
     def acceptances(self):
-        """Retain accepted evidence even after its coordination event is handled."""
+        """Retain coordinator verification and final human acceptance evidence."""
         with self._transaction() as db:
             return [self._event(row) for row in db.execute(
-                "SELECT * FROM events WHERE kind = 'requirement.accepted' ORDER BY id")]
+                "SELECT * FROM events WHERE kind IN "
+                "('requirement.verified', 'requirement.changes_requested', "
+                "'requirement.accepted') ORDER BY id")]
 
     def requirement_transitions(self, requirement_id=None):
         """Retain requirement transition history after its events are handled."""
@@ -456,7 +585,9 @@ class Store:
                 "SELECT * FROM events WHERE kind IN "
                 "('requirement.staged', 'requirement.transition_requested', "
                 "'requirement.activated', 'requirement.paused', 'requirement.resumed', "
-                "'requirement.cancelled', 'requirement.invalidated') ORDER BY id")]
+                "'requirement.verified', 'requirement.changes_requested', "
+                "'requirement.accepted', 'requirement.cancelled', "
+                "'requirement.invalidated') ORDER BY id")]
         if requirement_id is not None:
             events = [event for event in events
                       if event['payload'].get('requirement_id') == requirement_id]
@@ -565,16 +696,80 @@ class Store:
         self._add_event(db, kind, payload)
         return self._get(db, 'requirements', requirement['id'])
 
-    def accept(self, requirement_id, evidence):
+    def submit_acceptance(self, requirement_id, evidence):
+        """Record coordinator verification and wait for the human's final decision."""
         self._text(evidence)
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
             if requirement['status'] != 'active' or requirement['target_status'] is not None:
                 raise ValueError('requirement is not stably active')
-            db.execute("UPDATE requirements SET status = 'accepted' WHERE id = ?",
-                       (requirement_id,))
-            self._add_event(db, 'requirement.accepted',
-                            {'requirement_id': requirement_id, 'evidence': evidence})
+            event = self._add_event(
+                db, 'requirement.verified',
+                {'requirement_id': requirement_id, 'evidence': evidence,
+                 'status': AWAITING_ACCEPTANCE})
+            db.execute('UPDATE requirements SET status=? WHERE id=?',
+                       (AWAITING_ACCEPTANCE, requirement_id))
+            # Verification itself needs no coordinator follow-up. Keeping this
+            # audit event acknowledged prevents a redundant wake while the
+            # requirement waits for the human gate.
+            db.execute('UPDATE events SET acknowledged=1 WHERE id=?', (event['id'],))
+            return self._get(db, 'requirements', requirement_id)
+
+    @staticmethod
+    def _latest_verification(db, requirement_id):
+        for row in db.execute(
+                "SELECT * FROM events WHERE kind='requirement.verified' "
+                'ORDER BY id DESC'):
+            event = Store._event(row)
+            if event['payload'].get('requirement_id') == requirement_id:
+                return event
+        return None
+
+    def accept(self, requirement_id, confirmation_reference=None, feedback=None):
+        """Commit the human's final acceptance of coordinator-verified work."""
+        if confirmation_reference is not None:
+            self._text(confirmation_reference)
+        feedback = self._optional_text(feedback)
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            if (requirement['status'] != AWAITING_ACCEPTANCE
+                    or requirement['target_status'] is not None):
+                raise ValueError('requirement is not awaiting human acceptance')
+            verification = self._latest_verification(db, requirement_id)
+            if verification is None:
+                raise ValueError('coordinator verification evidence is missing')
+            db.execute("UPDATE requirements SET status='accepted', target_status=NULL "
+                       'WHERE id=?', (requirement_id,))
+            self._add_event(
+                db, 'requirement.accepted',
+                {'requirement_id': requirement_id,
+                 'evidence': verification['payload']['evidence'],
+                 'verification_event_id': verification['id'],
+                 'confirmation_reference': confirmation_reference,
+                 **({'feedback': feedback} if feedback else {})},
+                acknowledged=True)
+            return self._get(db, 'requirements', requirement_id)
+
+    def request_changes(self, requirement_id, feedback, confirmation_reference=None):
+        """Return verified work to active coordination with exact human feedback."""
+        feedback = self._text(feedback)
+        if confirmation_reference is not None:
+            self._text(confirmation_reference)
+        with self._transaction() as db:
+            requirement = self._get(db, 'requirements', requirement_id)
+            if (requirement['status'] != AWAITING_ACCEPTANCE
+                    or requirement['target_status'] is not None):
+                raise ValueError('requirement is not awaiting human acceptance')
+            verification = self._latest_verification(db, requirement_id)
+            if verification is None:
+                raise ValueError('coordinator verification evidence is missing')
+            db.execute("UPDATE requirements SET status='active', target_status=NULL "
+                       'WHERE id=?', (requirement_id,))
+            self._add_event(
+                db, 'requirement.changes_requested',
+                {'requirement_id': requirement_id, 'feedback': feedback,
+                 'verification_event_id': verification['id'],
+                 'confirmation_reference': confirmation_reference})
             return self._get(db, 'requirements', requirement_id)
 
     def _request_cancel(self, db, requirement_ids, reason):

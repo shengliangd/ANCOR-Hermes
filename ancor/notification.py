@@ -1,7 +1,7 @@
 """Durable human notifications with Gateway-owned asynchronous delivery.
 
 No worker event is automatically forwarded. The coordinator selects a neutral
-question or accepted completion and only enqueues it; the Gateway owner claims
+question or verified completion and only enqueues it; the Gateway owner claims
 and delivers it through Hermes' generic ``send_message_tool``. ``sent`` means
 the native transport accepted the message, not that a human read or answered it.
 External delivery is at-most-once after an uncertain outcome: exactly-once
@@ -300,6 +300,22 @@ class NotificationOutbox:
                        (self.clock(), closed_by, reason, identifier))
             return self._row(db, identifier)
 
+    def close_delivery(self, identifier, *, closed_by, reason):
+        """Close one undelivered notice for a structural reason, without an answer."""
+        if not all(isinstance(value, str) and value.strip()
+                   for value in (identifier, closed_by, reason)):
+            raise ValueError('identifier, actor and close reason required')
+        with self._db() as db:
+            row = self._row(db, identifier)
+            if row['closed_at'] is not None:
+                return row
+            db.execute(
+                "UPDATE human_notifications SET closed_at=?, closed_by=?, close_reason=?, "
+                "state=CASE WHEN state='sending' THEN state ELSE 'closed' END "
+                'WHERE id=? AND closed_at IS NULL',
+                (self.clock(), closed_by, reason, identifier))
+            return self._row(db, identifier)
+
     def close_questions(self, decisions, *, closed_by, now=None):
         """Close unanswered open questions in one transaction.
 
@@ -406,22 +422,24 @@ class NotificationOutbox:
         self._coordinator(actor)
         return self.close_question(identifier, closed_by=actor, reason=reason)
 
-    def acknowledge_completion(self, identifier, *, actor):
-        """Mark a delivered completion notice as reviewed by the human-facing role."""
-        if not isinstance(actor, str) or not actor.strip():
-            raise ValueError('acknowledging actor required')
+    def close_completions(self, requirement_id, *, closed_by, reason, now=None):
+        """Close every outstanding completion notice after a human decision."""
+        if not all(isinstance(value, str) and value.strip()
+                   for value in (requirement_id, closed_by, reason)):
+            raise ValueError('requirement, actor and close reason required')
+        now = self.clock() if now is None else now
         with self._db() as db:
-            row = self._row(db, identifier)
-            if row['kind'] != 'completion':
-                raise ValueError('only completion notices can be acknowledged')
-            if row['closed_at'] is not None:
-                return row
-            if row['state'] != 'sent':
-                raise ValueError('completion notice has not been delivered')
-            db.execute('UPDATE human_notifications SET closed_at=?,closed_by=?,close_reason=? '
-                       'WHERE id=? AND closed_at IS NULL',
-                       (self.clock(), actor, 'reviewed_by_human', identifier))
-            return self._row(db, identifier)
+            rows = [self._row(db, row[0]) for row in db.execute(
+                "SELECT id FROM human_notifications WHERE kind='completion' "
+                'AND requirement_id=? AND closed_at IS NULL ORDER BY rowid',
+                (requirement_id,))]
+            for row in rows:
+                db.execute(
+                    'UPDATE human_notifications SET closed_at=?, closed_by=?, close_reason=?, '
+                    "state=CASE WHEN state='sending' THEN state ELSE 'closed' END "
+                    'WHERE id=? AND closed_at IS NULL',
+                    (now, closed_by, reason, row['id']))
+            return [self._row(db, row['id']) for row in rows]
 
 
 class NotificationDispatcher:
@@ -438,6 +456,17 @@ class NotificationDispatcher:
         self.clock = clock
 
     def _gate(self, row):
+        if row['kind'] == 'completion':
+            try:
+                requirement = self.resolve_requirement(row['requirement_id'])
+            except KeyError:
+                return 'close', 'requirement_missing'
+            target = requirement.get('target_status')
+            if target is not None:
+                return 'close', 'completion_no_longer_pending'
+            if requirement.get('status') != 'awaiting_acceptance':
+                return 'close', 'completion_no_longer_pending'
+            return 'send', None
         if row['kind'] != 'question':
             return 'send', None
         try:
@@ -476,8 +505,8 @@ class NotificationDispatcher:
         if row is None:
             return False
         if action == 'close':
-            await asyncio.to_thread(self.outbox.close_questions, {row['id']: reason},
-                                    closed_by='host')
+            await asyncio.to_thread(self.outbox.close_delivery, row['id'],
+                                    closed_by='host', reason=reason)
             return True
         if action == 'defer':
             retry_at = self.clock() + self.retry_seconds

@@ -15,7 +15,7 @@ Expand what the decision needs: `ancor_get_context(requirement_id=...)` for the 
 
 ## Keep requirement notes
 
-Use `ancor_note` for requirement-scoped working memory that must survive this one-shot session: verified facts, exact paths and commands, routes already tried, decisions and evidence, open hypotheses, and the next concrete check. Expand a requirement to see compact note previews; use `ancor_note get` only when the full text matters. Add, update or soft-delete notes as evidence changes.
+Use `ancor_note` for requirement-scoped working memory that must survive this one-shot session: verified facts, exact paths and commands, routes already tried, decisions and evidence, open hypotheses, and the next concrete check. At the start of each wake, inspect the requirement's note previews before relying on session memory; use `ancor_note get` only when the full text matters. Note previews and details carry `created_at` and `updated_at` timestamps. Add, update or soft-delete notes as evidence changes.
 
 Notes are never authoritative. They do not change the brief, criteria, authorization, a task contract, or acceptance, and they are not completion evidence. Cite the source path, command, event or artifact instead of treating the note as the source. Never store credentials or secrets. Notes are coordinator-only and never substitute for concrete facts in a worker card.
 
@@ -105,11 +105,11 @@ On replacement, stop obsolete execution, preserve artifacts and establish quiesc
 
 On `host.recovery`, reconcile the durable snapshot. Reuse existing task keys, inspect acceptance evidence and the notification outbox, and finish missing handoffs. The Gateway owns pending delivery; do not spawn a sender. `sending` or `uncertain` requires transport evidence and operator reconciliation, never a blind retry or replacement ID.
 
-## Verify and accept
+## Verify and request human acceptance
 
-A worker completion is evidence, not requirement acceptance. Inspect actual artifacts and run the exact stored checks. Record `ancor_acceptance` only after independent verification, binding criteria, verification results, artifact locations and linked task IDs. If a criterion fails, reject with evidence and create bounded repair work while the requirement remains active.
+A worker completion is evidence, not requirement acceptance. Inspect actual artifacts and run the exact stored checks. Record `ancor_acceptance action=verify` only after independent verification, binding criteria, verification results, artifact locations and linked task IDs. This moves the requirement to `awaiting_acceptance`; it is not the final gate. If a criterion fails, reject with evidence and create bounded repair work while the requirement remains active.
 
-After acceptance, create the durable completion outcome with `ancor_notify` using ID `accept:<requirement_id>`. Use the same human-first system-notice shape: verified result first, where to find it second, limitations last. Do not paste a technical dump. The interactor presents follow-up detail; you do not conduct user dialogue.
+After verification, create the durable completion outcome with `ancor_notify` using ID `accept:<requirement_id>`. Use the same human-first system-notice shape: verified result first, where to find it second, limitations last. Do not paste a technical dump. `awaiting_acceptance` is intentionally outside coordinator health and attention; do not wake or recheck it. The human interaction decides finally. If the human requests changes, the requirement returns to `active` with their exact feedback and you create bounded repair work.
 
 ## Health, wakes, and events
 

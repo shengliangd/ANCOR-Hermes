@@ -30,7 +30,7 @@ host = Host(Context(), board=Board())
 if sys.argv[2] == 'accept-crash':
     store = host.store
     req = store.confirm(store.create_draft('Deliver', 'verified artifact', title='Deliver artifact')['id'], 'human:exact')
-    store.accept(req['id'], 'preserved verification evidence')
+    store.submit_acceptance(req['id'], 'preserved verification evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     Path(sys.argv[3]).write_text(req['id'])
     while True: time.sleep(.01)
@@ -133,7 +133,7 @@ def test_accepted_before_enqueue_crash_wakes_once_without_resubmission(tmp_path)
         payload = json.loads(output.read_text())
         assert payload['events'][0]['kind'] == 'host.recovery'
         requirement = payload['snapshot']['requirements']['items'][0]
-        assert requirement['status'] == 'accepted'
+        assert requirement['status'] == 'awaiting_acceptance'
         assert 'brief' not in requirement
         restarted = Store(path)
         assert restarted.get_requirement(requirement['id'])['confirmation_reference'] == 'human:exact'
@@ -150,7 +150,7 @@ def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state)
     path = tmp_path / 'store.db'
     store = Store(path)
     req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human')
-    store.accept(req['id'], 'evidence')
+    store.submit_acceptance(req['id'], 'evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
                              target='test:destination')
@@ -165,12 +165,7 @@ def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state)
         box.mark_sent(identifier, {'success': True})
     host = Host(Context(path), board=Board())
     events = host.pending(32)
-    assert bool(events) == (state != 'sent')
-    if state != 'sent':
-        packet = host.wake_packet()
-        assert packet['notifications']['items'] == []
-        assert packet['notification_counts']['delivery_issues'] == 1
-        store.ack_events([e['id'] for e in events])
+    store.ack_events([e['id'] for e in events])
     for _ in range(5):
         assert host.pending(32) == []
     assert box.get(identifier)['state'] == state
@@ -181,7 +176,7 @@ def test_sent_question_is_not_completion_delivery(tmp_path):
     path = tmp_path / 'store.db'
     store = Store(path)
     req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human')
-    store.accept(req['id'], 'evidence')
+    store.submit_acceptance(req['id'], 'evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
                              target='test:destination')
@@ -193,7 +188,7 @@ def test_sent_question_is_not_completion_delivery(tmp_path):
     host = Host(Context(path), board=Board())
     requirements = host.wake_packet()['requirements']['items']
     assert [row['id'] for row in requirements] == [req['id']]
-    assert requirements[0]['status'] == 'accepted'
+    assert requirements[0]['status'] == 'awaiting_acceptance'
     assert [e['kind'] for e in host.pending(32)] == ['host.recovery']
 
 

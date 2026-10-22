@@ -16,7 +16,7 @@ User ↔ interactor → immutable draft → explicit confirmation
                         useful questions or delivery
 ```
 
-The interactor prepares and confirms requirements, may read the board to explain progress, then stops at the coordination boundary. It does not mutate the board, schedule workers, wake coordination, or perform acceptance. The coordinator owns those operations. Worker completion is evidence, not requirement acceptance. Pause and resume are confirmed, reversible human decisions; pausing suppresses new work and wakes, and resuming asks the coordinator to re-evaluate existing work.
+The interactor prepares and confirms requirements, may read the board to explain progress, and records the human's final acceptance decision. The coordinator owns execution coordination and independent verification. Worker completion is evidence, not requirement acceptance; coordinator verification moves work to `awaiting_acceptance`, and only the human can commit `accepted`. Pause and resume are confirmed, reversible human decisions; pausing suppresses new work and wakes, and resuming asks the coordinator to re-evaluate existing work.
 
 Every requirement has an authoritative, single-line `title`. Confirmation
 prompts lead with that title and an optional high-level summary, followed by the
@@ -79,9 +79,9 @@ and notifications default to unresolved questions unless
 `omitted` names each excluded history bucket with an executable follow-up query, and
 `attention` is a short priority-ordered discovery list. Host-owned stalled work is
 returned under `conditions`, never duplicated as an ordinary pending event.
-`awaiting_review` separately lists coordinator-accepted requirements whose delivered
-completion notice has not yet been acknowledged by the human-facing role. These are
-open work for the human even though the requirement itself is already accepted.
+`awaiting_acceptance` separately lists coordinator-verified requirements waiting for
+the human's final decision. They are open work and remain outside coordinator health,
+attention and routine wakes until the human accepts or requests changes.
 
 Expansion is explicit and bounded:
 
@@ -91,14 +91,14 @@ Expansion is explicit and bounded:
 - `ancor_board show(task_id=...)` returns one full card with contract, comments, runs and events.
 - `ancor_board history(task_id=..., kind=...)` pages one card's comments, events or runs.
 - `ancor_notify list(requirement_id=...)` scopes the notification history; adding `id` returns one full notification.
-- `ancor_notify acknowledge(id=accept:<requirement_id>)` closes one delivered completion notice after the human has reviewed it. It does not change requirement state or acceptance evidence.
-- `ancor_note list/get/add/update/delete` maintains coordinator-only working notes on one requirement. Notes are non-authoritative, soft-deleted on removal, and never substitute for requirement text, acceptance evidence or a task contract.
+- `ancor_requirement accept(requirement_id=...)` prepares final human acceptance; `request_changes(requirement_id=..., feedback=...)` prepares an exact change request. Both require native confirmation. Acceptance closes the completion notice; change requests return the requirement to active coordination.
+- `ancor_note list/get/add/update/delete` maintains coordinator-only working notes on one requirement. Every note carries `created_at` and `updated_at` Unix timestamps. Notes are non-authoritative, soft-deleted on removal, and never substitute for requirement text, acceptance evidence or a task contract.
 
 Previews are never authoritative for confirmation, acceptance, or transcription.
 List results report total and returned counts so truncation is visible rather than silent.
 Unanswered questions stay visible ahead of recent completion notices, live or recent
-tasks sort ahead of archived history, and unacknowledged completion notices remain in
-`awaiting_review` until the human-facing role records review.
+tasks sort ahead of archived history, and verified work remains in
+`awaiting_acceptance` until the human makes the final decision.
 
 The wake packet follows the same rule: requirements are title references, tasks are
 non-terminal card references, invalidated work carries a bounded reason preview, and
@@ -109,10 +109,12 @@ hour. Other new events do not reset that backoff.
 
 ## Health states
 
-`progression` reports health per active or paused requirement. `active` requires a running
+`progression` reports health per active, paused or awaiting-acceptance requirement. `active` requires a running
 task with a fresh heartbeat, ready work, or a question still inside its short delivery
 window. `waiting_on_human` requires a blocked task with a delivered, unanswered, open
-question. `paused` is a deliberate resting state, not stalled and not liveness. For active
+question. `paused` is a deliberate resting state, not stalled and not liveness.
+`awaiting_acceptance` is the human gate: it is open work but not a coordinator stall.
+For active
 requirements, everything else is `stalled`: triage, stale heartbeat, blocked without an
 open question, blocked after its question was answered or withdrawn, unconfirmed delivery,
 no work, or acceptance pending. A scheduled wake is a timer, not progress. The host

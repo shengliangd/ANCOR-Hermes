@@ -8,6 +8,11 @@ from ancor.board import NativeBoard
 from ancor.store import Store
 
 
+
+def finalize_acceptance(store, requirement_id, evidence='evidence'):
+    store.submit_acceptance(requirement_id, evidence)
+    return store.accept(requirement_id, 'test:human')
+
 class Board:
     link = staticmethod(NativeBoard.link)
 
@@ -189,7 +194,7 @@ def test_scoped_dependencies_across_active_requirements(setup):
     assert op.call(dict(args, action='unlink'))['parents'] == []
     with pytest.raises(ValueError, match='unlinked'):
         op.call(dict(args, parent_id='foreign'))
-    store.accept(other['id'], 'evidence')
+    finalize_acceptance(store, other['id'])
     with pytest.raises(ValueError, match='active'):
         op.call(args)
 
@@ -206,7 +211,7 @@ def test_unlink_obsolete_prerequisite_from_active_child(setup):
     assert op.call(dict(args, action='unlink'))['parents'] == []
     with pytest.raises(ValueError, match='active'):
         op.call(args)
-    store.accept(other['id'], 'evidence')
+    finalize_acceptance(store, other['id'])
     with pytest.raises(ValueError, match='active'):
         op.call(dict(args, action='unlink'))
     with pytest.raises(ValueError, match='unlinked'):
@@ -234,7 +239,7 @@ def test_revise_rejects_unsafe_recovery(setup, monkeypatch, fault):
     board.tasks[tid]['task']['status'] = 'triage'
     args = dict(action='revise', task_id=tid, reason='Reviewed')
     if fault == 'inactive':
-        store.accept(req['id'], 'evidence')
+        finalize_acceptance(store, req['id'])
     elif fault == 'unlinked':
         args['task_id'] = 'foreign'
     elif fault in {'running', 'blocked'}:
@@ -272,7 +277,7 @@ def test_edit_keeps_requirement_context_and_association(setup):
     assert contract()['objective'] in edited['body'] and 'Keep exact values' in edited['body']
     assert req['acceptance_criteria'] not in edited['body']
     assert edited['assignee'] == 'ancor-worker'
-    store.accept(req['id'], 'evidence')
+    finalize_acceptance(store, req['id'])
     with pytest.raises(ValueError, match='active'):
         op.call(args)
 
@@ -387,7 +392,7 @@ def test_create_requires_active_requirement_and_coordinator(setup):
     with pytest.raises(PermissionError):
         op.call(create_args(req))
     ctx.profile_name = 'ancor-coordinator'
-    store.accept(req['id'], 'test evidence')
+    finalize_acceptance(store, req['id'], 'test evidence')
     with pytest.raises(ValueError, match='active'):
         op.call(create_args(req))
     assert not board.tasks

@@ -4,7 +4,7 @@ import json
 import logging
 
 from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
-                    actionable_notifications, attention_items, awaiting_reviews,
+                    actionable_notifications, attention_items, awaiting_acceptances,
                     bounded_latest, collection, conditions_with_state, draft_summary,
                     event_counts, event_summaries, host_condition_state,
                     is_open_question, notification_counts, notification_detail,
@@ -25,13 +25,14 @@ _ACTION_FIELDS = {
         'resume': ['requirement_id', 'reason'],
         'advance': ['requirement_id'],
         'respond': ['requirement_id', 'body'],
+        'accept': ['requirement_id'],
+        'request_changes': ['requirement_id', 'feedback'],
     },
     'ancor_notify': {
         'send': ['id', 'kind', 'message'],
         'withdraw': ['id', 'reason'],
         'list': [],
         'respond': ['id', 'answer'],
-        'acknowledge': ['id'],
     },
     'ancor_board': {
         'create': ['requirement_id', 'key', 'title', 'contract'],
@@ -430,7 +431,7 @@ def register(ctx, *, scan_runner=None):
             for task in all_tasks or ():
                 tasks_by_requirement.setdefault(
                     task.get('requirement_id'), []).append(task)
-            reviews = awaiting_reviews(data['requirements'], notification_rows)
+            reviews = awaiting_acceptances(data['requirements'], notification_rows)
             rows = [requirement_progress(
                 requirement,
                 progression.get(requirement['id']),
@@ -439,10 +440,10 @@ def register(ctx, *, scan_runner=None):
                 for requirement in open_requirements]
             return {
                 'requirements': collection(rows),
-                'awaiting_review': collection(reviews),
+                'awaiting_acceptance': collection(reviews),
                 'counts': {
-                    'open_requirements': len(rows),
-                    'awaiting_review': len(reviews),
+                    'open_requirements': len(rows) + len(reviews),
+                    'awaiting_acceptance': len(reviews),
                     'open_questions': sum(
                         is_open_question(row) for row in notification_rows),
                 },
@@ -458,7 +459,7 @@ def register(ctx, *, scan_runner=None):
                                else actionable_notifications(notification_rows))
         selected_notifications = notification_selection(
             notification_source, notification_limit)
-        reviews = awaiting_reviews(data['requirements'], notification_rows)
+        reviews = awaiting_acceptances(data['requirements'], notification_rows)
         result = {
             'requirements': collection(
                 [requirement_ref(requirement, progression.get(requirement['id']),
@@ -472,9 +473,9 @@ def register(ctx, *, scan_runner=None):
                 'tasks': task_counts(all_tasks or []),
                 'events': event_counts(ordinary_events),
                 'notifications': notification_counts(notification_rows),
-                'awaiting_review': len(reviews),
+                'awaiting_acceptance': len(reviews),
             },
-            'awaiting_review': collection(reviews),
+            'awaiting_acceptance': collection(reviews),
             'attention': attention_items(
                 observation['progression'], tasks=all_tasks,
                 notifications=actionable_notifications(notification_rows),
@@ -551,8 +552,8 @@ def register(ctx, *, scan_runner=None):
                 and existing['task_id'] == task_id)
             if args['kind'] == 'completion':
                 req = service.store.get_requirement(requirement_id)
-                if req['status'] != 'accepted':
-                    raise ValueError('completion requires an accepted requirement')
+                if req['status'] != 'awaiting_acceptance':
+                    raise ValueError('completion requires a requirement awaiting human acceptance')
                 if identifier != 'accept:' + req['id']:
                     raise ValueError('completion id must be accept:<requirement_id>')
             if args['kind'] == 'question':
@@ -602,11 +603,6 @@ def register(ctx, *, scan_runner=None):
             proposal = box.propose_response(identifier, args['answer'])
             return {'notification': notification_detail(existing),
                     **service.response_presentation(proposal)}
-        if action == 'acknowledge':
-            if not interactor:
-                raise PermissionError('interactor profile required to acknowledge reviews')
-            return notification_detail(
-                box.acknowledge_completion(identifier, actor=ctx.profile_name))
         raise ValueError('unknown notification action')
 
     def requirement(args, **_native):
@@ -668,8 +664,8 @@ def register(ctx, *, scan_runner=None):
     elif interactor:
         definitions = {
             'ancor_requirement': (
-                'Draft, confirm, cancel, pause, resume, or answer an ANCOR requirement. draft requires an authoritative single-line title plus an outcome-oriented brief and observable acceptance criteria; keep implementation method and task decomposition out unless the user made a detail a hard constraint. summary is optional. cancel, pause and resume create immutable proposals with exact native clarify_args; exact confirmation requests a transition, which the coordinator completes after linked cards converge. respond records a human reply as advisory input, never authorization.',
-                {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond']},
+                'Draft, confirm, cancel, pause, resume, answer, or make the final human acceptance decision on an ANCOR requirement. draft requires an authoritative single-line title plus an outcome-oriented brief and observable acceptance criteria; keep implementation method and task decomposition out unless the user made a detail a hard constraint. cancel, pause, resume, accept and request_changes create immutable proposals with exact native clarify_args. accept is final human acceptance of coordinator-verified work; request_changes requires exact feedback and returns the requirement to active repair. respond records a human reply as advisory input, never authorization.',
+                {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond', 'accept', 'request_changes']},
                  'title': {'type': 'string', 'maxLength': 80,
                            'description': 'Authoritative single-line requirement label used by every compact list and wake packet.'},
                  'summary': {'type': 'string',
@@ -682,9 +678,11 @@ def register(ctx, *, scan_runner=None):
                                                {'type': 'array', 'items': {'type': 'string'}}]},
                  'draft_id': {'type': 'string'}, 'requirement_id': {'type': 'string'},
                  'requirement_ids': {'type': 'array', 'items': {'type': 'string'}},
-                 'reason': {'type': 'string'}, 'body': {'type': 'string'}}, ['action']),
+                 'reason': {'type': 'string'}, 'body': {'type': 'string'},
+                 'feedback': {'type': 'string',
+                              'description': 'Exact human change request. Required only for request_changes.'}}, ['action']),
             'ancor_get_context': (
-                'Read a compact ANCOR overview: open draft previews, requirement title references, open task references, counts, attention items, open questions and health. Set progress_only=true for a minimal open-work view; it retains acceptance-pending work and coordinator-accepted results whose delivered completion notice still awaits human review, while excluding history. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
+                'Read a compact ANCOR overview: open draft previews, requirement title references, open task references, counts, attention items, open questions and health. Set progress_only=true for a minimal open-work view; it retains coordinator-verified requirements awaiting final human acceptance, while excluding history. Accepted requirements are closed; awaiting_acceptance requirements are still open work. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
                 {'requirement_id': {'type': 'string'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
@@ -703,8 +701,8 @@ def register(ctx, *, scan_runner=None):
                  'status': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
                  'include_archived': {'type': 'boolean'}}, ['action']),
             'ancor_notify': (
-                'List compact durable notifications, expand one by id, answer an open question, or acknowledge a reviewed completion notice. respond returns an immutable response proposal with exact native clarify_args; the reply is not recorded until the user submits that exact confirmation. acknowledge closes only a delivered completion notice after the human has reviewed it; it does not change requirement acceptance. Filter by requirement_id, task_id, state or open_only. A closed question cannot be resurrected; use requirement respond for new human input outside a question.',
-                {'action': {'type': 'string', 'enum': ['list', 'respond', 'acknowledge']},
+                'List compact durable notifications, expand one by id, or answer an open question. respond returns an immutable response proposal with exact native clarify_args; the reply is not recorded until the user submits that exact confirmation. Completion notices are closed only by the final human acceptance decision in ancor_requirement. Filter by requirement_id, task_id, state or open_only. A closed question cannot be resurrected; use requirement respond for new human input outside a question.',
+                {'action': {'type': 'string', 'enum': ['list', 'respond']},
                  'id': {'type': 'string'}, 'answer': {'type': 'string'},
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
                  'requirement_id': {'type': 'string'}, 'task_id': {'type': 'string'},
@@ -717,7 +715,7 @@ def register(ctx, *, scan_runner=None):
                 {'action': {'type': 'string', 'enum': ['advance']},
                  'requirement_id': {'type': 'string'}}, ['action', 'requirement_id']),
             'ancor_note': (
-                'Maintain requirement-scoped working notes. Notes are durable coordination memory, not requirement text, authorization, acceptance evidence, or a task contract. list returns bounded previews; get returns one full note. add, update and delete require a stable active or paused requirement; delete is a soft delete and revisions are retained. Never store credentials or secrets.',
+                'Maintain requirement-scoped working notes across coordinator wakes. Notes are durable coordination memory, not requirement text, authorization, acceptance evidence, or a task contract. list returns bounded previews; get returns one full note. Every note carries created_at and updated_at Unix timestamps. add, update and delete require a stable active or paused requirement; delete is a soft delete and revisions are retained. Never store credentials or secrets.',
                 {'action': {'type': 'string', 'enum': ['list', 'get', 'add', 'update', 'delete']},
                  'requirement_id': {'type': 'string'}, 'note_id': {'type': 'string'},
                  'body': {'type': 'string'},
@@ -777,11 +775,11 @@ def register(ctx, *, scan_runner=None):
                                'items': {'type': 'integer', 'minimum': 1}},
                  'reason': {'type': 'string'}}, ['event_ids']),
             'ancor_acceptance': (
-                'Record independent coordinator verification against exact requirement criteria, or reject with a reason. Acceptance requires every linked native card to be done or archived and archives verified done cards before committing.',
-                {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['accept', 'reject']},
+                'Record independent coordinator verification against exact requirement criteria, or reject with a reason. Verification requires every linked native card to be done or archived and archives verified done cards. verify/accept moves the requirement to awaiting_acceptance; it is not final acceptance. The human-facing role makes the final decision.',
+                {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['verify', 'accept', 'reject']},
                  'evidence': {
                      'type': 'object',
-                     'description': 'Required for accept. Bind exact stored acceptance criteria and independently verified artifacts to linked task IDs.',
+                     'description': 'Required for verify/accept. Bind exact stored acceptance criteria and independently verified artifacts to linked task IDs.',
                      'properties': {
                          'criteria': {'type': 'string', 'description': 'Exact requirement acceptance_criteria text.'},
                          **{field: {'type': 'array', 'minItems': 1,

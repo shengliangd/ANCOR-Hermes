@@ -52,7 +52,8 @@ def test_usage_simulation(tmp_path):
     assert not [e for e in store.pending_events() if e['kind'] == 'wake.due']
     scheduler.call(dict(action='cancel', wake_id=replacement['id']))
     pending = scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='recheck', due_at=100000))
-    store.accept(req['id'], 'verified offline')
+    store.submit_acceptance(req['id'], 'verified offline')
+    store.accept(req['id'], 'test:human')
     scheduler.scan()
     listed = scheduler.call({'action': 'list', 'state': 'suppressed'})['items']
     assert next(w for w in listed if w['id'] == pending['id'])['state'] == 'suppressed'

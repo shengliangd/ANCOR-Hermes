@@ -138,38 +138,48 @@ def requirement_progress(requirement, progression=None, tasks=(), notifications=
     return item
 
 
-def awaiting_reviews(requirements, notifications):
-    """Accepted requirements whose delivered completion notice is not acknowledged."""
-    accepted = {requirement['id']: requirement for requirement in requirements or ()
-                if requirement.get('status') == 'accepted'}
+def awaiting_acceptances(requirements, notifications):
+    """Requirements whose coordinator-verified result needs the human's decision."""
+    waiting = {requirement['id']: requirement for requirement in requirements or ()
+               if requirement.get('status') == 'awaiting_acceptance'}
     latest = {}
     for row in notifications or ():
-        if (row.get('kind') != 'completion' or row.get('state') != 'sent'
-                or row.get('closed_at') is not None):
+        if row.get('kind') != 'completion' or row.get('closed_at') is not None:
             continue
-        requirement = accepted.get(row.get('requirement_id'))
+        requirement = waiting.get(row.get('requirement_id'))
         if requirement is not None:
             latest[requirement['id']] = row
     items = []
-    for requirement_id, row in latest.items():
-        result_preview, truncated = preview(row.get('message'), DEFAULT_PREVIEW_CHARS)
+    for requirement_id, requirement in waiting.items():
+        row = latest.get(requirement_id)
+        result_preview, truncated = preview(
+            row.get('message') if row else None, DEFAULT_PREVIEW_CHARS)
         item = {
             'id': requirement_id,
-            'title': accepted[requirement_id]['title'],
-            'status': 'accepted',
-            'state': 'awaiting_review',
-            'reason': 'completion_pending_review',
-            'notice_id': row['id'],
+            'title': requirement['title'],
+            'status': 'awaiting_acceptance',
+            'state': 'awaiting_human_acceptance',
+            'reason': 'human_acceptance_pending',
+            'notice_id': 'accept:' + requirement_id,
             'result_preview': result_preview,
-            'acknowledge_via': {
-                'tool': 'ancor_notify',
-                'args': {'action': 'acknowledge', 'id': row['id']},
+            'accept_via': {
+                'tool': 'ancor_requirement',
+                'args': {'action': 'accept', 'requirement_id': requirement_id},
+            },
+            'request_changes_via': {
+                'tool': 'ancor_requirement',
+                'args': {'action': 'request_changes', 'requirement_id': requirement_id,
+                         'feedback': '<exact human change request>'},
             },
         }
-        completed_at = row.get('delivery_started_at') or row.get('queued_at')
+        if row is not None:
+            item['notice_state'] = row.get('state')
+            item['notice_delivered'] = row.get('state') == 'sent'
+        completed_at = (row.get('delivery_started_at') or row.get('queued_at')
+                        if row is not None else None)
         if completed_at is not None:
             item['completed_at'] = completed_at
-        if truncated:
+        if row is not None and truncated:
             item['result_truncated'] = True
         items.append(item)
     items.sort(key=lambda item: (item.get('completed_at') is not None,
@@ -530,8 +540,13 @@ def acceptance_ref(requirement, tasks=(), acceptance=None):
     """State whether exact acceptance is recorded, pending, or not yet possible."""
     tasks = list(tasks or ())
     done = sum(1 for task in tasks if task.get('status') in {'done', 'archived'})
-    if requirement.get('status') == 'accepted' or acceptance is not None:
+    event_kind = acceptance.get('kind') if acceptance is not None else None
+    if requirement.get('status') == 'accepted' or event_kind == 'requirement.accepted':
         status = 'accepted'
+    elif requirement.get('status') == 'awaiting_acceptance':
+        status = 'awaiting_human'
+    elif event_kind == 'requirement.changes_requested':
+        status = 'changes_requested'
     elif tasks and done == len(tasks):
         status = 'pending'
     else:

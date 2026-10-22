@@ -325,8 +325,12 @@ profiles. Do not add user-facing task subscriptions: questions and delivery are
 coordinator decisions, not direct worker event notifications. Audit existing ANCOR
 subscriptions before reusing an old board. This setup flow does not copy business
 state automatically. An existing requirements database is reused in place only
-after the explicit title migration above; the plugin does not silently rewrite
-legacy requirement records at startup.
+after the explicit title migration above. On first open, ANCOR 0.4 also upgrades
+requirements that the old coordinator-only flow marked `accepted`: it preserves
+the original `requirement.accepted` event, records the retained evidence as
+`requirement.verified`, and moves the requirement to `awaiting_acceptance` for
+the human final gate. The upgrade is idempotent and leaves current human-confirmed
+acceptances unchanged.
 
 Disable automatic root decomposition for this workflow: the coordinator creates only
 execution tasks, progressively, through the plugin board tool. Native dispatch
@@ -336,8 +340,9 @@ In the Gateway owner profile, run `hermes config set kanban.review_dispatch fals
 This is an owner-wide dispatcher setting, not a per-board switch: use a dedicated
 owner if unrelated boards need native review dispatch. Workers finish execution
 with `kanban_complete`, not `kanban_request_review`. The coordinator independently
-verifies completed artifacts through `ancor_acceptance`; no native review stage
-or coordinator task-completion tool is needed. Disabling review dispatch does not
+verifies completed artifacts through `ancor_acceptance`, moving the requirement to
+`awaiting_acceptance`; the human-facing role then makes the final decision. No native
+review stage or coordinator task-completion tool is needed. Disabling review dispatch does not
 repair existing review/failed tasks; preserve their evidence for operator review.
 
 Route the selected user conversation to `ancor-interactor` using native profile
@@ -362,6 +367,13 @@ paused requirement suppresses scheduled wakes, is reported as `paused` rather
 than `stalled`, and cannot create new work. Resume is staged too: after
 `advance`, the coordinator re-evaluates existing work before unblocking it. No
 additional configuration is required.
+
+Final human acceptance uses the same exact native `clarify` path.
+`ancor_requirement action=accept` commits `accepted`; `action=request_changes`
+requires exact feedback, returns the requirement to `active`, closes the obsolete
+completion notice and wakes the coordinator for bounded repair. While a requirement
+is `awaiting_acceptance`, it is open work for progress questions but does not create
+coordinator health alerts, liveness pressure or habitual wakes.
 
 ## Restart recovery contract
 

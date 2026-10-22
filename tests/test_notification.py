@@ -62,7 +62,7 @@ def test_idempotency_and_no_duplicate_delivery(tmp_path):
         outbox.enqueue('c', 'completion', 'Done', actor='coordinator',
                        requirement_id='req')
     delivery = dispatcher(outbox, lambda *args: calls.append(args) or {'success': True},
-                          requirement_status='accepted')
+                          requirement_status='awaiting_acceptance')
     assert deliver(delivery) is True
     assert deliver(delivery) is False
     assert len(calls) == 1
@@ -71,22 +71,24 @@ def test_idempotency_and_no_duplicate_delivery(tmp_path):
                        requirement_id='req')
 
 
-def test_completion_acknowledgement_is_idempotent_and_completion_only(tmp_path):
+def test_completion_close_is_idempotent_and_completion_only(tmp_path):
     outbox = box(tmp_path)
     outbox.enqueue('c', 'completion', 'Done', actor='coordinator',
                    requirement_id='req')
     assert outbox.claim_next()['id'] == 'c'
     outbox.mark_sent('c', {'success': True})
-    first = outbox.acknowledge_completion('c', actor='interactor')
-    assert first['closed'] is True
-    assert first['closed_by'] == 'interactor'
-    assert first['close_reason'] == 'reviewed_by_human'
-    again = outbox.acknowledge_completion('c', actor='interactor')
-    assert again['closed_at'] == first['closed_at']
+    first = outbox.close_completions(
+        'req', closed_by='interactor', reason='accepted_by_human')
+    assert len(first) == 1 and first[0]['closed'] is True
+    assert first[0]['closed_by'] == 'interactor'
+    assert first[0]['close_reason'] == 'accepted_by_human'
+    again = outbox.close_completions(
+        'req', closed_by='interactor', reason='accepted_by_human')
+    assert again == []
     outbox.enqueue('q', 'question', 'Which label?', actor='coordinator',
                    requirement_id='req', task_id='task')
-    with pytest.raises(ValueError, match='completion'):
-        outbox.acknowledge_completion('q', actor='interactor')
+    assert outbox.close_completions(
+        'req', closed_by='interactor', reason='accepted_by_human') == []
 
 
 def test_multiple_open_questions_allowed_and_withdraw_closes_one(tmp_path):
@@ -233,6 +235,20 @@ def test_gate_closes_terminal_work_without_sending(tmp_path):
     assert row['closed'] is True
     assert row['close_reason'] == 'requirement_cancelled'
     assert row['answer'] is None
+    assert calls == []
+
+
+def test_completion_gate_closes_after_human_change_request(tmp_path):
+    calls = []
+    outbox = box(tmp_path)
+    outbox.enqueue('c', 'completion', 'Verified result', actor='coordinator',
+                   requirement_id='req')
+    delivery = dispatcher(outbox, lambda *args: calls.append(args) or {'success': True},
+                          requirement_status='active')
+    assert deliver(delivery) is True
+    row = outbox.get('c')
+    assert row['closed'] is True
+    assert row['close_reason'] == 'completion_no_longer_pending'
     assert calls == []
 
 

@@ -196,6 +196,12 @@ class Scheduling:
                                 'waiting_on': None,
                                 'task_ids': [task['id'] for task in items]})
                 continue
+            if requirement['status'] == 'awaiting_acceptance':
+                results.append({**base, 'state': 'awaiting_human_acceptance',
+                                'reason': 'human_acceptance_pending',
+                                'waiting_on': None,
+                                'task_ids': [task['id'] for task in items]})
+                continue
             if requirement['status'] != 'active':
                 continue
             triage = [task for task in items if task.get('status') == 'triage']
@@ -286,7 +292,7 @@ class Scheduling:
         deadline = anchor + self.INTERVAL if active else None
         if tasks is None:
             tracked = [r for r in data['requirements']
-                       if r['status'] in {'active', 'paused', 'pending'}
+                       if r['status'] in {'active', 'paused', 'pending', 'awaiting_acceptance'}
                        or r.get('target_status') is not None]
             progression = [{'requirement_id': req['id'], 'state': 'unknown', 'reason': 'board_unavailable',
                             'waiting_on': None, 'task_ids': [],

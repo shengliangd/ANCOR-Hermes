@@ -72,9 +72,10 @@ def test_interactor_progress_uses_one_compact_open_work_read():
     assert 'one `ancor_get_context(progress_only=true)` read' in text
     assert 'compact Markdown table of open work' in text
     assert 'make one `ancor_get_context(progress_only=true)` call' in skill
-    assert 'combining `requirements` with `awaiting_review`' in skill
-    assert 'coordinator-accepted results whose completion notice' in skill
-    assert '`action=acknowledge`' in skill
+    assert 'combining `requirements` with `awaiting_acceptance`' in skill
+    assert 'coordinator-verified results waiting for the human' in skill
+    assert '`ancor_requirement action=accept`' in skill
+    assert '`ancor_requirement action=request_changes`' in skill
     assert 'Do not call `skill_view`, `tool_describe`, a terminal' in skill
 
 
@@ -120,8 +121,11 @@ def test_coordinator_skill_documents_requirement_notes():
     soul = (ROOT / 'roles/ancor-coordinator/SOUL.md').read_text()
     skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
     assert 'requirement-scoped notes' in soul
+    assert 'At each wake, inspect note previews' in soul
+    assert '`created_at`/`updated_at` timestamps' in soul
     assert '## Keep requirement notes' in skill
     assert '`ancor_note`' in skill
+    assert '`created_at` and `updated_at` timestamps' in skill
     assert 'Notes are never authoritative' in skill
 
 
@@ -186,8 +190,8 @@ def test_acceptance_schema_matches_service_contract(tmp_path):
             return {'id': task_id, 'status': 'archived'}
 
     result = Service(ctx, store, board=Board()).acceptance(
-        {'action': 'accept', 'requirement_id': req['id'], 'evidence': evidence})
-    assert result['status'] == 'accepted'
+        {'action': 'verify', 'requirement_id': req['id'], 'evidence': evidence})
+    assert result['status'] == 'awaiting_acceptance'
 
 
 def test_manifest_uses_native_setting_mapping(tmp_path):

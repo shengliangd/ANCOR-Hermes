@@ -100,15 +100,17 @@ class StoreTests(unittest.TestCase):
             self.store.accept(requirement['id'], ' ')
         self.store.reject(requirement['id'], 'not yet')
         self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'active')
-        self.store.accept(requirement['id'], 'test report URL')
+        verified = self.store.submit_acceptance(requirement['id'], 'test report URL')
+        self.assertEqual(verified['status'], 'awaiting_acceptance')
+        self.store.accept(requirement['id'], 'human:accept')
         self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'accepted')
-        self.assertEqual(self.store.pending_events()[-1]['payload']['evidence'], 'test report URL')
+        self.assertEqual(self.store.acceptances()[-1]['payload']['evidence'], 'test report URL')
         with self.assertRaises(ValueError):
-            self.store.accept(requirement['id'], 'again')
+            self.store.accept(requirement['id'], 'human:again')
         with self.assertRaises(ValueError):
             self.store.reject(requirement['id'], 'late')
         self.assertEqual([e['kind'] for e in self.store.pending_events()],
-                         ['requirement.activated', 'requirement.rejected', 'requirement.accepted'])
+                         ['requirement.activated', 'requirement.rejected'])
 
     def test_replacement_emits_invalidation_and_blocks_old_acceptance(self):
         old = self.store.confirm(self.store.create_draft('old', 'criteria')['id'], 'ref')
