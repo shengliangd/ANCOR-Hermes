@@ -18,6 +18,17 @@ import time
 log = logging.getLogger(__name__)
 
 
+def completion_requirement_id(row):
+    """Return a completion's requirement, including legacy rows missing the column."""
+    requirement_id = (row or {}).get('requirement_id')
+    if requirement_id:
+        return requirement_id
+    identifier = (row or {}).get('id')
+    if isinstance(identifier, str) and identifier.startswith('accept:'):
+        return identifier[len('accept:'):] or None
+    return None
+
+
 class SenderError(RuntimeError):
     """Allowlisted transport diagnostics, never native output or message text."""
 
@@ -431,8 +442,8 @@ class NotificationOutbox:
         with self._db() as db:
             rows = [self._row(db, row[0]) for row in db.execute(
                 "SELECT id FROM human_notifications WHERE kind='completion' "
-                'AND requirement_id=? AND closed_at IS NULL ORDER BY rowid',
-                (requirement_id,))]
+                'AND (requirement_id=? OR id=?) AND closed_at IS NULL ORDER BY rowid',
+                (requirement_id, 'accept:' + requirement_id))]
             for row in rows:
                 db.execute(
                     'UPDATE human_notifications SET closed_at=?, closed_by=?, close_reason=?, '
@@ -457,8 +468,11 @@ class NotificationDispatcher:
 
     def _gate(self, row):
         if row['kind'] == 'completion':
+            requirement_id = completion_requirement_id(row)
+            if requirement_id is None:
+                return 'close', 'requirement_missing'
             try:
-                requirement = self.resolve_requirement(row['requirement_id'])
+                requirement = self.resolve_requirement(requirement_id)
             except KeyError:
                 return 'close', 'requirement_missing'
             target = requirement.get('target_status')
