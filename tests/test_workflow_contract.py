@@ -46,11 +46,20 @@ def test_notification_presentation_is_system_notice_then_interactor_followup():
 def test_coordinator_checks_constraint_and_evidence_before_asking():
     coordinator_soul = (ROOT / 'roles/ancor-coordinator/SOUL.md').read_text()
     coordinator_skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
-    assert 'Before asking, test the constraint' in coordinator_soul
-    assert 'Then try self-service' in coordinator_soul
-    assert '**Test the constraint.**' in coordinator_skill
-    assert '**Try self-service.**' in coordinator_skill
-    assert 'choose the default and record it' in coordinator_skill
+    assert 'external commitments' in coordinator_soul
+    assert 'environment or image identity' in coordinator_soul
+    assert 'at most one low-impact, reversible probe' in coordinator_soul
+    assert 'a failed probe is evidence for a question' in coordinator_soul
+    assert '**Classify the missing item.**' in coordinator_skill
+    assert '**Try bounded self-service.**' in coordinator_skill
+    assert 'External commitments belong to the human' in coordinator_skill
+    assert 'do not provision or serially trial candidate environments' in coordinator_skill
+
+
+def test_coordinator_contract_separates_verified_facts_from_guesses():
+    skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
+    assert 'Separate requirement constraints and verified environment facts from optional suggestions.' in skill
+    assert 'never promote a guessed command, toolchain or environment choice' in skill
 
 
 def test_interactor_keeps_requirements_at_outcome_altitude():
@@ -151,6 +160,19 @@ def test_worker_skill_covers_card_execution_and_blocking():
     assert '`kanban_block`' in skill
     assert '`kanban_request_review`' in skill
     assert 'Triage is a failure state' in skill
+    assert 'Before running a prescriptive setup, build or environment command' in skill
+    assert 'Do not silently substitute a tool' in skill
+    assert 'contract conflict' in skill
+
+
+def test_worker_reports_contract_mismatches_instead_of_guessing():
+    soul = (ROOT / 'roles/ancor-worker/SOUL.md').read_text()
+    skill = (ROOT / 'skills/ancor-worker/SKILL.md').read_text()
+    assert "report the card's claim, observed evidence" in soul
+    assert 'then block if the conflict prevents valid execution' in soul
+    assert 'record the deviation in the completion report' in soul
+    assert "report the card's claim, observed evidence" in skill
+    assert 'record the deviation in the completion report' in skill
 
 
 def test_acceptance_schema_matches_service_contract(tmp_path):

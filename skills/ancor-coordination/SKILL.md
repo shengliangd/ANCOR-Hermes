@@ -40,7 +40,8 @@ A worker receives one assigned card and native execution metadata. It does not r
 Before creating or editing a worker card, make the contract executable from the card alone:
 
 - Quote the exact requirement clauses that apply in `inputs` or `constraints`. Never cite "acceptance criterion 3", "the requirement", or a task title as the only pointer to a needed fact.
-- Give absolute paths, exact values, verified artifact names or hashes, and concrete commands. Verify every named input, or make obtaining and verifying it the card's first work item.
+- Give absolute paths, exact values, verified artifact names or hashes, and concrete commands only when verified. Verify every named input, or make obtaining and verifying it the card's first work item.
+- Separate requirement constraints and verified environment facts from optional suggestions. Only the first two are binding; never promote a guessed command, toolchain or environment choice into `constraints`.
 - Translate any completed parent result into the facts and artifact paths this card needs. Do not include a parent-card summary or ask the worker to inspect a parent. Never write "see the parent card", "read task X", or "check another card's comments" as the only context.
 - State expected artifacts and card-level verification steps that use them.
 - Make `stop_conditions` genuine external boundaries. Discoverable missing information is your work, not the worker's stop condition.
@@ -56,6 +57,8 @@ A confirmed requirement is a portfolio of outcomes. Before new work, a replaceme
 - what can be proven independently, what depends on other work, and what can run in parallel;
 - which real gates are external, such as hardware, credentials, upstream packages, environments or human decisions;
 - which uncertainty should be resolved early because it changes later work.
+
+The identity of an environment, image, credential or private resource is a gate, not an implementation preference. If the requirement, repository or an approved source does not fix it, leave the implementation card uncreated and resolve the gate first. A bounded inventory or compatibility check may inform the decision; do not provision or serially trial candidate environments inside an implementation card.
 
 Choose cards that one worker can own end to end with their own evidence. Do not confuse bounded with small: a card is bounded when its outcome and evidence are clear. A single card is appropriate only when the requirement truly is one coherent outcome. Bundling independent repositories, services or phases usually means planning stopped too early; a card that only relays work to another card is usually too small. Aim for the smallest set that is legible, parallel where useful, and independently verifiable.
 
@@ -78,14 +81,14 @@ Write contracts around outcomes and evidence, not unverified assumptions. If a d
 
 ## Resolve blockers and ask humans
 
-Own recoverable blockers. Treat a worker's blocker report as evidence, not a verdict: a local failure describes the route or environment tried, not a global limit. Within confirmed scope, inspect evidence, repair the card, try a compatible route, or create a focused probe. Escalate only when the next useful action needs authority, private access, credentials, spending or a scope decision you do not have.
+Own recoverable blockers, but do not equate autonomy with guessing. Treat a worker's blocker report as evidence, not a verdict: a local failure describes the route or environment tried, not a global limit. Within confirmed scope, inspect evidence, repair the card, try a compatible route, or create a focused probe. Escalate when the next useful action needs an external commitment you cannot make: authority, private access, credentials, spending, hardware, a data source, an environment or image identity, or a scope decision.
 
 Before asking, run two checks in this order:
 
-1. **Test the constraint.** Is it explicitly locked by the requirement or an external system, or only your own implementation assumption? If the action is reversible, inside scope, and does not change acceptance, choose the default and record it.
-2. **Try self-service.** Is the answer in the requirement, notes, latest comments, events and runs, completed parent results, accepted artifacts, referenced documents, or a locally testable path? If inspection, a test, or one reversible attempt can answer it, do that.
+1. **Classify the missing item.** Is it a discoverable fact, or an external commitment that fixes environment identity, reproducibility, security, cost or access? Discoverable facts are yours to resolve. External commitments belong to the human unless the requirement or an approved source already fixes them. A constraint is not real merely because you assumed it.
+2. **Try bounded self-service.** Inspect the available evidence and, only when the action is low-impact and reversible, run at most one probe that does not provision or lock in an external resource. If the probe fails, ask instead of serially trying alternatives.
 
-If later evidence answers the question, withdraw or bypass it and act. A question must list what you checked and the smallest human-only fact or decision still missing. Never ask the human to discover a path, read a file, test an available route, or choose what durable state already determines.
+If later evidence answers the question, withdraw or bypass it and act. A question must list what you checked, the viable options and your recommendation, the cost or risk of guessing, and the smallest human-only fact or decision still missing. Never ask the human to discover a path, read a file, test an available route, or choose what durable state already determines.
 
 When human input is required, first put the linked task in `blocked` (never ask from a running or `triage` card), then use `ancor_notify` with `kind=question`, an active `requirement_id`, and that `task_id`. Keep the task blocked while the question is open. Use a stable ID per distinct question and reuse it on retry.
 
