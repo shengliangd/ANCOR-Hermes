@@ -41,7 +41,7 @@ def test_wake_packet_excludes_full_briefs_and_bodies_under_incident_fixture(tmp_
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     for index in range(12):
-        box.enqueue(f'n{index}', 'completion', 'FULL MESSAGE ' * 2000,
+        box.enqueue(f'n{index}', 'completion', f'FULL MESSAGE {index} ' * 2000,
                     actor='ancor-coordinator',
                     requirement_id=store.snapshot()['requirements'][index % 3]['id'])
     store.add_event('native.completed', {'result': 'FULL EVENT ' * 5000})

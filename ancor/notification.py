@@ -216,6 +216,16 @@ class NotificationOutbox:
         if 'MEDIA:' in message:
             raise ValueError('notifications are text-only; MEDIA markers forbidden')
         with self._db() as db:
+            duplicate = db.execute(
+                'SELECT id,state,closed_at FROM human_notifications '
+                'WHERE id<>? AND kind=? AND message=? AND target=? '
+                'AND requirement_id IS ? AND task_id IS ? LIMIT 1',
+                (identifier, kind, message, self.target, requirement_id, task_id)).fetchone()
+            if duplicate is not None:
+                state = 'closed' if duplicate['closed_at'] is not None else duplicate['state']
+                raise ValueError(
+                    f'identical notification already exists as {duplicate["id"]} ({state}); '
+                    'reuse its stable ID or change the question materially')
             db.execute('INSERT OR IGNORE INTO human_notifications '
                        '(id, kind, message, target, state, requirement_id, task_id, queued_at) '
                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',

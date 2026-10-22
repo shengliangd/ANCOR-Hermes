@@ -71,6 +71,24 @@ def test_idempotency_and_no_duplicate_delivery(tmp_path):
                        requirement_id='req')
 
 
+def test_identical_question_cannot_be_enqueued_under_a_new_id(tmp_path):
+    outbox = box(tmp_path)
+    first = outbox.enqueue('q1', 'question', 'Which option?', actor='coordinator',
+                           requirement_id='req', task_id='task')
+    assert outbox.enqueue('q1', 'question', 'Which option?', actor='coordinator',
+                          requirement_id='req', task_id='task')['id'] == first['id']
+    with pytest.raises(ValueError, match='identical notification.*q1'):
+        outbox.enqueue('q1-retry', 'question', 'Which option?', actor='coordinator',
+                       requirement_id='req', task_id='task')
+    outbox.withdraw('q1', actor='coordinator', reason='no longer blocked')
+    with pytest.raises(ValueError, match='identical notification.*closed'):
+        outbox.enqueue('q1-closed-retry', 'question', 'Which option?', actor='coordinator',
+                       requirement_id='req', task_id='task')
+    other = outbox.enqueue('q2', 'question', 'Which option?', actor='coordinator',
+                           requirement_id='other', task_id='task')
+    assert other['id'] == 'q2'
+
+
 def test_completion_close_is_idempotent_and_completion_only(tmp_path):
     outbox = box(tmp_path)
     outbox.enqueue('c', 'completion', 'Done', actor='coordinator',
