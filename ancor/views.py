@@ -8,8 +8,6 @@ through a single-object detail path.
 
 import json
 
-from .notification import completion_requirement_id
-
 TITLE_MAX_CHARS = 80
 DEFAULT_PREVIEW_CHARS = 160
 MESSAGE_PREVIEW_CHARS = 120
@@ -148,7 +146,7 @@ def awaiting_acceptances(requirements, notifications):
     for row in notifications or ():
         if row.get('kind') != 'completion' or row.get('closed_at') is not None:
             continue
-        requirement = waiting.get(completion_requirement_id(row))
+        requirement = waiting.get(row.get('requirement_id'))
         if requirement is not None:
             latest[requirement['id']] = row
     items = []

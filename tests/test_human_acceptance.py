@@ -6,7 +6,6 @@ from ancor.notification import NotificationOutbox
 from ancor.scheduling import Scheduling
 from ancor.service import Service
 from ancor.store import Store
-from ancor.views import awaiting_acceptances
 
 
 def context():
@@ -120,25 +119,3 @@ def test_current_human_acceptance_is_not_reopened(tmp_path):
     store.accept(req['id'], 'native:human-accept')
     reopened = Store(store.path)
     assert reopened.get_requirement(req['id'])['status'] == 'accepted'
-
-
-def test_legacy_completion_without_requirement_column_keeps_human_gate(tmp_path):
-    store, box, req, notice_id = verified(tmp_path)
-    with sqlite3.connect(store.path + '.notifications.db') as db:
-        db.execute('UPDATE human_notifications SET requirement_id=NULL WHERE id=?',
-                   (notice_id,))
-    rows = NotificationOutbox.read_existing(store.path + '.notifications.db')
-    reviews = awaiting_acceptances(store.snapshot()['requirements'], rows)
-    assert reviews[0]['id'] == req['id']
-    assert reviews[0]['notice_id'] == notice_id
-    assert reviews[0]['notice_delivered'] is True
-
-    service = Service(context(), store)
-    prepared = service.requirement({'action': 'accept', 'requirement_id': req['id']})
-    assert service.pre_tool_call('clarify', prepared['clarify_args'],
-                                 session_id='s', tool_call_id='c') is None
-    service.post_tool_call('clarify', prepared['clarify_args'],
-                           confirmation_payload(prepared),
-                           session_id='s', tool_call_id='c')
-    assert store.get_requirement(req['id'])['status'] == 'accepted'
-    assert box.get(notice_id)['closed'] is True

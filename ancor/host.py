@@ -179,7 +179,7 @@ class Host:
         self.update_conditions(states)
 
     def notification_outbox(self):
-        from .notification import NotificationOutbox, completion_requirement_id
+        from .notification import NotificationOutbox
         target = self.ctx.get_config('human_target')
         if target is not None and (not isinstance(target, str) or ':' not in target
                                    or not target.partition(':')[2].strip()):
@@ -230,16 +230,16 @@ class Host:
         for row in box.list():
             if (row['kind'] != 'completion' or row.get('closed_at') is not None):
                 continue
-            requirement_id = completion_requirement_id(row)
-            requirement = requirements.get(requirement_id)
+            requirement = requirements.get(row.get('requirement_id'))
             if requirement is None:
-                if requirement_id:
-                    completion_requirements.setdefault(requirement_id, 'requirement_missing')
+                if row.get('requirement_id'):
+                    completion_requirements.setdefault(
+                        row.get('requirement_id'), 'requirement_missing')
                 else:
                     orphaned_completions[row['id']] = 'requirement_missing'
             elif requirement.get('status') != 'awaiting_acceptance' or requirement.get('target_status'):
                 completion_requirements.setdefault(
-                    requirement_id, 'completion_no_longer_pending')
+                    row.get('requirement_id'), 'completion_no_longer_pending')
         for notification_id, reason in orphaned_completions.items():
             box.close_delivery(notification_id, closed_by='host', reason=reason)
         for requirement_id, reason in completion_requirements.items():
@@ -351,14 +351,15 @@ class Host:
         return unresolved
 
     def wake_packet(self):
-        from .notification import NotificationOutbox, completion_requirement_id
+        from .notification import NotificationOutbox
         data = self.store.snapshot()
         notifications = NotificationOutbox.read_existing(self.store.path + '.notifications.db')
         delivered = {n['id'] for n in notifications
                      if n['state'] == 'sent' and n['kind'] == 'completion'}
-        pending_completion = {completion_requirement_id(n) for n in notifications
+        pending_completion = {n['requirement_id'] for n in notifications
                               if n['kind'] == 'completion'
-                              and n.get('closed_at') is None} - {None}
+                              and n.get('closed_at') is None
+                              and n.get('requirement_id')}
         requirements = [r for r in data['requirements']
                         if r['status'] in {'active', 'paused', 'pending'}
                         or r.get('target_status') is not None or
