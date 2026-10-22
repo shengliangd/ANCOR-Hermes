@@ -80,6 +80,67 @@ def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
     assert 'body' not in expanded['tasks']['items'][0]
 
 
+def test_progress_only_returns_open_work_including_acceptance_pending(tmp_path, monkeypatch):
+    tools = {}
+    store_path = tmp_path / 'store.db'
+    config = {'store_path': str(store_path), 'board': 'ancor',
+              'coordinator_profile': 'ancor-coordinator',
+              'interactor_profile': 'ancor-interactor',
+              'human_target': 'test:destination', 'transport_profile': 'default'}
+    ctx = SimpleNamespace(profile_name='ancor-interactor',
+                          get_config=lambda key, default=None: config.get(key, default),
+                          register_tool=lambda **kw: tools.update({kw['name']: kw}),
+                          register_hook=lambda *args: None,
+                          register_platform_handler=lambda *args: None)
+    store = Store(store_path)
+    active = store.confirm(store.create_draft(
+        'Active brief', 'Active criteria', title='Active work')['id'], 'fixture')
+    awaiting = store.confirm(store.create_draft(
+        'Awaiting brief', 'Awaiting criteria', title='Awaiting acceptance')['id'], 'fixture')
+    paused = store.confirm(store.create_draft(
+        'Paused brief', 'Paused criteria', title='Paused work')['id'], 'fixture')
+    accepted = store.confirm(store.create_draft(
+        'Accepted brief', 'Accepted criteria', title='Closed work')['id'], 'fixture')
+    for requirement, task_id in ((active, 'active-open'),
+                                 (awaiting, 'awaiting-done'),
+                                 (paused, 'paused-open'),
+                                 (accepted, 'accepted-done')):
+        store.link_task(requirement['id'], task_id)
+    command = store.create_requirement_command(
+        'pause', paused['id'], 'User asked', 'Stop briefly')
+    store.confirm_requirement_command(command['id'], 'pause-confirmation')
+    store.finalize_transition(paused['id'])
+    store.accept(accepted['id'], 'verified')
+    store.ack_events([event['id'] for event in store.pending_events()])
+    cards = [
+        {'id': 'active-open', 'title': 'Active card', 'status': 'running'},
+        {'id': 'awaiting-done', 'title': 'Awaiting card', 'status': 'done'},
+        {'id': 'paused-open', 'title': 'Paused card', 'status': 'blocked',
+         'blocked_reason': 'Waiting for the paused requirement to resume'},
+        {'id': 'accepted-done', 'title': 'Closed card', 'status': 'done'},
+    ]
+    monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: cards)
+    ancor.register(ctx)
+    call = lambda args: json.loads(tools['ancor_get_context']['handler'](args))
+
+    progress = call({'progress_only': True})
+    rows = {row['id']: row for row in progress['requirements']['items']}
+    assert set(rows) == {active['id'], awaiting['id'], paused['id']}
+    assert accepted['id'] not in rows
+    assert rows[awaiting['id']]['reason'] == 'acceptance_pending'
+    assert rows[awaiting['id']]['tasks'] == {'open': 0, 'total': 1}
+    assert rows[awaiting['id']]['focus']['id'] == 'awaiting-done'
+    assert rows[paused['id']]['state'] == 'paused'
+    assert rows[paused['id']]['focus']['blocked_reason_preview'].startswith(
+        'Waiting for the paused')
+    assert 'tasks' not in progress
+    assert 'pending_events' not in progress
+    assert 'notifications' not in progress
+    assert progress['counts']['open_requirements'] == 3
+    assert len(json.dumps(progress, ensure_ascii=False)) < len(json.dumps(
+        call({}), ensure_ascii=False))
+
+
 def test_notification_list_is_compact_and_id_expands(tmp_path):
     tools = {}
     store_path = tmp_path / 'store.db'

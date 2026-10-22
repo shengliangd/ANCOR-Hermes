@@ -144,7 +144,7 @@ def test_only_ancor_roles_have_business_tools():
             assert set(tools['ancor_get_context']['schema']['parameters']['properties']) == {
                 'requirement_id', 'task_limit', 'notification_limit',
                 'attention_limit', 'include_done', 'include_archived',
-                'include_closed_notifications'}
+                'include_closed_notifications', 'progress_only'}
             assert tools['ancor_board']['schema']['parameters']['properties']['action']['enum'] == ['list', 'show', 'history']
         elif role == 'ancor-coordinator':
             assert set(tools) == {'ancor_requirement', 'ancor_get_context',

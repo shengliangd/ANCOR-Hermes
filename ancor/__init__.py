@@ -9,7 +9,8 @@ from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
                     event_counts, event_summaries, host_condition_state,
                     is_open_question, notification_counts, notification_detail,
                     notification_selection, notification_summary, omitted_groups,
-                    requirement_counts, requirement_detail, requirement_ref,
+                    requirement_counts, requirement_detail, requirement_progress,
+                    requirement_ref,
                     select_tasks, task_counts, task_exact_via, transition_summary)
 
 log = logging.getLogger(__name__)
@@ -304,12 +305,16 @@ def register(ctx, *, scan_runner=None):
         include_done = args.get('include_done', False)
         include_archived = args.get('include_archived', False)
         include_closed_notifications = args.get('include_closed_notifications', False)
+        progress_only = args.get('progress_only', False)
         for name, value in (
                 ('include_done', include_done),
                 ('include_archived', include_archived),
-                ('include_closed_notifications', include_closed_notifications)):
+                ('include_closed_notifications', include_closed_notifications),
+                ('progress_only', progress_only)):
             if type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
+        if progress_only and requirement_id:
+            raise ValueError('progress_only cannot be combined with requirement_id')
         if event_id is not None:
             if not coordinator:
                 raise PermissionError('coordinator profile required to inspect events')
@@ -419,6 +424,28 @@ def register(ctx, *, scan_runner=None):
         open_requirements = [requirement for requirement in data['requirements']
                              if (requirement['status'] in {'active', 'paused', 'pending'}
                                  or requirement.get('target_status') is not None)]
+        if progress_only:
+            tasks_by_requirement = {}
+            for task in all_tasks or ():
+                tasks_by_requirement.setdefault(
+                    task.get('requirement_id'), []).append(task)
+            rows = [requirement_progress(
+                requirement,
+                progression.get(requirement['id']),
+                tasks_by_requirement.get(requirement['id'], ()),
+                notification_rows)
+                for requirement in open_requirements]
+            return {
+                'requirements': collection(rows),
+                'counts': {
+                    'open_requirements': len(rows),
+                    'open_questions': sum(
+                        is_open_question(row) for row in notification_rows),
+                },
+                'expand': ('Call ancor_get_context with requirement_id=<id> for '
+                           'exact requirement text or ancor_board show for one task.'),
+                **extra,
+            }
         selected_tasks = select_tasks(
             all_tasks or [], include_done=include_done,
             include_archived=include_archived)
@@ -645,14 +672,16 @@ def register(ctx, *, scan_runner=None):
                  'requirement_ids': {'type': 'array', 'items': {'type': 'string'}},
                  'reason': {'type': 'string'}, 'body': {'type': 'string'}}, ['action']),
             'ancor_get_context': (
-                'Read a compact ANCOR overview: open draft previews, requirement title references, open task references, counts, attention items, open questions and health. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
+                'Read a compact ANCOR overview: open draft previews, requirement title references, open task references, counts, attention items, open questions and health. Set progress_only=true for a single minimal open-work table; it excludes closed requirements and history while retaining acceptance-pending requirements. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
                 {'requirement_id': {'type': 'string'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
                  'include_done': {'type': 'boolean'},
                  'include_archived': {'type': 'boolean'},
-                 'include_closed_notifications': {'type': 'boolean'}}, []),
+                 'include_closed_notifications': {'type': 'boolean'},
+                 'progress_only': {'type': 'boolean',
+                                   'description': 'Return only open requirements as compact progress rows.'}}, []),
             'ancor_board': (
                 'Read linked native tasks. list returns compact summaries and accepts requirement_id, status, limit and include_archived filters; show returns one card with bounded recent history; history expands comments, events or runs. This role cannot mutate the board.',
                 {'action': {'type': 'string', 'enum': ['list', 'show', 'history']},

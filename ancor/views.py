@@ -92,6 +92,52 @@ def requirement_ref(requirement, progression=None, *, exact_via=False):
     return item
 
 
+def requirement_progress(requirement, progression=None, tasks=(), notifications=()):
+    """One compact row for the open-work progress table."""
+    progression = progression or {}
+    counts = task_counts(tasks)
+    item = {
+        'id': requirement['id'],
+        'title': requirement['title'],
+        'status': requirement['status'],
+        'state': progression.get('state'),
+        'reason': progression.get('reason'),
+        'tasks': {'open': counts['open'], 'total': counts['total']},
+    }
+    if requirement.get('target_status') is not None:
+        item['target_status'] = requirement['target_status']
+    waiting_on = progression.get('waiting_on')
+    if waiting_on:
+        item['waiting_on'] = waiting_on
+    open_questions = sum(
+        1 for row in notifications
+        if row.get('requirement_id') == requirement['id'] and is_open_question(row))
+    if open_questions:
+        item['open_questions'] = open_questions
+    task_by_id = {task['id']: task for task in tasks}
+    focus_ids = progression.get('task_ids') or ()
+    focus = next((task_by_id[task_id] for task_id in focus_ids
+                  if task_id in task_by_id), None)
+    if focus is None:
+        focus = next((task for task in tasks if not is_terminal_task(task)), None)
+    if focus is not None:
+        item['focus'] = {
+            'id': focus['id'],
+            'title': focus.get('title'),
+            'status': focus.get('status'),
+        }
+        blocked_reason = focus.get('blocked_reason_preview')
+        truncated = bool(focus.get('blocked_reason_truncated'))
+        if blocked_reason is None:
+            blocked_reason, truncated = preview(
+                focus.get('blocked_reason'), REASON_PREVIEW_CHARS)
+        if blocked_reason:
+            item['focus']['blocked_reason_preview'] = blocked_reason
+            if truncated:
+                item['focus']['blocked_reason_truncated'] = True
+    return item
+
+
 def requirement_detail(requirement, draft=None):
     """Exact, single-requirement detail. Only this projection exposes brief/ac."""
     item = {
