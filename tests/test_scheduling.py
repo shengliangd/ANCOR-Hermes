@@ -71,7 +71,7 @@ def test_invalidation_and_validation(tmp_path):
     for due in [100, 99, float('nan'), float('inf'), True]:
         with pytest.raises(ValueError):
             scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='x', due_at=due))
-    wake = scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='x', due_at=101))
+    scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='x', due_at=101))
     store.confirm(store.create_draft('new', 'criteria', req['id'])['id'], 'yes')
     scheduler.scan()
     listed = scheduler.call({'action': 'list', 'state': 'suppressed'})['items']

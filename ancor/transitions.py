@@ -63,7 +63,6 @@ def _shared_stable_requirements(snapshot, requirement_id, task_id):
 
 def _archive_linked(store, board, requirement_id, target):
     snapshot = store.snapshot()
-    requirement = store.get_requirement(requirement_id)
     tasks = {task['id']: task for task in board.list()}
     linked = [link['task_id'] for link in snapshot['task_links']
               if link['requirement_id'] == requirement_id]

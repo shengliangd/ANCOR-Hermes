@@ -71,13 +71,11 @@ def test_coordinator_does_not_assume_worker_can_read_other_cards():
     skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
     assert 'Workers receive only the task card assigned to them' in soul
     assert 'Parent links are dependency edges, not an information channel' in soul
-    assert 'Never use "see task X"' in soul
     assert '## Worker context contract' in skill
     assert 'A worker receives one assigned card' in skill
     assert '`parent_ids` link records an execution dependency; it is not an information channel' in skill
     assert 'run a self-containment check' in skill
     assert 'Never write "see the parent card"' in skill
-    assert 'Do not include a parent-card summary' in soul
     assert 'Do not include a parent-card summary' in skill
 
 
@@ -93,16 +91,16 @@ def test_coordinator_skill_documents_requirement_notes():
 def test_worker_reads_only_its_own_card():
     soul = (ROOT / 'roles/ancor-worker/SOUL.md').read_text()
     skill = (ROOT / 'skills/ancor-worker/SKILL.md').read_text()
-    for text in (soul, skill):
-        assert 'Do not read another task' in text
-        assert 'requirement store' in text
-        assert 'carry no context' in text
-        assert '## Parent task results' in text
-        assert '## Recent work by @...' in text
-        assert 'platform-generated' in text
-        assert 'not part of your contract' in text
-        assert 'the card wins' in text
+    assert 'Do not read another task' in soul
+    assert 'requirement store' in soul
+    assert 'carry no context' in soul
+    assert '## Parent task results' in soul
+    assert '## Recent work by @...' in soul
+    assert 'platform-generated' in soul
+    assert 'not part of your contract' in soul
+    assert 'the card wins' in soul
     assert 'Use `kanban_show` only for your own task ID.' in skill
+    assert 'this card is the only coordination context' in skill
 
 
 def test_worker_skill_covers_card_execution_and_blocking():

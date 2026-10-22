@@ -2,7 +2,6 @@
 import hashlib
 import json
 import logging
-import os
 
 from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
                     actionable_notifications, attention_items, bounded_latest,

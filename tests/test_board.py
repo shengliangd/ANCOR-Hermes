@@ -7,7 +7,6 @@ from pathlib import Path
 
 def test_installed_native_cli_roundtrip_isolated(tmp_path):
     import os
-    import sys
     source = Path('/home/user/.hermes/hermes-agent')
     if not source.exists():
         pytest.skip('installed Hermes source unavailable')

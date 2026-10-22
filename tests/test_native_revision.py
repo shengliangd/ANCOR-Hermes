@@ -5,7 +5,6 @@ on tmp_path; no dispatcher/model and no live board mutations.
 """
 import os
 from dataclasses import asdict
-from pathlib import Path
 
 import pytest
 

@@ -9,11 +9,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from contextlib import closing
 from pathlib import Path
-from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 
 from ancor.views import event_summary, notification_detail, notification_selection, notification_summary, requirement_detail, requirement_ref, task_detail, task_ref
 
