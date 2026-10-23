@@ -16,16 +16,16 @@ def test_worker_completes_without_native_review():
 def test_interactor_can_read_but_not_mutate_the_board():
     text = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
     skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
-    assert 'may read the task board' in text
+    assert 'read-only' in skill
+    assert 'Do not coordinate, execute, decompose work, or mutate the board.' in text
     assert '`ancor_board list`' in skill and '`ancor_board show`' in skill
-    assert 'must not mutate the board' in text
     assert '`ancor_notify respond`' in skill
     assert '`ancor_requirement respond`' in skill
-    assert 'The answer becomes durable only after the user submits that exact confirmation.' in skill
+    assert 'confirm with the returned `clarify_args` unchanged' in skill
     assert 'action=pause' in skill and 'action=resume' in skill
-    assert 'authoritative single-line `title`' in skill
+    assert 'single-line `title`' in skill
     assert '`summary` is optional' in skill
-    assert 'show the title and any summary first' in skill
+    assert 'Show the title and summary before the exact proposal text' in skill
 
 
 def test_notification_presentation_is_system_notice_then_interactor_followup():
@@ -38,9 +38,9 @@ def test_notification_presentation_is_system_notice_then_interactor_followup():
     assert 'Write a system notice, not a chat reply' in coordinator_skill
     assert 'how to reply' in coordinator_skill
     assert 'follow-up questions can be asked in the current conversation' in coordinator_skill
-    assert 'Coordinator notifications are durable system notices' in interactor_soul
-    assert 'treat it as a system notice' in interactor_skill
-    assert 'Do not repeat internal IDs' in interactor_skill
+    assert 'explain its current state and progress from ANCOR' in interactor_soul
+    assert 'A coordinator notification is a durable system notice' in interactor_skill
+    assert 'do not expose internal IDs or mechanics unless needed' in interactor_skill
 
 
 def test_coordinator_checks_constraint_and_evidence_before_asking():
@@ -63,29 +63,24 @@ def test_coordinator_contract_separates_verified_facts_from_guesses():
 
 
 def test_interactor_keeps_requirements_at_outcome_altitude():
-    text = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
     skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
-    assert 'Do not prescribe implementation method, verification technique, or task decomposition.' in text
-    assert '### Requirement altitude' in skill
-    assert 'Leave implementation and execution choices to the coordinator and workers' in skill
-    assert 'would a different valid implementation still satisfy it' in skill
-    assert 'Do not invoke altitude to drop safety, authorization, resource limits' in skill
-    assert 'not verification procedures, evidence formats, or internal state assertions' in skill
-    assert 'Image-text training must actually work, not merely appear runnable.' in skill
-    assert 'Training data must update correctly when the data sources change.' in skill
+    assert 'proactively raise any question you believe materially affects the requirement' in skill
+    assert 'do not fill gaps silently' in skill
+    assert 'Do not add or infer unconfirmed facts, decisions, constraints, implementation methods, tests' in skill
+    assert "Keep the user's scope, commitment strength, priority, and unresolved decisions" in skill
+    assert 'Would the user recognize this as their request?' in skill
 
 
-def test_interactor_progress_uses_one_compact_open_work_read():
-    text = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
+def test_interactor_scopes_progress_to_current_work():
     skill = (ROOT / 'skills/ancor-interactor/SKILL.md').read_text()
-    assert 'one `ancor_get_context(progress_only=true)` read' in text
-    assert 'compact Markdown table of open work' in text
-    assert 'make one `ancor_get_context(progress_only=true)` call' in skill
-    assert 'combining `requirements` with `awaiting_acceptance`' in skill
-    assert 'coordinator-verified results waiting for the human' in skill
+    assert 'If one requirement or task is already under discussion, report only that work' in skill
+    assert 'get its task with read-only `ancor_board list`, `ancor_board show`, or `ancor_board history`' in skill
+    assert 'Use `progress_only=true` and a compact all-open table only when the user asks for an overview' in skill
+    assert '`待你验收`' in skill
     assert '`ancor_requirement action=accept`' in skill
     assert '`ancor_requirement action=request_changes`' in skill
-    assert 'Do not call `skill_view`, `tool_describe`, a terminal' in skill
+    assert 'Do not expand history unless asked' in skill
+    assert 'Never mutate the board' in skill
 
 
 def test_requirement_tool_describes_outcome_altitude():
