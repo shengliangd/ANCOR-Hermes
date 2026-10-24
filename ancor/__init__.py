@@ -21,7 +21,7 @@ _SCAN_CONNECTION_POLL_SECONDS = 1.0
 
 _ACTION_FIELDS = {
     'ancor_requirement': {
-        'draft': ['title', 'brief', 'acceptance_criteria'],
+        'draft': ['title', 'brief'],
         'confirm': ['draft_id'],
         'cancel': ['requirement_ids'],
         'pause': ['requirement_id', 'reason'],
@@ -657,6 +657,12 @@ def register(ctx, *, scan_runner=None):
                'ack_events': ack_events, 'notify': notify,
                'acceptance': acceptance, 'board': board_action, 'wake': wake,
                'note': note}
+    if coordinator or worker:
+        # ANCOR owns the repairable-block loop; keep the native breaker from
+        # routing unrelated causes on one card to triage.
+        from .block_guard import block_guard_hook
+        ctx.register_hook('kanban_task_blocked', block_guard_hook(
+            ctx.get_config('board'), ctx.get_config('block_unblock_cycles', 3)))
     if interactor:
         ctx.register_hook('pre_tool_call', service.pre_tool_call)
         ctx.register_hook('post_tool_call', service.post_tool_call)
@@ -687,7 +693,7 @@ def register(ctx, *, scan_runner=None):
     elif interactor:
         definitions = {
             'ancor_requirement': (
-                'Draft, confirm, cancel, pause, resume, answer, or make the final human acceptance decision on an ANCOR requirement. draft requires an authoritative single-line title plus an outcome-oriented brief and observable acceptance criteria; keep implementation method and task decomposition out unless the user made a detail a hard constraint. cancel, pause, resume, accept and request_changes create immutable proposals with exact native clarify_args. accept is final human acceptance of coordinator-verified work; request_changes requires exact feedback and returns the requirement to active repair. respond records a human reply as advisory input, never authorization.',
+                'Draft, confirm, cancel, pause, resume, answer, or make the final human acceptance decision on an ANCOR requirement. draft requires an authoritative single-line title plus an outcome-oriented brief; keep implementation method and task decomposition out unless the user made a detail a hard constraint. cancel, pause, resume, accept and request_changes create immutable proposals with exact native clarify_args. accept is final human acceptance of coordinator-verified work; request_changes requires exact feedback and returns the requirement to active repair. respond records a human reply as advisory input, never authorization.',
                 {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond', 'accept', 'request_changes']},
                  'title': {'type': 'string', 'maxLength': 80,
                            'description': 'Authoritative single-line requirement label used by every compact list and wake packet.'},
@@ -695,8 +701,6 @@ def register(ctx, *, scan_runner=None):
                              'description': 'Optional high-level, user-facing points shown before the exact stored requirement; may state which execution choices are left open.'},
                  'brief': {'type': 'string',
                            'description': 'Outcome, scope, hard constraints, non-goals and unresolved human decisions. Do not prescribe implementation unless externally fixed or explicitly non-negotiable.'},
-                 'acceptance_criteria': {'type': 'string',
-                                         'description': 'Observable end states and important failure boundaries; not test steps, evidence formats or internal implementation details.'},
                  'replacement_of': {'oneOf': [{'type': 'string'},
                                                {'type': 'array', 'items': {'type': 'string'}}]},
                  'draft_id': {'type': 'string'}, 'requirement_id': {'type': 'string'},
@@ -705,7 +709,7 @@ def register(ctx, *, scan_runner=None):
                  'feedback': {'type': 'string',
                               'description': 'Exact human change request. Required only for request_changes.'}}, ['action']),
             'ancor_get_context': (
-                'Read a compact ANCOR overview: open draft previews, requirement title references, open task references, counts, attention items, open questions and health. Set progress_only=true for a minimal open-work view; it retains coordinator-verified requirements awaiting final human acceptance, while excluding history. Accepted requirements are closed; awaiting_acceptance requirements are still open work. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed. Pass requirement_id to expand one requirement with its exact brief and acceptance criteria. Read-only: this role cannot acknowledge events or mutate the board.',
+                'Read a compact ANCOR overview: open draft previews, requirement title references, open task references, counts, attention items, open questions and health. Set progress_only=true for a minimal open-work view; it retains coordinator-verified requirements awaiting final human acceptance, while excluding history. Accepted requirements are closed; awaiting_acceptance requirements are still open work. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed. Pass requirement_id to expand one requirement with its exact brief. Read-only: this role cannot acknowledge events or mutate the board.',
                 {'requirement_id': {'type': 'string'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
@@ -798,17 +802,17 @@ def register(ctx, *, scan_runner=None):
                                'items': {'type': 'integer', 'minimum': 1}},
                  'reason': {'type': 'string'}}, ['event_ids']),
             'ancor_acceptance': (
-                'Record independent coordinator verification against exact requirement criteria, or reject with a reason. Verification requires every linked native card to be done or archived and archives verified done cards. verify/accept moves the requirement to awaiting_acceptance; it is not final acceptance. The human-facing role makes the final decision.',
+                'Record independent coordinator verification against the exact stored brief, or reject with a reason. Verification requires every linked native card to be done or archived and archives verified done cards. verify/accept moves the requirement to awaiting_acceptance; it is not final acceptance. The human-facing role makes the final decision.',
                 {'requirement_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['verify', 'accept', 'reject']},
                  'evidence': {
                      'type': 'object',
-                     'description': 'Required for verify/accept. Bind exact stored acceptance criteria and independently verified artifacts to linked task IDs.',
+                     'description': 'Required for verify/accept. Bind the exact stored requirement brief and independently verified artifacts to linked task IDs.',
                      'properties': {
-                         'criteria': {'type': 'string', 'description': 'Exact requirement acceptance_criteria text.'},
+                         'brief': {'type': 'string', 'description': 'Exact stored requirement brief text.'},
                          **{field: {'type': 'array', 'minItems': 1,
                                     'items': {'type': 'string', 'pattern': r'\S'}}
                             for field in ('verification', 'artifacts', 'task_ids')}},
-                     'required': ['criteria', 'verification', 'artifacts', 'task_ids']},
+                     'required': ['brief', 'verification', 'artifacts', 'task_ids']},
                  'reason': {'type': 'string'}}, ['requirement_id', 'action']),
         }
 

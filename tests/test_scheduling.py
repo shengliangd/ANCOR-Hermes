@@ -12,7 +12,7 @@ def test_usage_simulation(tmp_path):
     now = [1000.0]
     store = Store(tmp_path / 'requirements.db')
     scheduler = Scheduling(store, lambda: now[0])
-    req = store.confirm(store.create_draft('long wait', 'verified')['id'], 'test')
+    req = store.confirm(store.create_draft('long wait')['id'], 'test')
     store.ack_events([e['id'] for e in store.pending_events()])
     scheduler.scan()
     assert scheduler.observation(store.snapshot())['progression'][0]['state'] == 'stalled'
@@ -68,12 +68,12 @@ def test_invalidation_and_validation(tmp_path):
     import pytest
     store = Store(tmp_path / 'db')
     scheduler = Scheduling(store, lambda: 100)
-    req = store.confirm(store.create_draft('a', 'b')['id'], 'yes')
+    req = store.confirm(store.create_draft('a')['id'], 'yes')
     for due in [100, 99, float('nan'), float('inf'), True]:
         with pytest.raises(ValueError):
             scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='x', due_at=due))
     scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='x', due_at=101))
-    store.confirm(store.create_draft('new', 'criteria', req['id'])['id'], 'yes')
+    store.confirm(store.create_draft('new', req['id'])['id'], 'yes')
     scheduler.scan()
     listed = scheduler.call({'action': 'list', 'state': 'suppressed'})['items']
     assert listed[0]['state'] == 'suppressed'
@@ -82,7 +82,7 @@ def test_invalidation_and_validation(tmp_path):
 def test_wake_list_defaults_to_pending_and_reports_bounds(tmp_path):
     store = Store(tmp_path / 'db')
     scheduler = Scheduling(store, lambda: 100)
-    requirement = store.confirm(store.create_draft('wake list', 'verified')['id'], 'yes')
+    requirement = store.confirm(store.create_draft('wake list')['id'], 'yes')
     wakes = [scheduler.call({'action': 'schedule', 'requirement_id': requirement['id'],
                              'reason': str(index), 'due_at': 1000 + index})
              for index in range(3)]
@@ -101,7 +101,7 @@ def test_running_coordinator_never_overlaps(tmp_path):
     store = Store(tmp_path / 'db')
     now = [100]
     scheduler = Scheduling(store, lambda: now[0])
-    store.confirm(store.create_draft('a', 'b')['id'], 'yes')
+    store.confirm(store.create_draft('a')['id'], 'yes')
     scheduler.scan()
     scheduler.started()
     now[0] = 7400
@@ -117,7 +117,7 @@ def test_running_coordinator_never_overlaps(tmp_path):
 def health_fixture(tmp_path):
     store = Store(tmp_path / 'health.db')
     scheduler = Scheduling(store, lambda: 10_000)
-    req = store.confirm(store.create_draft('health', 'verified')['id'], 'fixture')
+    req = store.confirm(store.create_draft('health')['id'], 'fixture')
     store.ack_events([e['id'] for e in store.pending_events()])
     return store, scheduler, req
 

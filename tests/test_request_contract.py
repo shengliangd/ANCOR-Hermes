@@ -26,7 +26,7 @@ def registered(tmp_path, monkeypatch, profile, tasks):
         'task': tasks[args[1]], 'comments': [], 'runs': [], 'events': []})
     ancor.register(ctx)
     store = Store(config['store_path'])
-    req = store.confirm(store.create_draft('Deliver report', 'Exact totals')['id'], 'fixture')
+    req = store.confirm(store.create_draft('Deliver report')['id'], 'fixture')
     store.ack_events([event['id'] for event in store.pending_events()])
     return tools, store, req
 
@@ -67,12 +67,12 @@ def test_question_requires_blocked_task_and_allows_multiple_open_questions(tmp_p
 def test_draft_requires_authoritative_title(tmp_path, monkeypatch):
     tools, _, _ = registered(tmp_path, monkeypatch, 'ancor-interactor', {})
     missing = call(tools, 'ancor_requirement', {
-        'action': 'draft', 'brief': 'Brief', 'acceptance_criteria': 'Criteria'})
+        'action': 'draft', 'brief': 'Brief'})
     assert missing['code'] == 'invalid_request'
     assert missing['missing_fields'] == ['title']
     prepared = call(tools, 'ancor_requirement', {
         'action': 'draft', 'title': 'Stable title',
-        'brief': 'Brief', 'acceptance_criteria': 'Criteria'})
+        'brief': 'Brief'})
     assert prepared['title'] == 'Stable title'
     assert 'Title: Stable title' in prepared['clarify_args']['questions'][0]['question']
 
@@ -80,7 +80,7 @@ def test_draft_requires_authoritative_title(tmp_path, monkeypatch):
 def test_open_question_scope_is_requirement_and_task(tmp_path, monkeypatch):
     tasks = {'t1': {'id': 't1', 'status': 'blocked'}}
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-coordinator', tasks)
-    other = store.confirm(store.create_draft('Other report', 'Other totals')['id'], 'fixture')
+    other = store.confirm(store.create_draft('Other report')['id'], 'fixture')
     store.link_task(req['id'], 't1')
     store.link_task(other['id'], 't1')
     base = {'action': 'send', 'kind': 'question', 'message': 'Which label?', 'task_id': 't1'}

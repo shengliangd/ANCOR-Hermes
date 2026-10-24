@@ -1,11 +1,17 @@
-"""Thin CLI adapter, read-only native metadata/event bridges, and version-coupled triage revision; no raw SQL.
+"""Thin CLI adapter, read-only native metadata/event bridges, and version-coupled triage revision.
+
+No raw SQL in this adapter: the one native write ANCOR owns is the block-recurrence
+counter reset in :mod:`ancor.block_guard`, reached through ``keep_out_of_native_triage``.
 
 CLI contract inspected in installed hermes_cli/kanban_parser.py and kanban.py.
 Call from a thread when used by an async gateway (CLI operations are blocking).
 """
 import hashlib
 import json
+import logging
 import subprocess
+
+log = logging.getLogger(__name__)
 
 
 class NativeBoard:
@@ -152,7 +158,23 @@ class NativeBoard:
         task = self.show(task_id)
         if task['status'] not in {'blocked', 'triage'}:
             raise RuntimeError('native block verification failed')
+        self.keep_out_of_native_triage(task_id)
         return task
+
+    def keep_out_of_native_triage(self, task_id):
+        """Clear the native unblock-loop counter; ANCOR owns loop control here.
+
+        The native breaker routes the second same-kind block to ``triage``. ANCOR
+        repairs a card by editing it, so unrelated causes would be counted as a
+        loop. Zeroing after every block keeps ``block_loop_detected`` unwritten;
+        ``block_guard`` stops resetting once a card uses up its repair cycles.
+        Failing to reset must never fail the block itself.
+        """
+        from .block_guard import reset_block_recurrence
+        try:
+            reset_block_recurrence(task_id, board=self.board)
+        except Exception:
+            log.exception('ANCOR block guard failed for task %s', task_id)
 
     def archive(self, task_id, reason):
         """Write an audit comment, then use native archive and verify it stuck."""

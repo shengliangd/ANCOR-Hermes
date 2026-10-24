@@ -45,7 +45,6 @@ def export_titles(db_path, output_path):
                 'title': '',
                 'summary': item.get('summary'),
                 'brief': item['brief'],
-                'acceptance_criteria': item['acceptance_criteria'],
                 'replacement_of': item.get('replacement_of'),
             })
         requirements = []
@@ -56,7 +55,6 @@ def export_titles(db_path, output_path):
                 'title': '',
                 'status': item['status'],
                 'brief': item['brief'],
-                'acceptance_criteria': item['acceptance_criteria'],
                 'replacement_of': item.get('replacement_of'),
             })
     Path(output_path).write_text(
@@ -130,24 +128,21 @@ def apply_titles(db_path, titles_path):
         db.execute('''CREATE TABLE drafts_new (
                         id TEXT PRIMARY KEY, title TEXT NOT NULL,
                         brief TEXT NOT NULL,
-                        acceptance_criteria TEXT NOT NULL,
                         replacement_of TEXT, summary TEXT)''')
         db.execute('''CREATE TABLE requirements_new (
                         id TEXT PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL,
                         title TEXT NOT NULL, brief TEXT NOT NULL,
-                        acceptance_criteria TEXT NOT NULL,
                         replacement_of TEXT,
                         confirmation_reference TEXT NOT NULL,
                         status TEXT NOT NULL)''')
         for row in drafts:
-            db.execute('INSERT INTO drafts_new VALUES (?, ?, ?, ?, ?, ?)', (
+            db.execute('INSERT INTO drafts_new VALUES (?, ?, ?, ?, ?)', (
                 row['id'], draft_titles[row['id']], row['brief'],
-                row['acceptance_criteria'], row.get('replacement_of'),
-                row.get('summary')))
+                row.get('replacement_of'), row.get('summary')))
         for row in requirements:
-            db.execute('INSERT INTO requirements_new VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (
+            db.execute('INSERT INTO requirements_new VALUES (?, ?, ?, ?, ?, ?, ?)', (
                 row['id'], row['draft_id'], requirement_titles[row['id']],
-                row['brief'], row['acceptance_criteria'], row.get('replacement_of'),
+                row['brief'], row.get('replacement_of'),
                 row['confirmation_reference'], row['status']))
         db.execute('DROP TABLE drafts')
         db.execute('DROP TABLE requirements')

@@ -93,7 +93,7 @@ def test_confirmation_cannot_be_model_supplied(tmp_path):
     from ancor.service import Service
     from ancor.store import Store
     store = Store(tmp_path / 'state.db')
-    draft = store.create_draft('exact brief', 'exact criteria')
+    draft = store.create_draft('exact brief')
     service = Service(configured_context(), store)
     prepared = service.requirement({'action': 'confirm', 'draft_id': draft['id'], 'confirmed': True})
     assert prepared['clarify_args']
@@ -109,7 +109,7 @@ def test_confirmation_uses_current_chat_without_delivery_configuration(tmp_path,
     service = Service(None, Store(tmp_path / 'state.db'))
     draft = service.requirement({'action': 'draft', 'title': 'Confirmation delivery',
                                  'summary': 'Short high-level summary',
-                                 'brief': brief, 'acceptance_criteria': 'exact criteria'})
+                                 'brief': brief})
     question = draft['clarify_args']['questions'][0]
     assert Path(draft['draft_file']).read_text() in question['question']
     assert brief in question['question']
@@ -161,7 +161,7 @@ print('native registration passed; nested clarify unavailable:', result['error']
 from agent.agent_runtime_helpers import invoke_tool
 from ancor.service import Service
 service = Service(ctx)
-draft = service.requirement({'action': 'draft', 'title': 'Native confirmation', 'summary': 'Native summary', 'brief': 'Complete native draft', 'acceptance_criteria': 'Verified native hook result'})
+draft = service.requirement({'action': 'draft', 'title': 'Native confirmation', 'summary': 'Native summary', 'brief': 'Complete native draft'})
 assert 'Complete native draft' in draft['clarify_args']['questions'][0]['question']
 seen = []
 ctx.register_hook('post_tool_call', lambda **payload: seen.append(payload))
@@ -218,8 +218,7 @@ def test_only_ancor_roles_have_business_tools():
                                   'ancor_note'}
             assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['advance']
             forbidden = json.loads(tools['ancor_requirement']['handler']({
-                'action': 'draft', 'title': 'No', 'brief': 'No',
-                'acceptance_criteria': 'No'}))
+                'action': 'draft', 'title': 'No', 'brief': 'No'}))
             assert forbidden['code'] == 'forbidden'
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
             assert 'contract' in tools['ancor_board']['schema']['parameters']['properties']
@@ -235,7 +234,7 @@ def confirmation(tmp_path):
     service = Service(configured_context(), Store(tmp_path / 'state.db'))
     draft = service.requirement({'action': 'draft', 'title': 'Exact confirmation',
                                  'summary': 'High-level summary',
-                                 'brief': 'Complete brief\nline two', 'acceptance_criteria': 'exact criteria'})
+                                 'brief': 'Complete brief\nline two'})
     args = draft['clarify_args']
     question = args['questions'][0]
     result = {'outcome': 'submitted', 'responses': [{'question': question['question'],
@@ -267,7 +266,7 @@ def test_confirmation_survives_service_restart_and_is_exactly_once(tmp_path):
     snapshot = service.store.snapshot()
     assert len(snapshot['requirements']) == len(snapshot['pending_events']) == 1
     assert snapshot['requirements'][0]['draft_id'] == draft['id']
-    assert Path(draft['draft_file']).read_text().endswith('exact criteria')
+    assert Path(draft['draft_file']).read_text().endswith('Complete brief\nline two')
     assert confirmation_row(service) == (1, 'confirmed', None)
 
 
@@ -354,7 +353,7 @@ def cancellation(tmp_path):
     from ancor.store import Store
     service = Service(configured_context(), Store(tmp_path / 'state.db'))
     requirement = service.store.confirm(
-        service.store.create_draft('Cancel this brief', 'No work remains')['id'], 'fixture')
+        service.store.create_draft('Cancel this brief')['id'], 'fixture')
     proposal = service.requirement({
         'action': 'cancel', 'requirement_ids': [requirement['id']],
         'summary': 'Stop the confirmed work', 'reason': 'User withdrew it'})
@@ -408,7 +407,7 @@ def pause_proposal(tmp_path, action='pause'):
     from ancor.store import Store
     service = Service(configured_context(), Store(tmp_path / 'state.db'))
     requirement = service.store.confirm(
-        service.store.create_draft('Pause this brief', 'No new work')['id'], 'fixture')
+        service.store.create_draft('Pause this brief')['id'], 'fixture')
     if action == 'resume':
         first = service.requirement({
             'action': 'pause', 'requirement_id': requirement['id'],

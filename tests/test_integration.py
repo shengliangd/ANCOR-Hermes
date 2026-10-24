@@ -32,7 +32,7 @@ def call(name, args):
     return json.loads(ctx.dispatch_tool(name, args))
 entry = registry.get_entry('ancor_board', scope=manager.scope_key)
 assert entry
-draft = call('ancor_requirement', {'action':'draft', 'title':'Exact brief', 'summary':'High-level summary', 'brief':'exact brief', 'acceptance_criteria':'criteria'})
+draft = call('ancor_requirement', {'action':'draft', 'title':'Exact brief', 'summary':'High-level summary', 'brief':'exact brief'})
 assert draft['clarify_args']
 assert call('ancor_requirement', {'action':'confirm', 'draft_id':draft['id']})['id'] == draft['id']
 store = Store(ctx.get_config('store_path'))
@@ -76,7 +76,7 @@ store.link_task(req['id'], 'one')
 store.link_task(req['id'], 'two')
 assert len(call('ancor_board', {'action':'list'})['items']) == 2
 assert call('ancor_board', {'action':'show', 'task_id':'one'})['id'] == 'one'
-evidence = {'criteria':'criteria', 'verification':['checked'], 'artifacts':['result'], 'task_ids':['one']}
+evidence = {'brief':'exact brief', 'verification':['checked'], 'artifacts':['result'], 'task_ids':['one']}
 args = {'requirement_id':req['id'], 'action':'accept', 'evidence':evidence}
 assert 'all linked native tasks' in call('ancor_acceptance', args)['error']
 assert store.get_requirement(req['id'])['status'] == 'active'

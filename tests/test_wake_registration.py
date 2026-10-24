@@ -25,7 +25,7 @@ def registered(tmp_path, monkeypatch):
         {'id': 'task', 'status': 'running', 'last_heartbeat_at': time.time()}])
     ancor.register(ctx)
     store = Store(config['store_path'])
-    req = store.confirm(store.create_draft('wait', 'verified')['id'], 'fixture')
+    req = store.confirm(store.create_draft('wait')['id'], 'fixture')
     store.link_task(req['id'], 'task')
     store.ack_events([e['id'] for e in store.pending_events()])
     return ctx, tools, store, req
@@ -152,7 +152,7 @@ def test_ack_allows_blocked_task_from_invalidated_requirement(tmp_path, monkeypa
     call = lambda name, args: json.loads(tools[name]['handler'](args))
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [
         {'id': 'task', 'status': 'blocked'}])
-    replacement = store.confirm(store.create_draft('replacement', 'verified', req['id'])['id'], 'fixture')
+    replacement = store.confirm(store.create_draft('replacement', req['id'])['id'], 'fixture')
     store.finalize_transition(req['id'])
     assert store.get_requirement(replacement['id'])['status'] == 'active'
     assert store.get_requirement(req['id'])['status'] == 'invalidated'
@@ -183,7 +183,7 @@ def test_liveness_not_hidden_by_backlog(tmp_path, monkeypatch):
 
 def test_human_and_external_wait_durable_without_task(tmp_path):
     store = Store(tmp_path / 'db')
-    req = store.confirm(store.create_draft('await human and external release', 'verified')['id'], 'fixture')
+    req = store.confirm(store.create_draft('await human and external release')['id'], 'fixture')
     store.ack_events([e['id'] for e in store.pending_events()])
     scheduler = Scheduling(store, lambda: 100)
     for reason in ['Human reply follow-up if unanswered', 'External release publication check']:

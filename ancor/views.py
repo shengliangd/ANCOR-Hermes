@@ -194,7 +194,7 @@ def awaiting_acceptances(requirements, notifications):
 
 
 def requirement_detail(requirement, draft=None):
-    """Exact, single-requirement detail. Only this projection exposes brief/ac."""
+    """Exact, single-requirement detail. Only this projection exposes the brief."""
     item = {
         'id': requirement['id'],
         'title': requirement['title'],
@@ -202,7 +202,6 @@ def requirement_detail(requirement, draft=None):
         'target_status': requirement.get('target_status'),
         'replacement_of': requirement.get('replacement_of'),
         'brief': requirement['brief'],
-        'acceptance_criteria': requirement['acceptance_criteria'],
     }
     if draft and draft.get('summary'):
         item['summary'] = draft['summary']
@@ -245,22 +244,16 @@ def note_detail(note):
 
 def draft_summary(draft):
     brief, brief_truncated = preview(draft.get('brief'), DEFAULT_PREVIEW_CHARS)
-    criteria, criteria_truncated = preview(
-        draft.get('acceptance_criteria'), DEFAULT_PREVIEW_CHARS)
     item = {
         'id': draft['id'],
         'title': draft['title'],
         'replacement_of': draft.get('replacement_of'),
         'brief_preview': brief,
-        'acceptance_criteria_preview': criteria,
     }
     _preview_field(item, 'summary', draft.get('summary'), DEFAULT_PREVIEW_CHARS)
-    item['truncated'] = bool(brief_truncated or criteria_truncated
-                             or item.get('summary_truncated'))
+    item['truncated'] = bool(brief_truncated or item.get('summary_truncated'))
     if brief_truncated:
         item['brief_truncated'] = True
-    if criteria_truncated:
-        item['acceptance_criteria_truncated'] = True
     return item
 
 

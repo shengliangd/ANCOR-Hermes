@@ -26,8 +26,7 @@ class Store:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS drafts (
                     id TEXT PRIMARY KEY, title TEXT NOT NULL, brief TEXT NOT NULL,
-                    acceptance_criteria TEXT NOT NULL, replacement_of TEXT,
-                    summary TEXT);
+                    replacement_of TEXT, summary TEXT);
                 CREATE TABLE IF NOT EXISTS cancellations (
                     id TEXT PRIMARY KEY, requirement_ids TEXT NOT NULL,
                     reason TEXT, summary TEXT, confirmation_reference TEXT);
@@ -38,7 +37,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS requirements (
                     id TEXT PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL,
                     title TEXT NOT NULL,
-                    brief TEXT NOT NULL, acceptance_criteria TEXT NOT NULL,
+                    brief TEXT NOT NULL,
                     replacement_of TEXT, confirmation_reference TEXT NOT NULL,
                     status TEXT NOT NULL, target_status TEXT);
                 CREATE TABLE IF NOT EXISTS task_links (
@@ -59,6 +58,7 @@ class Store:
             self._require_title_columns(db)
             self._ensure_columns(db, 'drafts', {'summary': 'TEXT'})
             self._ensure_columns(db, 'requirements', {'target_status': 'TEXT'})
+            self._drop_retired_columns(db)
             self._migrate_legacy_acceptances(db)
 
     @staticmethod
@@ -123,6 +123,14 @@ class Store:
         for column, kind in columns.items():
             if column not in present:
                 db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
+
+    @staticmethod
+    def _drop_retired_columns(db):
+        """Drop fields ANCOR no longer stores; SQLite 3.35+ handles this in place."""
+        for table in ('drafts', 'requirements'):
+            present = {row[1] for row in db.execute(f'PRAGMA table_info({table})')}
+            if 'acceptance_criteria' in present:
+                db.execute(f'ALTER TABLE {table} DROP COLUMN acceptance_criteria')
 
     @contextmanager
     def _transaction(self):
@@ -192,11 +200,9 @@ class Store:
             bases.append(base)
         return bases
 
-    def create_draft(self, brief, acceptance_criteria, replacement_of=None,
-                     summary=None, *, title):
+    def create_draft(self, brief, replacement_of=None, summary=None, *, title):
         title = self._title(title)
         self._text(brief)
-        self._text(acceptance_criteria)
         summary = self._optional_text(summary)
         if isinstance(replacement_of, list):
             if not replacement_of or any(not isinstance(i, str) or not i.strip() for i in replacement_of):
@@ -209,9 +215,9 @@ class Store:
         identifier = uuid4().hex
         with self._transaction() as db:
             self._require_replacement_bases(db, replacement_ids)
-            db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?, ?, ?)',
-                       (identifier, title, brief, acceptance_criteria,
-                        replacement_of, summary))
+            db.execute('INSERT INTO drafts (id, title, brief, replacement_of, summary) '
+                       'VALUES (?, ?, ?, ?, ?)',
+                       (identifier, title, brief, replacement_of, summary))
             return self._get(db, 'drafts', identifier)
 
     def get_draft(self, draft_id):
@@ -530,12 +536,11 @@ class Store:
             status = 'pending' if bases else 'active'
             target_status = 'active' if bases else None
             db.execute('INSERT INTO requirements '
-                       '(id, draft_id, title, brief, acceptance_criteria, replacement_of, '
+                       '(id, draft_id, title, brief, replacement_of, '
                        'confirmation_reference, status, target_status) '
-                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                       'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                        (identifier, draft_id, draft['title'], draft['brief'],
-                        draft['acceptance_criteria'], draft['replacement_of'],
-                        confirmation_reference, status, target_status))
+                        draft['replacement_of'], confirmation_reference, status, target_status))
             for base in bases:
                 self._add_event(db, 'requirement.transition_requested', {
                     'requirement_id': base['id'], 'replacement_id': identifier,

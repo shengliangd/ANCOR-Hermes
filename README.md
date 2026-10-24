@@ -44,8 +44,8 @@ exact requirement text that will be stored in ANCOR.
 Native Hermes owns worker dispatch and task lifecycle. The plugin owns requirement semantics and coordination admission. Idle polling uses no model tokens. Events are batched; unchanged unprocessed batches have a retry budget rather than a hot model loop.
 
 Worker cards carry a contract scoped to their bounded outcome. The full requirement
-brief and acceptance criteria stay in the requirement store and are used during
-coordination and final acceptance; they are not copied into every execution card.
+brief stays in the requirement store and is used during coordination and final
+acceptance; it is not copied into every execution card.
 
 Human notifications are durably enqueued by the coordinator and delivered by the
 Gateway owner through Hermes' generic send interface. Enqueue returns `pending`;
@@ -68,8 +68,8 @@ card, heartbeats and Kanban lifecycle tools.
 
 Tools default to compact, decision-oriented references. Every collection uses one
 envelope: `items`, `count`, `returned`, and `truncated`. Requirement lists contain
-only identity, title, status, replacement and health; they never contain briefs or
-acceptance criteria. Board lists omit card bodies and history, notifications carry
+only identity, title, status, replacement and health; they never contain briefs.
+Board lists omit card bodies and history, notifications carry
 bounded previews, and pending events carry a payload preview plus stable IDs.
 
 The default overview also suppresses history rather than merely truncating it:
@@ -85,7 +85,7 @@ attention and routine wakes until the human accepts or requests changes.
 
 Expansion is explicit and bounded:
 
-- `ancor_get_context(requirement_id=...)` returns one requirement's exact brief and acceptance criteria, its acceptance status, and all linked tasks by default, including done and archived work needed for verification.
+- `ancor_get_context(requirement_id=...)` returns one requirement's exact brief, its acceptance status, and all linked tasks by default, including done and archived work needed for verification.
 - `ancor_get_context(event_id=...)` returns one complete pending or already acknowledged event payload without changing its acknowledgement state.
 - `ancor_ack_events(event_ids=[...])` atomically acknowledges handled event IDs. Any missing, host-owned or triage-blocked ID rejects the whole batch; repeated IDs are idempotent.
 - `ancor_board show(task_id=...)` returns one full card with contract, comments, runs and events.
@@ -130,6 +130,8 @@ clears only when real work recovers, and increments `generation` when the reason
 The coordinator lock serializes plugin-launched coordination, not all user chats. SQLite transitions are atomic; SQLite and native Kanban are not one transaction, so task metadata supports reconciliation after interrupted creation.
 
 Role prompts guide judgment but do not provide the security boundary. Tool registration and runtime profile checks enforce that interactor and coordinator capabilities are separate.
+
+ANCOR owns the repairable-block loop: every block clears the native block-recurrence counter, so native `triage` and `block_loop_detected` do not fire on unrelated causes. A per-card unblock ceiling (`block_unblock_cycles`, default 3) restores native triage once a card stops converging.
 
 See [SETUP.md](SETUP.md) for installation and validation. Development tests run with:
 

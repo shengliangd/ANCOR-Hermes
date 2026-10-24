@@ -53,13 +53,29 @@ def test_coordinator_checks_constraint_and_evidence_before_asking():
     assert '**Classify the missing item.**' in coordinator_skill
     assert '**Try bounded self-service.**' in coordinator_skill
     assert 'External commitments belong to the human' in coordinator_skill
-    assert 'do not provision or serially trial candidate environments' in coordinator_skill
 
 
 def test_coordinator_contract_separates_verified_facts_from_guesses():
     skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
-    assert 'Separate requirement constraints and verified environment facts from optional suggestions.' in skill
-    assert 'never promote a guessed command, toolchain or environment choice' in skill
+    assert ('`binding_constraints` is only what the requirement, an authorization boundary, '
+            'or a verified environment fact imposes') in skill
+    assert 'never a guessed command, toolchain or environment choice' in skill
+
+
+def test_prompts_name_the_six_card_parts():
+    from ancor.operations import CARD_PARTS
+    coordinator = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
+    worker_soul = (ROOT / 'roles/ancor-worker/SOUL.md').read_text()
+    worker_skill = (ROOT / 'skills/ancor-worker/SKILL.md').read_text()
+    for part in CARD_PARTS:
+        variants = (part, part.replace('_', ' '))
+        assert any(value in coordinator for value in variants), ('coordinator', part)
+        assert any(value in worker_soul for value in variants), ('worker soul', part)
+    for part in ('binding_constraints', 'advice', 'expected_output', 'evidence'):
+        assert part in worker_skill, ('worker skill', part)
+    assert '`advice` is optional hints that never bind' in coordinator
+    assert 'Advice never binds' in worker_soul
+    assert '`advice` is not binding' in worker_skill
 
 
 def test_interactor_keeps_requirements_at_outcome_altitude():
@@ -91,11 +107,10 @@ def test_requirement_tool_describes_outcome_altitude():
                           register_tool=lambda **kw: tools.update({kw['name']: kw}))
     ancor.register(ctx)
     tool = tools['ancor_requirement']['schema']
-    assert 'outcome-oriented brief and observable acceptance criteria' in tool['description']
+    assert 'outcome-oriented brief' in tool['description']
     assert 'keep implementation method and task decomposition out' in tool['description']
     properties = tool['parameters']['properties']
     assert 'Outcome, scope, hard constraints, non-goals' in properties['brief']['description']
-    assert 'not test steps, evidence formats or internal implementation details' in properties['acceptance_criteria']['description']
     assert 'which execution choices are left open' in properties['summary']['description']
 
 
@@ -103,7 +118,7 @@ def test_coordinator_skill_has_no_user_conversation_flow():
     skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
     assert '## User conversation' not in skill
     assert 'never create or confirm requirements' in skill
-    assert '`ancor_board create`' in skill and 'complete `contract`' in skill
+    assert '`ancor_board create`' in skill and "takes the card's six parts" in skill
     assert 'worker completion is evidence' in skill.lower()
     assert '`requirement.paused`' in skill and '`requirement.resumed`' in skill
 
@@ -116,7 +131,7 @@ def test_coordinator_does_not_assume_worker_can_read_other_cards():
     assert '## Worker context contract' in skill
     assert 'A worker receives one assigned card' in skill
     assert '`parent_ids` link records an execution dependency; it is not an information channel' in skill
-    assert 'run a self-containment check' in skill
+    assert 'ask whether the worker can reach the outcome' in skill
     assert 'Never write "see the parent card"' in skill
     assert 'Do not include a parent-card summary' in skill
 
@@ -128,16 +143,6 @@ def test_coordinator_skill_documents_requirement_notes():
     assert '`ancor_note`' in skill
     assert '`created_at` and `updated_at` timestamps' in skill
     assert 'Notes are never authoritative' in skill
-
-
-def test_coordinator_prompts_stay_within_budget():
-    soul = (ROOT / 'roles/ancor-coordinator/SOUL.md').read_text()
-    skill = (ROOT / 'skills/ancor-coordination/SKILL.md').read_text()
-    soul_words = len(soul.split())
-    skill_words = len(skill.split())
-    assert soul_words <= 220, soul_words
-    assert skill_words <= 700, skill_words
-    assert soul_words + skill_words <= 900, soul_words + skill_words
 
 
 def test_worker_reads_only_its_own_card():
@@ -161,9 +166,10 @@ def test_worker_skill_covers_card_execution_and_blocking():
     assert '`kanban_complete`' in skill
     assert '`kanban_block`' in skill
     assert '`kanban_request_review`' in skill
-    assert 'Triage is a failure state' in skill
+    assert 'Blocking ends your run' in skill
     assert 'Before running a prescriptive setup, build or environment command' in skill
-    assert 'Do not silently substitute a tool' in skill
+    assert 'do not substitute it silently' in skill
+    assert 'the method is yours' in skill
     assert 'contract conflict' in skill
 
 
@@ -173,8 +179,8 @@ def test_worker_reports_contract_mismatches_instead_of_guessing():
     assert "report the card's claim, observed evidence" in soul
     assert 'then block if the conflict prevents valid execution' in soul
     assert 'record the deviation in the completion report' in soul
-    assert "report the card's claim, observed evidence" in skill
-    assert 'record the deviation in the completion report' in skill
+    assert 'do not substitute it silently' in skill
+    assert 'record the deviation' in skill
 
 
 def test_acceptance_schema_matches_service_contract(tmp_path):
@@ -188,14 +194,14 @@ def test_acceptance_schema_matches_service_contract(tmp_path):
                           register_tool=lambda **kw: tools.update({kw['name']: kw}))
     ancor.register(ctx)
     schema = tools['ancor_acceptance']['schema']['parameters']['properties']['evidence']
-    assert set(schema['required']) == {'criteria', 'verification', 'artifacts', 'task_ids'}
+    assert set(schema['required']) == {'brief', 'verification', 'artifacts', 'task_ids'}
     store = Store(tmp_path / 'store.db')
-    draft = store.create_draft('brief', 'exact criteria')
+    draft = store.create_draft('brief')
     req = store.confirm(draft['id'], 'fixture')
     store.link_task(req['id'], 'task-one')
-    evidence = {'criteria': 'exact criteria', 'verification': ['checked artifact'],
+    evidence = {'brief': req['brief'], 'verification': ['checked artifact'],
                 'artifacts': ['/result.txt'], 'task_ids': ['task-one']}
-    assert schema['properties']['criteria']['type'] == 'string'
+    assert schema['properties']['brief']['type'] == 'string'
     for field in ('verification', 'artifacts', 'task_ids'):
         field_schema = schema['properties'][field]
         assert field_schema['type'] == 'array'

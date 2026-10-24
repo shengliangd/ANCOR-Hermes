@@ -42,7 +42,7 @@ class Board:
 
 def requirement(store, title='Requirement'):
     return store.confirm(
-        store.create_draft(title, 'Verified result', title=title)['id'], 'human:test')
+        store.create_draft(title, title=title)['id'], 'human:test')
 
 
 def test_cancellation_archives_linked_cards_before_committing(tmp_path):
@@ -105,7 +105,7 @@ def test_shared_card_blocks_terminal_transition(tmp_path, mode):
         store.cancel([req['id']], 'First is withdrawn')
     else:
         replacement = store.confirm(store.create_draft(
-            'Replacement', 'New result', req['id'], title='Replacement')['id'],
+            'Replacement', req['id'], title='Replacement')['id'],
             'human:replacement')
         assert replacement['status'] == 'pending'
 
@@ -128,7 +128,7 @@ def test_replacement_waits_for_every_base_requirement(tmp_path):
     first = requirement(store, 'First')
     second = requirement(store, 'Second')
     replacement = store.confirm(store.create_draft(
-        'Combined replacement', 'Combined result', [first['id'], second['id']],
+        'Combined replacement', [first['id'], second['id']],
         title='Combined replacement')['id'], 'human:replacement')
     board = Board({'stable': 'done'})
 
@@ -205,7 +205,7 @@ def test_acceptance_archives_done_cards_and_rejects_nonterminal_cards(tmp_path):
                         get_config=lambda key, default=None: default),
         store, board)
     evidence = {
-        'criteria': req['acceptance_criteria'],
+        'brief': req['brief'],
         'verification': ['Checked the exact result'],
         'artifacts': ['artifact.txt'],
         'task_ids': ['a-running', 'z-done'],
@@ -228,6 +228,34 @@ def test_acceptance_archives_done_cards_and_rejects_nonterminal_cards(tmp_path):
     assert {row['status'] for row in board.list()} == {'archived'}
     accepted = store.accept(req['id'], 'human:accepted')
     assert accepted['status'] == 'accepted'
+
+
+def test_acceptance_requires_the_exact_stored_brief(tmp_path):
+    store = Store(tmp_path / 'store.db')
+    req = requirement(store)
+    store.link_task(req['id'], 'done-card')
+    board = Board({'done-card': 'done'})
+    service = Service(
+        SimpleNamespace(profile_name='ancor-coordinator',
+                        get_config=lambda key, default=None: default),
+        store, board)
+    evidence = {
+        'brief': req['brief'] + ' (paraphrased)',
+        'verification': ['Checked the exact result'],
+        'artifacts': ['artifact.txt'],
+        'task_ids': ['done-card'],
+    }
+
+    with pytest.raises(ValueError, match='exact stored brief'):
+        service.acceptance({'action': 'verify', 'requirement_id': req['id'],
+                            'evidence': evidence})
+    assert store.get_requirement(req['id'])['status'] == 'active'
+    assert not [call for call in board.calls if call[0] == 'archive']
+
+    evidence['brief'] = req['brief']
+    verified = service.acceptance({'action': 'verify', 'requirement_id': req['id'],
+                                   'evidence': evidence})
+    assert verified['status'] == 'awaiting_acceptance'
 
 
 def test_staged_transition_suppresses_wakes_and_defers_questions(tmp_path):

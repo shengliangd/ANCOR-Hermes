@@ -81,10 +81,10 @@ def _ctx(profile):
     return context, hooks
 
 
-def test_worker_registers_only_the_result_transform_hook():
+def test_worker_registers_only_its_own_hooks():
     context, hooks = _ctx('ancor-worker')
     ancor.register(context)
-    assert set(hooks) == {'transform_tool_result'}
+    assert set(hooks) == {'transform_tool_result', 'kanban_task_blocked'}
     transformed = hooks['transform_tool_result'][0](
         tool_name='kanban_show',
         result=json.dumps({'worker_context': WORKER_CONTEXT}),

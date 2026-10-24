@@ -85,7 +85,7 @@ class Board:
 @pytest.fixture
 def setup(tmp_path):
     store = Store(tmp_path / 'store.db')
-    req = store.confirm(store.create_draft('Build thing', 'Tests pass')['id'], 'test-human')
+    req = store.confirm(store.create_draft('Build thing')['id'], 'test-human')
     ctx = SimpleNamespace(profile_name='ancor-coordinator', get_config=lambda key, default=None: default)
     return ctx, store, Board(), req
 
@@ -141,7 +141,7 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     assert result['assignee'] == 'ancor-worker'
     assert contract()['outcome'] in shown['body']
     assert 'Keep exact values' in shown['body']
-    assert req['acceptance_criteria'] not in shown['body']
+    assert 'acceptance_criteria' not in shown['body']
     assert op.call(create_args(req))['task_id'] == result['task_id']
     assert len(board.tasks) == 1
     assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': result['task_id']}]
@@ -191,11 +191,31 @@ def test_create_renders_six_card_parts(setup):
         assert absent not in body
 
 
+def test_render_card_omits_empty_optional_parts_and_injects_authorization():
+    from ancor.operations import render_card
+    body = render_card({'outcome': 'Outcome', 'expected_output': ['out.txt'],
+                        'evidence': ['check']})
+    assert body.startswith('<work_contract>\n<outcome>Outcome</outcome>')
+    assert '<inputs>' not in body and '<advice>' not in body
+    assert body.count('Do not change authorization or requirement version.') == 1
+    assert (body.index('<binding_constraints>') < body.index('<expected_output>')
+            < body.index('<evidence>'))
+
+
+def test_render_card_keeps_one_authorization_boundary():
+    from ancor.operations import render_card
+    body = render_card({'outcome': 'Outcome', 'expected_output': ['out.txt'],
+                        'evidence': ['check'],
+                        'binding_constraints':
+                            ['Do not change authorization or requirement version.']})
+    assert body.count('Do not change authorization or requirement version.') == 1
+
+
 def test_scoped_dependencies_across_active_requirements(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     parent = op.call(create_args(req))['task_id']
-    other = store.confirm(store.create_draft('Other', 'Pass')['id'], 'human:other')
+    other = store.confirm(store.create_draft('Other')['id'], 'human:other')
     child = op.call(create_args(other))['task_id']
     board.tasks[child]['task']['status'] = 'blocked'
     args = dict(action='link', parent_id=parent, child_id=child)
@@ -212,11 +232,11 @@ def test_unlink_obsolete_prerequisite_from_active_child(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     parent = op.call(create_args(req))['task_id']
-    other = store.confirm(store.create_draft('Other', 'Pass')['id'], 'human:other')
+    other = store.confirm(store.create_draft('Other')['id'], 'human:other')
     child = op.call(create_args(other))['task_id']
     args = dict(action='link', parent_id=parent, child_id=child)
     op.call(args)
-    store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'human:change')
+    store.confirm(store.create_draft('Changed', req['id'])['id'], 'human:change')
     assert op.call(dict(args, action='unlink'))['parents'] == []
     with pytest.raises(ValueError, match='active'):
         op.call(args)
@@ -284,7 +304,7 @@ def test_edit_keeps_requirement_context_and_association(setup):
     assert NativeBoard.link(edited) == NativeBoard.link(task)
     assert 'Refined outcome' in edited['body']
     assert 'Keep exact values' in edited['body']
-    assert req['acceptance_criteria'] not in edited['body']
+    assert 'acceptance_criteria' not in edited['body']
     assert edited['assignee'] == 'ancor-worker'
     finalize_acceptance(store, req['id'])
     with pytest.raises(ValueError, match='active'):
@@ -416,9 +436,9 @@ def test_invalidated_worker_is_archived_before_new_work(setup, monkeypatch, targ
     op = operations(setup)
     tid = op.call(create_args(req))['task_id']
     board.tasks[tid]['runs'] = [{'id': 1, 'worker_pid': 123, 'ended_at': None}]
-    replacement = store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'test-human-2')
+    replacement = store.confirm(store.create_draft('Changed', req['id'])['id'], 'test-human-2')
     if target == 'independent':
-        replacement = store.confirm(store.create_draft('Independent', 'Other tests')['id'], 'test-human-3')
+        replacement = store.confirm(store.create_draft('Independent')['id'], 'test-human-3')
     monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
     result = advance_requirement(store, board, req['id'])
     assert result['outcome'] == 'completed'
@@ -438,10 +458,10 @@ def test_unblock_is_not_gated_by_other_invalidated_workers(setup, monkeypatch):
     ctx, store, board, req = setup
     op = operations(setup)
     old_tid = op.call(create_args(req))['task_id']
-    other = store.confirm(store.create_draft('Other', 'Other tests')['id'], 'human:other')
+    other = store.confirm(store.create_draft('Other')['id'], 'human:other')
     tid = op.call(create_args(other))['task_id']
     op.call({'action': 'block', 'task_id': tid, 'reason': 'Wait for answer'})
-    store.confirm(store.create_draft('Changed', 'New tests', req['id'])['id'], 'human:change')
+    store.confirm(store.create_draft('Changed', req['id'])['id'], 'human:change')
     board.tasks[old_tid]['runs'] = [{'worker_pid': 123, 'ended_at': None}]
     monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
     board.calls.clear()

@@ -335,6 +335,19 @@ the original `requirement.accepted` event, records the retained evidence as
 the human final gate. The upgrade is idempotent and leaves current human-confirmed
 acceptances unchanged.
 
+On first open, ANCOR 0.5 removes the retired `acceptance_criteria` column from
+`drafts` and `requirements`. The drop happens in place and cannot be undone, so
+copy the store before starting the upgraded plugin:
+
+```sh
+cp ~/.hermes/ancor/requirements.db ~/.hermes/ancor/requirements.db.bak-$(date +%Y%m%dT%H%M%S)
+```
+
+A requirement now carries only a `title` and a `brief`, and acceptance binds that
+exact brief. `block_unblock_cycles` (default 3) is the per-card ceiling on unblock
+cycles whose native block-recurrence counter ANCOR clears before native `triage`
+becomes reachable again.
+
 Disable automatic root decomposition for this workflow: the coordinator creates only
 execution tasks, progressively, through the plugin board tool. Native dispatch
 still owns execution. Preserve unrelated boards' decomposition settings.

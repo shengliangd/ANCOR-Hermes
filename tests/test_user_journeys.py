@@ -151,10 +151,10 @@ class Journey:
         assert 'error' in value, (tool, args, value)
         return value['error']
 
-    def draft(self, brief='Deliver report', criteria='Report has exact requested values', replacement_of=None):
+    def draft(self, brief='Deliver report', replacement_of=None):
         args = dict(action='draft', title='Deliver the requested result',
                     summary='Deliver the requested result',
-                    brief=brief, acceptance_criteria=criteria)
+                    brief=brief)
         if replacement_of:
             args['replacement_of'] = replacement_of
         return self.call('requirement', **args)
@@ -263,7 +263,7 @@ class Journey:
                     db_path=kanban_db_path(board='default'))
 
     def evidence(self, req, tids):
-        return {'criteria': req['acceptance_criteria'], 'verification': ['Independent coordinator fixture checked exact values'],
+        return {'brief': req['brief'], 'verification': ['Independent coordinator fixture checked exact values'],
                 'artifacts': [str(Path(os.environ['HOME']) / (tid + '.txt')) for tid in tids], 'task_ids': tids}
 
 
@@ -294,7 +294,7 @@ def journey_rolling(j):
     assert edited['task']['title'] == 'Execute revised B'
     assert edited['task']['priority'] == 7
     assert edited['task']['body'].split('\n', 1)[0] == metadata
-    assert req['acceptance_criteria'] not in edited['task']['body']
+    assert 'acceptance' not in edited['task']['body']
     linked = j.call('board', action='link', parent_id=a, child_id=b)
     assert a in linked['parents']
     assert j.status(b) == 'blocked'
@@ -341,7 +341,10 @@ def journey_blocker(j):
     j.call('board', action='unblock', task_id=tid, reason='Source and label resolved')
     j.claim(tid)
     j.worker(tid, 'block', 'Worker hit another blocker after resuming', '--kind', 'needs_input')
-    assert j.status(tid) == 'triage', 'native repeat-block protection must remain intact'
+    assert j.status(tid) == 'triage', (
+        'native breaker still fires when a block bypasses ANCOR (direct CLI block, '
+        'no plugin hook); the plugin guard only covers worker tool blocks and '
+        'ancor_board block')
     j.call('board', action='revise', task_id=tid, reason='Coordinator reviewed repeated blocker; human supplied label')
     j.complete(tid)
     assert len(j.sent) == 1
@@ -383,7 +386,7 @@ def journey_acceptance(j):
     abandoned = j.create(req, 'abandoned-alternative')
     j.call('board', action='block', task_id=abandoned, reason='Coordinator chooses replacement approach')
     j.call('board', action='archive', task_id=abandoned,
-           reason='Alternative abandoned; preserve history, replacement covers criteria')
+           reason='Alternative abandoned; preserve history, replacement covers the brief')
     assert j.status(abandoned) == 'archived'
     premature = dict(action='send', id='accept:' + req['id'], requirement_id=req['id'],
                      kind='completion', message='Report delivered')

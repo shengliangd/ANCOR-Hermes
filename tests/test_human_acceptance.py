@@ -19,11 +19,11 @@ def context():
 def verified(tmp_path):
     store = Store(tmp_path / 'store.db')
     req = store.confirm(store.create_draft(
-        'Verified brief', 'Verified criteria', title='Human gate')['id'], 'fixture')
+        'Verified brief', title='Human gate')['id'], 'fixture')
     store.link_task(req['id'], 'task')
     store.ack_events([event['id'] for event in store.pending_events()])
     store.submit_acceptance(req['id'], json.dumps({
-        'criteria': 'Verified criteria', 'verification': ['checked'],
+        'brief': 'Verified brief', 'verification': ['checked'],
         'artifacts': ['/result.txt'], 'task_ids': ['task']}))
     box = NotificationOutbox(store.path + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
@@ -92,7 +92,7 @@ def test_legacy_coordinator_acceptance_reopens_human_gate_idempotently(tmp_path)
     path = tmp_path / 'store.db'
     store = Store(path)
     req = store.confirm(store.create_draft(
-        'Legacy brief', 'Legacy criteria', title='Legacy acceptance')['id'], 'legacy')
+        'Legacy brief', title='Legacy acceptance')['id'], 'legacy')
     with sqlite3.connect(path) as db:
         db.execute("UPDATE requirements SET status='accepted' WHERE id=?", (req['id'],))
     event = store.add_event('requirement.accepted', {

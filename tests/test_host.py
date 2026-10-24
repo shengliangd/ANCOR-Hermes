@@ -63,7 +63,7 @@ def pending_native(store):
 def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypatch, kind):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
-    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human:1')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human:1')
     store.ack_events([e['id'] for e in store.pending_events()])
     metadata = {'requirement_id': req['id'], 'revision': 1, 'key': 'worker'}
     board = Board({'id': 't1', 'title': 'execution', 'body': 'ANCOR-LINK:' + json.dumps(metadata), 'status': 'done'})
@@ -109,9 +109,9 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
 def test_replacement_transition_wakes_coordinator_without_automatic_guard(tmp_path, monkeypatch):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
-    old = store.confirm(store.create_draft('old', 'old')['id'], 'human:old')
+    old = store.confirm(store.create_draft('old')['id'], 'human:old')
     store.ack_events([e['id'] for e in store.pending_events()])
-    new = store.confirm(store.create_draft('new', 'new', old['id'])['id'], 'human:new')
+    new = store.confirm(store.create_draft('new', old['id'])['id'], 'human:new')
     metadata = {'requirement_id': old['id'], 'revision': 1, 'key': 'worker'}
     board = Board({'id': 'old-worker', 'status': 'running',
                    'body': 'ANCOR-LINK:' + json.dumps(metadata)})
@@ -208,7 +208,7 @@ def test_notification_dispatcher_reads_fresh_task_state(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     ctx.config.update(human_target='test:destination', transport_profile='default')
     store = Store(ctx.config['store_path'])
-    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human')
     store.link_task(req['id'], 'task')
     box = NotificationOutbox(store.path + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
@@ -234,7 +234,7 @@ def test_notification_dispatcher_defers_when_task_state_unavailable(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     ctx.config.update(human_target='test:destination', transport_profile='default')
     store = Store(ctx.config['store_path'])
-    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human')
     store.link_task(req['id'], 'task')
     box = NotificationOutbox(store.path + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
@@ -263,7 +263,7 @@ def test_host_closes_questions_for_terminal_requirement(tmp_path):
     from ancor.notification import NotificationOutbox
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
-    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human')
     store.link_task(req['id'], 'task')
     box = NotificationOutbox(store.path + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
@@ -285,7 +285,7 @@ def test_host_closes_question_when_task_is_no_longer_blocked(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     ctx.config['human_target'] = 'test:destination'
     store = Store(ctx.config['store_path'])
-    req = store.confirm(store.create_draft('deliver', 'verified')['id'], 'human')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human')
     store.link_task(req['id'], 'task')
     task = {'id': 'task', 'status': 'blocked'}
     box = NotificationOutbox(store.path + '.notifications.db',
@@ -316,7 +316,7 @@ def test_native_event_api_to_store_and_prompt(tmp_path, monkeypatch):
         conn.execute("INSERT INTO task_events VALUES (9, 'worker', 'blocked', '{}', 1, NULL)")
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
-    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human:1')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human:1')
     store.link_task(req['id'], 'worker')
     store.ack_events([e['id'] for e in store.pending_events()])
     board = Board()
@@ -339,7 +339,7 @@ def test_idle_never_spawns(tmp_path, monkeypatch):
 def test_paused_requirement_remains_visible_without_liveness(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
-    req = store.confirm(store.create_draft('pause me', 'verified')['id'], 'human:1')
+    req = store.confirm(store.create_draft('pause me')['id'], 'human:1')
     store.link_task(req['id'], 'task')
     pause = store.create_requirement_command('pause', req['id'], 'user asked', 'Stop briefly')
     store.confirm_requirement_command(pause['id'], 'pause-confirmation')
@@ -356,7 +356,7 @@ def test_stalled_condition_backs_off_for_one_hour_and_rearms_on_reason_change(tm
     now = [1000]
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
-    requirement = store.confirm(store.create_draft('wait', 'verified')['id'], 'human:1')
+    requirement = store.confirm(store.create_draft('wait')['id'], 'human:1')
     store.link_task(requirement['id'], 'task')
     store.ack_events([event['id'] for event in store.pending_events()])
     task = {'id': 'task', 'status': 'blocked'}
@@ -397,7 +397,7 @@ def test_stalled_condition_backs_off_for_one_hour_and_rearms_on_reason_change(tm
 def test_per_task_cursors_preserve_racing_and_newly_discovered_history(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
-    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human:1')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human:1')
     for task in ('a', 'b'):
         store.link_task(req['id'], task)
     store.ack_events([e['id'] for e in store.pending_events()])
@@ -430,7 +430,7 @@ def test_bookkeeping_events_do_not_self_wake(tmp_path):
     board = Board()
     board.tasks = [{'id': 'a', 'status': 'running', 'last_heartbeat_at': time.time()}]
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
-    req = host.store.confirm(host.store.create_draft('x', 'y')['id'], 'human')
+    req = host.store.confirm(host.store.create_draft('x')['id'], 'human')
     host.store.link_task(req['id'], 'a')
     host.store.ack_events([e['id'] for e in host.store.pending_events()])
     ignored = ['created', 'commented', 'edited', 'attached', 'linked',
@@ -466,7 +466,7 @@ def test_scan_ingests_despite_individual_read_failure(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     board = Board()
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
-    req = host.store.confirm(host.store.create_draft('x', 'y')['id'], 'human')
+    req = host.store.confirm(host.store.create_draft('x')['id'], 'human')
     for task in ('bad', 'good'):
         host.store.link_task(req['id'], task)
     host.store.ack_events([e['id'] for e in host.store.pending_events()])

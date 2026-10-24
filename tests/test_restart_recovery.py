@@ -29,7 +29,7 @@ class Board:
 host = Host(Context(), board=Board())
 if sys.argv[2] == 'accept-crash':
     store = host.store
-    req = store.confirm(store.create_draft('Deliver', 'verified artifact', title='Deliver artifact')['id'], 'human:exact')
+    req = store.confirm(store.create_draft('Deliver', title='Deliver artifact')['id'], 'human:exact')
     store.submit_acceptance(req['id'], 'preserved verification evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     Path(sys.argv[3]).write_text(req['id'])
@@ -53,8 +53,8 @@ def test_replacement_transition_survives_restart_and_advances(tmp_path):
     path = tmp_path / 'store.db'
     ctx = Context(path)
     store = Store(path)
-    old = store.confirm(store.create_draft('old', 'checked')['id'], 'human:old')
-    new = store.confirm(store.create_draft('new', 'checked', old['id'])['id'], 'human:new')
+    old = store.confirm(store.create_draft('old')['id'], 'human:old')
+    new = store.confirm(store.create_draft('new', old['id'])['id'], 'human:new')
     store.link_task(old['id'], 'old-worker')
     store.link_task(new['id'], 'new-worker')
     board = Board({'id': 'old-worker', 'status': 'running'})
@@ -92,8 +92,8 @@ def test_invalidated_drift_is_visible_without_mutating_native_work(tmp_path):
     path = tmp_path / 'store.db'
     ctx = Context(path)
     store = Store(path)
-    old = store.confirm(store.create_draft('old', 'checked')['id'], 'human:old')
-    store.confirm(store.create_draft('new', 'checked', old['id'])['id'], 'human:new')
+    old = store.confirm(store.create_draft('old')['id'], 'human:old')
+    store.confirm(store.create_draft('new', old['id'])['id'], 'human:new')
     store.link_task(old['id'], 'old-worker')
     board = Board({'id': 'old-worker', 'status': 'running'})
     advance_requirement(store, board, old['id'])
@@ -149,7 +149,7 @@ def test_accepted_before_enqueue_crash_wakes_once_without_resubmission(tmp_path)
 def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state):
     path = tmp_path / 'store.db'
     store = Store(path)
-    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human')
     store.submit_acceptance(req['id'], 'evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
@@ -175,7 +175,7 @@ def test_notification_restart_preserves_state_and_does_not_send(tmp_path, state)
 def test_sent_question_is_not_completion_delivery(tmp_path):
     path = tmp_path / 'store.db'
     store = Store(path)
-    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human')
     store.submit_acceptance(req['id'], 'evidence')
     store.ack_events([e['id'] for e in store.pending_events()])
     box = NotificationOutbox(str(path) + '.notifications.db', coordinator_profile='ancor-coordinator',
@@ -195,7 +195,7 @@ def test_sent_question_is_not_completion_delivery(tmp_path):
 def test_interrupted_host_and_coordinator_resume_without_duplicate_flight(tmp_path):
     path = tmp_path / 'store.db'
     store = Store(path)
-    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human:original')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human:original')
     checkpoint = tmp_path / 'coordinator'
     child_script = ('import os,sys,time; from pathlib import Path; from ancor.store import Store; '
                     's=Store(sys.argv[1]); s.ack_events([e["id"] for e in s.pending_events()]); '
@@ -237,7 +237,7 @@ def test_interrupted_host_and_coordinator_resume_without_duplicate_flight(tmp_pa
 def test_confirmed_demand_restart_requires_no_resubmit(tmp_path, acknowledged):
     path = tmp_path / 'store.db'
     store = Store(path)
-    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human:original')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human:original')
     if acknowledged:
         store.ack_events([e['id'] for e in store.pending_events()])
     output = tmp_path / 'prompt'
@@ -262,7 +262,7 @@ def test_native_completion_written_during_downtime_replayed_once(tmp_path, monke
     monkeypatch.syspath_prepend(str(native))
     path, db = tmp_path / 'store.db', tmp_path / 'native.db'
     store = Store(path)
-    req = store.confirm(store.create_draft('deliver', 'checked')['id'], 'human:original')
+    req = store.confirm(store.create_draft('deliver')['id'], 'human:original')
     store.link_task(req['id'], 'worker')
     store.ack_events([e['id'] for e in store.pending_events()])
     writer = (

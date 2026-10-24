@@ -24,7 +24,7 @@ def test_wake_packet_excludes_full_briefs_and_bodies_under_incident_fixture(tmp_
     tasks = []
     for index in range(3):
         requirement = store.confirm(store.create_draft(
-            'FULL BRIEF ' * 3000, 'FULL CRITERIA ' * 2000,
+            'FULL BRIEF ' * 3000,
             title=f'Incident requirement {index}')['id'], f'human:{index}')
         task_id = f'task-{index}'
         store.link_task(requirement['id'], task_id)
@@ -72,7 +72,7 @@ def test_default_overview_is_bounded_under_history_heavy_fixture(tmp_path, monke
         register_platform_handler=lambda *args: None)
     store = Store(config['store_path'])
     requirement = store.confirm(store.create_draft(
-        'BRIEF ' * 2000, 'CRITERIA ' * 2000, title='Bounded overview')['id'],
+        'BRIEF ' * 2000, title='Bounded overview')['id'],
         'human:overview')
     tasks = []
     for index in range(90):
@@ -125,8 +125,8 @@ def test_requirement_expansion_scopes_every_nested_collection(tmp_path, monkeypa
         register_hook=lambda *args: None,
         register_platform_handler=lambda *args: None)
     store = Store(store_path)
-    first = store.confirm(store.create_draft('first', 'first', title='First')['id'], 'human:1')
-    second = store.confirm(store.create_draft('second', 'second', title='Second')['id'], 'human:2')
+    first = store.confirm(store.create_draft('first', title='First')['id'], 'human:1')
+    second = store.confirm(store.create_draft('second', title='Second')['id'], 'human:2')
     store.link_task(first['id'], 'first-task')
     store.link_task(second['id'], 'second-task')
     store.ack_events([event['id'] for event in store.pending_events()])
@@ -175,7 +175,7 @@ def test_requirement_expansion_scopes_every_nested_collection(tmp_path, monkeypa
 
 def test_scheduled_wake_observation_is_bounded(tmp_path):
     store = Store(tmp_path / 'store.db')
-    requirement = store.confirm(store.create_draft('wakes', 'verified', title='Wakes')['id'],
+    requirement = store.confirm(store.create_draft('wakes', title='Wakes')['id'],
                                 'human:wake')
     scheduler = Scheduling(store)
     for index in range(55):
@@ -203,7 +203,7 @@ def test_interactor_draft_collection_is_bounded(tmp_path, monkeypatch):
         register_platform_handler=lambda *args: None)
     store = Store(config['store_path'])
     for index in range(25):
-        store.create_draft('brief ' * 200, 'criteria',
+        store.create_draft('brief ' * 200,
                            summary='summary ' * 200, title=f'Draft {index}')
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [])
     ancor.register(ctx)

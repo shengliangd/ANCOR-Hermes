@@ -11,7 +11,7 @@ from ancor.store import Store
 def test_note_crud_is_revisioned_and_soft_deleted(tmp_path):
     store = Store(tmp_path / 'store.db')
     requirement = store.confirm(
-        store.create_draft('Deliver report', 'Exact totals')['id'], 'fixture')
+        store.create_draft('Deliver report')['id'], 'fixture')
 
     first = store.add_note(requirement['id'], 'verified input: /tmp/input.csv')
     second = store.add_note(requirement['id'], 'attempted route: script --dry-run')
@@ -43,7 +43,7 @@ def test_note_crud_is_revisioned_and_soft_deleted(tmp_path):
 def test_note_mutations_are_frozen_outside_stable_requirements(tmp_path):
     store = Store(tmp_path / 'store.db')
     requirement = store.confirm(
-        store.create_draft('Deliver report', 'Exact totals')['id'], 'fixture')
+        store.create_draft('Deliver report')['id'], 'fixture')
     note = store.add_note(requirement['id'], 'keep this evidence')
 
     store.cancel([requirement['id']], 'withdrawn')
@@ -84,7 +84,7 @@ def call(tools, name, args):
 def test_note_tool_is_coordinator_only_and_context_lists_previews(tmp_path, monkeypatch):
     tools, store = registered(tmp_path, monkeypatch, 'ancor-coordinator')
     requirement = store.confirm(
-        store.create_draft('Deliver report', 'Exact totals')['id'], 'fixture')
+        store.create_draft('Deliver report')['id'], 'fixture')
 
     added = call(tools, 'ancor_note', {
         'action': 'add', 'requirement_id': requirement['id'],

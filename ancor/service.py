@@ -44,9 +44,8 @@ class Service:
         action = args['action']
         if action == 'draft':
             summary = self.store._optional_text(args.get('summary'))
-            draft = self.store.create_draft(args['brief'], args['acceptance_criteria'],
-                                           args.get('replacement_of'), summary,
-                                           title=args['title'])
+            draft = self.store.create_draft(args['brief'], args.get('replacement_of'),
+                                           summary, title=args['title'])
             return self.presentation(draft)
         if action == 'confirm':
             # Preparation only: consent is exclusively consumed by the public post hook.
@@ -95,8 +94,7 @@ class Service:
                 f"High-level summary:\n{summary}\n\n"
                 f"Exact requirement to be stored:\n"
                 f"Replacement of: {draft['replacement_of'] or 'none'}\n"
-                f"Requirement:\n{draft['brief']}\n\n"
-                f"Acceptance criteria:\n{draft['acceptance_criteria']}")
+                f"Requirement:\n{draft['brief']}")
         path = self._write_presentation(draft['id'], text)
         question = (text + f"\n\nConfirm ANCOR requirement {draft['id']}? "
                     'This confirms the requirement, not deployment or payment.')
@@ -144,7 +142,6 @@ class Service:
                     f"Requirement: {requirement['id']}\n"
                     f"Title: {requirement['title']}\n"
                     f"Requirement text:\n{requirement['brief']}\n\n"
-                    f"Acceptance criteria:\n{requirement['acceptance_criteria']}\n\n"
                     f"Coordinator verification evidence:\n{evidence or 'not recorded'}")
             if action == 'human_request_changes':
                 text += f"\n\nExact feedback to be stored:\n{command['reason']}"
@@ -168,7 +165,6 @@ class Service:
                 f"Requirement: {requirement['id']}\n"
                 f"Title: {requirement['title']}\n"
                 f"Requirement text:\n{requirement['brief']}\n\n"
-                f"Acceptance criteria:\n{requirement['acceptance_criteria']}\n\n"
                 f"Reason: {command['reason']}")
         path = self._write_presentation(command['id'], text)
         if action == 'pause':
@@ -437,8 +433,8 @@ class Service:
         if args['action'] not in {'accept', 'verify'}:
             raise ValueError('unknown acceptance action')
         evidence = args.get('evidence')
-        if not isinstance(evidence, dict) or evidence.get('criteria') != requirement['acceptance_criteria']:
-            raise ValueError('evidence must bind exact acceptance criteria')
+        if not isinstance(evidence, dict) or evidence.get('brief') != requirement['brief']:
+            raise ValueError('evidence must bind the exact stored brief')
         for field in ('verification', 'artifacts', 'task_ids'):
             values = evidence.get(field)
             if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v.strip() for v in values):

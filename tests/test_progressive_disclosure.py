@@ -28,7 +28,7 @@ def test_human_waiting_is_preserved_in_compact_projections():
 
 def test_board_list_is_compact_and_show_expands(tmp_path):
     store = Store(tmp_path / 'store.db')
-    req = store.confirm(store.create_draft('Brief', 'Criteria')['id'], 'fixture')
+    req = store.confirm(store.create_draft('Brief')['id'], 'fixture')
     store.link_task(req['id'], 't1')
     card = task('FULL CONTRACT ' * 100)
 
@@ -64,8 +64,7 @@ def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
                           register_platform_handler=lambda *args: None)
     store = Store(store_path)
     brief = 'B' * 2000
-    criteria = 'C' * 2000
-    req = store.confirm(store.create_draft(brief, criteria, summary='Short summary')['id'], 'fixture')
+    req = store.confirm(store.create_draft(brief, summary='Short summary')['id'], 'fixture')
     store.link_task(req['id'], 't1')
     card = task('FULL CONTRACT ' * 100)
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [card])
@@ -87,7 +86,6 @@ def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
 
     expanded = call({'requirement_id': req['id']})
     assert expanded['requirement']['brief'] == brief
-    assert expanded['requirement']['acceptance_criteria'] == criteria
     assert expanded['tasks']['items'][0]['id'] == 't1'
     assert 'body' not in expanded['tasks']['items'][0]
 
@@ -106,13 +104,13 @@ def test_progress_only_returns_open_work_including_human_acceptance(tmp_path, mo
                           register_platform_handler=lambda *args: None)
     store = Store(store_path)
     active = store.confirm(store.create_draft(
-        'Active brief', 'Active criteria', title='Active work')['id'], 'fixture')
+        'Active brief', title='Active work')['id'], 'fixture')
     awaiting = store.confirm(store.create_draft(
-        'Awaiting brief', 'Awaiting criteria', title='Awaiting acceptance')['id'], 'fixture')
+        'Awaiting brief', title='Awaiting acceptance')['id'], 'fixture')
     paused = store.confirm(store.create_draft(
-        'Paused brief', 'Paused criteria', title='Paused work')['id'], 'fixture')
+        'Paused brief', title='Paused work')['id'], 'fixture')
     accepted = store.confirm(store.create_draft(
-        'Accepted brief', 'Accepted criteria', title='Closed work')['id'], 'fixture')
+        'Accepted brief', title='Closed work')['id'], 'fixture')
     for requirement, task_id in ((active, 'active-open'),
                                  (awaiting, 'awaiting-done'),
                                  (paused, 'paused-open'),
@@ -187,7 +185,7 @@ def test_notification_list_is_compact_and_id_expands(tmp_path):
                           register_hook=lambda *args: None,
                           register_platform_handler=lambda *args: None)
     store = Store(store_path)
-    req = store.confirm(store.create_draft('Brief', 'Criteria')['id'], 'fixture')
+    req = store.confirm(store.create_draft('Brief')['id'], 'fixture')
     store.link_task(req['id'], 't1')
     box = NotificationOutbox(store.path + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
@@ -230,7 +228,7 @@ def test_tool_errors_expose_a_stable_code(tmp_path):
 
 def test_board_list_prioritizes_live_recent_tasks_before_truncation(tmp_path):
     store = Store(tmp_path / 'store.db')
-    req = store.confirm(store.create_draft('Brief', 'Criteria')['id'], 'fixture')
+    req = store.confirm(store.create_draft('Brief')['id'], 'fixture')
     cards = [
         {'id': 'old-done', 'title': 'old', 'status': 'done', 'created_at': 1},
         {'id': 'old-running', 'title': 'running', 'status': 'running', 'created_at': 2},
@@ -268,7 +266,7 @@ def test_requirement_expansion_keeps_archived_tasks_for_acceptance(tmp_path, mon
                           register_hook=lambda *args: None,
                           register_platform_handler=lambda *args: None)
     store = Store(store_path)
-    req = store.confirm(store.create_draft('Brief', 'Criteria')['id'], 'fixture')
+    req = store.confirm(store.create_draft('Brief')['id'], 'fixture')
     store.link_task(req['id'], 'live')
     store.link_task(req['id'], 'old')
     cards = [
@@ -322,7 +320,7 @@ def test_context_separates_conditions_from_events_and_hides_history_by_default(t
                           register_hook=lambda *args: None,
                           register_platform_handler=lambda *args: None)
     store = Store(store_path)
-    req = store.confirm(store.create_draft('Brief', 'Criteria')['id'], 'fixture')
+    req = store.confirm(store.create_draft('Brief')['id'], 'fixture')
     store.link_task(req['id'], 'running')
     store.link_task(req['id'], 'done')
     store.ack_events([event['id'] for event in store.pending_events()])
