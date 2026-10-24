@@ -20,42 +20,29 @@ def _recency(task):
     return 0
 
 
-def build_work_contract(*, objective, scope, task, inputs, dependencies,
-                        constraints, artifacts, verification, stop_conditions,
-                        report=()):
-    """Render a self-contained English contract for one bounded worker task."""
-    def bullets(values):
-        return '\n'.join(f'- {value}' for value in values) or '- None specified'
+CARD_PARTS = ('outcome', 'inputs', 'advice', 'binding_constraints',
+              'expected_output', 'evidence')
+CARD_REQUIRED = ('outcome', 'expected_output', 'evidence')
 
-    return f'''<work_contract>
-<identity>
-You are the execution owner for this bounded task. Produce an inspectable result
-within this contract; do not silently expand scope or authorization.
-</identity>
-<objective>{objective}</objective>
-<scope>{scope}\nTask: {task}</scope>
-<inputs>
-{bullets(inputs)}
-</inputs>
-<dependencies>
-{bullets(dependencies)}
-</dependencies>
-<constraints>
-{bullets(constraints)}
-</constraints>
-<expected_artifacts>
-{bullets(artifacts)}
-</expected_artifacts>
-<verification>
-{bullets(verification)}
-</verification>
-<stop_conditions>
-{bullets(stop_conditions)}
-</stop_conditions>
-<report>
-{bullets(report)}
-</report>
-</work_contract>'''
+
+def render_card(contract):
+    """Render one worker card. The card holds these parts and nothing else.
+
+    Optional parts stay absent when empty: an empty section reads as a missing
+    requirement to a worker. The authorization boundary is a code-owned binding
+    constraint, so it is injected here rather than trusted to the author.
+    """
+    def section(name, values):
+        return '\n'.join([f'<{name}>', *(f'- {value}' for value in values), f'</{name}>'])
+
+    values = {part: [value for value in contract.get(part) or () if value]
+              for part in CARD_PARTS}
+    values['binding_constraints'] = list(dict.fromkeys(
+        ['Do not change authorization or requirement version.',
+         *values['binding_constraints']]))
+    parts = [f'<outcome>{contract["outcome"]}</outcome>']
+    parts.extend(section(part, values[part]) for part in CARD_PARTS[1:] if values[part])
+    return '<work_contract>\n' + '\n'.join(parts) + '\n</work_contract>'
 
 
 class Operations:
@@ -127,27 +114,22 @@ class Operations:
     def _contract(contract):
         if not isinstance(contract, dict):
             raise ValueError('contract is required')
-        allowed = {'objective', 'scope', 'inputs', 'dependencies', 'artifacts',
-                   'verification', 'constraints', 'stop_conditions', 'report'}
-        required = allowed - {'report'}
+        allowed, required = set(CARD_PARTS), set(CARD_REQUIRED)
         if set(contract) - allowed:
             raise ValueError('contract contains unknown fields')
-        if required - set(contract):
-            raise ValueError('contract is missing required fields')
-        for field in ('objective', 'scope'):
-            value = contract[field]
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f'contract {field} must be nonempty text')
-        for field in ('inputs', 'dependencies', 'artifacts', 'verification',
-                      'constraints', 'stop_conditions', 'report'):
-            if field not in contract and field == 'report':
-                continue
-            values = contract.get(field)
+        missing = required - set(contract)
+        if missing:
+            raise ValueError('contract is missing required fields: '
+                             + ', '.join(sorted(missing)))
+        outcome = contract['outcome']
+        if not isinstance(outcome, str) or not outcome.strip():
+            raise ValueError('contract outcome must be nonempty text')
+        for field in CARD_PARTS[1:]:
+            values = contract.get(field, [])
             if not isinstance(values, list) or any(
                     not isinstance(value, str) or not value.strip() for value in values):
                 raise ValueError(f'contract {field} must be a list of nonempty strings')
-        for field in ('artifacts', 'verification', 'stop_conditions'):
-            if not contract[field]:
+            if field in required and not values:
                 raise ValueError(f'contract {field} must not be empty')
         return contract
 
@@ -190,9 +172,10 @@ class Operations:
             req = store.get_requirement(args['requirement_id'])
             self._require_stable_active(req)
             contract = self._contract(args.get('contract'))
+            if 'body' in args:
+                raise ValueError('body is not a card part; state the outcome in the contract')
             for field in ('key', 'title'):
                 store._text(args[field])
-            task_text = store._text(args.get('body') or contract['objective'])
             parent_ids, hold = args.get('parent_ids', []), args.get('hold', False)
             if not isinstance(parent_ids, list) or any(not isinstance(p, str) or not p.strip() for p in parent_ids):
                 raise ValueError('parent_ids must be a list of task IDs')
@@ -204,15 +187,7 @@ class Operations:
                     raise ValueError('unlinked parent task')
                 self._require_stable_active(store.get_requirement(linked[parent]))
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
-            body = build_work_contract(
-                objective=contract['objective'], scope=contract['scope'], task=task_text,
-                inputs=contract['inputs'], dependencies=contract['dependencies'],
-                constraints=list(dict.fromkeys(['Do not change authorization or requirement version.',
-                                                 *contract['constraints']])),
-                artifacts=contract['artifacts'], verification=contract['verification'],
-                stop_conditions=contract['stop_conditions'],
-                report=contract.get('report') or [
-                    'Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
+            body = render_card(contract)
             task = self.board.create(req['id'], 1, args['key'], title=args['title'],
                                      body=body,
                                      assignee=worker_profile, parent_ids=parent_ids, hold=hold)
@@ -281,29 +256,20 @@ class Operations:
         if action == 'edit':
             req = store.get_requirement(links[tid])
             self._require_stable_active(req)
-            if 'contract' in args and 'body' not in args:
-                raise ValueError('contract edits require body')
-            fields = {key: args[key] for key in ('title', 'body', 'priority') if key in args}
+            if 'body' in args:
+                raise ValueError('body is not a card part; edit the contract instead')
+            fields = {key: args[key] for key in ('title', 'priority') if key in args}
             if 'priority' in fields and type(fields['priority']) is not int:
                 raise ValueError('priority must be an integer')
             if 'title' in fields:
                 store._text(fields['title'])
-            if 'body' in fields:
-                store._text(fields['body'])
-                contract = self._contract(args.get('contract'))
+            if 'contract' in args:
+                contract = self._contract(args['contract'])
                 metadata = self.board.link(detail['task'])
                 if not metadata or metadata['requirement_id'] != req['id'] or metadata['revision'] != 1:
                     raise ValueError('native task association mismatch')
                 link_line = detail['task']['body'].split('\n', 1)[0]
-                fields['body'] = link_line + '\n' + build_work_contract(
-                    objective=contract['objective'], scope=contract['scope'], task=fields['body'],
-                    inputs=contract['inputs'], dependencies=contract['dependencies'],
-                    constraints=list(dict.fromkeys(['Do not change authorization or requirement version.',
-                                                     *contract['constraints']])),
-                    artifacts=contract['artifacts'], verification=contract['verification'],
-                    stop_conditions=contract['stop_conditions'],
-                    report=contract.get('report') or [
-                        'Result, artifacts, checks and outcomes, assumptions, and remaining limitations.'])
+                fields['body'] = link_line + '\n' + render_card(contract)
             return self._receipt(self.board.edit(tid, **fields), links[tid], list(fields))
         text = None
         if action == 'block':

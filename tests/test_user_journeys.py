@@ -203,7 +203,7 @@ class Journey:
 
     def create(self, req, key):
         detail = self.call('board', action='create', requirement_id=req['id'], key=key,
-                           title='Execute ' + key, body='Produce and verify ' + key,
+                           title='Execute ' + key,
                            contract=self.contract(key))
         assert detail['task']['assignee'] == 'ancor-worker'
         assert not detail['task'].get('goal_mode', False), 'offline journey must not invoke goal_judge'
@@ -211,11 +211,11 @@ class Journey:
 
     @staticmethod
     def contract(key):
-        return dict(objective='Execute ' + key, scope='Only ' + key,
-                    inputs=['confirmed requirement'], dependencies=[], artifacts=[key + ' artifact'],
-                    verification=['Verify ' + key],
-                    constraints=['Preserve exact values'],
-                    stop_conditions=['Required input or decision is missing'])
+        return dict(outcome='Execute ' + key,
+                    inputs=['confirmed requirement'],
+                    expected_output=[key + ' artifact'],
+                    evidence=['Verify ' + key],
+                    binding_constraints=['Preserve exact values'])
 
     def status(self, tid):
         return self.board.show(tid)['status']
@@ -283,13 +283,13 @@ def journey_rolling(j):
     req = j.requirement()
     a = j.create(req, 'A')
     detail = j.call('board', action='create', requirement_id=req['id'], key='B',
-                    title='Execute B', body='Depends on A', parent_ids=[a], hold=True,
+                    title='Execute B', parent_ids=[a], hold=True,
                     contract=j.contract('B'))
     b = detail['task']['id']
     assert a in detail['parents'] and j.status(b) == 'blocked'
     metadata = j.board.show(b)['body'].split('\n', 1)[0]
     edited = j.call('board', action='edit', task_id=b, title='Execute revised B',
-                    body='Produce and verify revised B', priority=7,
+                    priority=7,
                     contract=j.contract('B'))
     assert edited['task']['title'] == 'Execute revised B'
     assert edited['task']['priority'] == 7
@@ -363,7 +363,7 @@ def journey_replacement(j):
     assert new['status'] == 'pending' and new['target_status'] == 'active'
     assert j.status(old_task) == 'running', 'confirmation records invalidation, not automatic stop'
     inactive_error = j.error('board', action='create', requirement_id=old['id'], key='forbidden',
-                             title='No', body='No', contract=j.contract('forbidden'))
+                             title='No', contract=j.contract('forbidden'))
     assert 'not active' in inactive_error, inactive_error
     j.complete(other_task)
     advanced = j.call('requirement', action='advance', requirement_id=old['id'])

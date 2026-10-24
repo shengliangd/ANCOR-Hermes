@@ -662,23 +662,21 @@ def register(ctx, *, scan_runner=None):
         ctx.register_hook('post_tool_call', service.post_tool_call)
     contract_schema = {
         'type': 'object',
-        'description': 'Mandatory self-contained worker execution contract.',
+        'description': ('Worker card. It holds these six parts and nothing else. '
+                        'outcome, expected_output and evidence are required; inputs, '
+                        'advice and binding_constraints may be empty.'),
         'properties': {
-            'objective': {'type': 'string', 'pattern': r'\S'},
-            'scope': {'type': 'string', 'pattern': r'\S'},
+            'outcome': {'type': 'string', 'pattern': r'\S'},
             'inputs': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
-            'dependencies': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
-            'artifacts': {'type': 'array', 'minItems': 1,
-                          'items': {'type': 'string', 'pattern': r'\S'}},
-            'verification': {'type': 'array', 'minItems': 1,
-                             'items': {'type': 'string', 'pattern': r'\S'}},
-            'constraints': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
-            'stop_conditions': {'type': 'array', 'minItems': 1,
+            'advice': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
+            'binding_constraints': {'type': 'array',
+                                    'items': {'type': 'string', 'pattern': r'\S'}},
+            'expected_output': {'type': 'array', 'minItems': 1,
                                 'items': {'type': 'string', 'pattern': r'\S'}},
-            'report': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
+            'evidence': {'type': 'array', 'minItems': 1,
+                         'items': {'type': 'string', 'pattern': r'\S'}},
         },
-        'required': ['objective', 'scope', 'inputs', 'dependencies', 'artifacts',
-                     'verification', 'constraints', 'stop_conditions'],
+        'required': ['outcome', 'expected_output', 'evidence'],
         'additionalProperties': False,
     }
     if worker:
@@ -765,7 +763,7 @@ def register(ctx, *, scan_runner=None):
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
             'ancor_board': (
-                'Read and coordinate linked native tasks. list returns compact summaries; show returns one card with bounded recent history; history expands comments, events or runs for one card. create requires a complete contract; body is optional and defaults to the contract objective; edit with body requires the same contract. archive writes an audit comment and verifies the native terminal state. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, archive, and associate.',
+                'Read and coordinate linked native tasks. list returns compact summaries; show returns one card with bounded recent history; history expands comments, events or runs for one card. create requires a contract with outcome, expected_output and evidence; inputs, advice and binding_constraints are optional; edit takes the same contract and re-renders the card. archive writes an audit comment and verifies the native terminal state. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, archive, and associate.',
                 {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock',
                                                         'history', 'comment', 'link', 'unlink', 'edit', 'revise',
                                                         'archive', 'associate']},
@@ -779,7 +777,7 @@ def register(ctx, *, scan_runner=None):
                  'include_archived': {'type': 'boolean'},
                  'contract': contract_schema,
                  **{field: {'type': 'string'} for field in
-                    ('requirement_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'body', 'reason')}},
+                    ('requirement_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'reason')}},
                 ['action']),
             'ancor_get_context': (
                 'Read a compact coordination snapshot: counts, attention items, open task references, open questions, host conditions, pending event previews and health for active or paused requirements. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed; set include_done, include_archived or include_closed_notifications only when history is needed. Payloads are previews; pass requirement_id for exact requirement text, ancor_board show for a full task, and ancor_notify id for one full notification. Pass event_id to read one complete event, including one already acknowledged. Use ancor_ack_events for handled IDs; ack_event_ids is deprecated.',

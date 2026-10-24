@@ -98,17 +98,18 @@ def operations(setup):
 
 
 def contract(**extra):
-    value = dict(objective='Implement the requested result', scope='Only the named artifact',
-                 inputs=['/tmp/input.txt'], dependencies=[], artifacts=['/tmp/result.txt'],
-                 verification=['Run the exact acceptance check'], constraints=['Keep exact values'],
-                 stop_conditions=['Required input is missing'])
+    value = dict(outcome='Implement the requested result',
+                 inputs=['/tmp/input.txt'],
+                 expected_output=['/tmp/result.txt'],
+                 evidence=['Run the exact acceptance check'],
+                 binding_constraints=['Keep exact values'])
     value.update(extra)
     return value
 
 
 def create_args(req, **extra):
     value = dict(action='create', requirement_id=req['id'], key='first', title='Implement',
-                 body='Work details', contract=contract())
+                 contract=contract())
     value.update(extra)
     return value
 
@@ -138,7 +139,7 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     result = op.call(create_args(req))
     shown = op.call({'action': 'show', 'task_id': result['task_id']})
     assert result['assignee'] == 'ancor-worker'
-    assert contract()['objective'] in shown['body']
+    assert contract()['outcome'] in shown['body']
     assert 'Keep exact values' in shown['body']
     assert req['acceptance_criteria'] not in shown['body']
     assert op.call(create_args(req))['task_id'] == result['task_id']
@@ -147,12 +148,11 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     assert store.get_requirement(req['id'])['status'] == 'active'
 
 
-def test_create_derives_task_text_from_contract_when_body_omitted(setup):
-    args = create_args(setup[3])
-    del args['body']
-    result = operations(setup).call(args)
-    shown = operations(setup).call({'action': 'show', 'task_id': result['task_id']})
-    assert 'Task: ' + contract()['objective'] in shown['body']
+def test_create_rejects_body_outside_the_six_parts(setup):
+    args = create_args(setup[3], body='Work details')
+    with pytest.raises(ValueError, match='body'):
+        operations(setup).call(args)
+    assert not setup[2].tasks
 
 
 def test_create_requires_a_complete_self_contained_contract(setup):
@@ -161,25 +161,34 @@ def test_create_requires_a_complete_self_contained_contract(setup):
     del args['contract']
     with pytest.raises(ValueError, match='contract'):
         op.call(args)
-    args = create_args(setup[3], contract=contract(artifacts=[]))
-    with pytest.raises(ValueError, match='artifacts'):
+    args = create_args(setup[3], contract=contract(expected_output=[]))
+    with pytest.raises(ValueError, match='expected_output'):
         op.call(args)
-    args = create_args(setup[3], contract=contract(verification=['  ']))
-    with pytest.raises(ValueError, match='verification'):
+    args = create_args(setup[3], contract=contract(evidence=['  ']))
+    with pytest.raises(ValueError, match='evidence'):
+        op.call(args)
+    args = create_args(setup[3], contract=contract(scope='Not a card part'))
+    with pytest.raises(ValueError, match='unknown'):
         op.call(args)
     assert not setup[2].tasks
 
 
-def test_create_renders_structured_contract(setup):
+def test_create_renders_six_card_parts(setup):
     result = operations(setup).call(create_args(
-        setup[3], contract=contract(inputs=['exact input'], dependencies=['Task A done'],
-                                    artifacts=['artifact path'], verification=['check result'],
-                                    constraints=['preserve casing'], stop_conditions=['missing approval'])))
+        setup[3], contract=contract(inputs=['exact input'], advice=['prefer A'],
+                                    expected_output=['artifact path'],
+                                    evidence=['check result'],
+                                    binding_constraints=['preserve casing'])))
     body = operations(setup).call({'action': 'show', 'task_id': result['task_id']})['body']
-    for value in ('Implement the requested result', 'Only the named artifact', 'exact input',
-                  'Task A done', 'artifact path', 'check result', 'preserve casing',
-                  'missing approval'):
+    for value in ('Implement the requested result', 'exact input', 'prefer A',
+                  'artifact path', 'check result', 'preserve casing'):
         assert value in body
+    for part in ('outcome', 'inputs', 'advice', 'binding_constraints',
+                 'expected_output', 'evidence'):
+        assert f'<{part}>' in body
+    for absent in ('<scope>', '<dependencies>', '<stop_conditions>', '<report>',
+                   '<identity>', '<objective>', '<verification>', '<expected_artifacts>'):
+        assert absent not in body
 
 
 def test_scoped_dependencies_across_active_requirements(setup):
@@ -267,14 +276,14 @@ def test_edit_keeps_requirement_context_and_association(setup):
     op = operations(setup)
     created = op.call(create_args(req))
     task = op.call({'action': 'show', 'task_id': created['task_id']})
-    args = dict(action='edit', task_id=created['task_id'], title='Refined', body='New task details', priority=0,
-                contract=contract())
+    args = dict(action='edit', task_id=created['task_id'], title='Refined', priority=0,
+                contract=contract(outcome='Refined outcome'))
     receipt = op.call(args)
     edited = op.call({'action': 'show', 'task_id': receipt['task_id']})
     assert edited['title'] == 'Refined' and edited['priority'] == 0
     assert NativeBoard.link(edited) == NativeBoard.link(task)
-    assert 'Task: New task details' in edited['body']
-    assert contract()['objective'] in edited['body'] and 'Keep exact values' in edited['body']
+    assert 'Refined outcome' in edited['body']
+    assert 'Keep exact values' in edited['body']
     assert req['acceptance_criteria'] not in edited['body']
     assert edited['assignee'] == 'ancor-worker'
     finalize_acceptance(store, req['id'])
@@ -282,15 +291,16 @@ def test_edit_keeps_requirement_context_and_association(setup):
         op.call(args)
 
 
-def test_edit_body_requires_a_full_contract(setup):
+def test_edit_rejects_body_and_rerenders_from_contract(setup):
     op = operations(setup)
     task = op.call(create_args(setup[3]))
-    with pytest.raises(ValueError, match='contract'):
+    with pytest.raises(ValueError, match='body'):
         op.call(dict(action='edit', task_id=task['task_id'], body='Changed'))
-    receipt = op.call(dict(action='edit', task_id=task['task_id'], body='Changed',
-                           contract=contract(objective='Replacement objective')))
+    receipt = op.call(dict(action='edit', task_id=task['task_id'],
+                           contract=contract(outcome='Replacement outcome')))
     edited = op.call({'action': 'show', 'task_id': receipt['task_id']})
-    assert 'Replacement objective' in edited['body'] and 'Task: Changed' in edited['body']
+    assert 'Replacement outcome' in edited['body']
+    assert '<work_contract>' in edited['body']
 
 
 @pytest.mark.parametrize('priority', [True, 1.5, '3', None])
