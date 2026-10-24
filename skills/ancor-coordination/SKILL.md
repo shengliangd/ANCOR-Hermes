@@ -42,7 +42,7 @@ To ask, block the linked task, then call `ancor_notify` with `kind=question`, `r
 
 ## Advance and recover
 
-A worker block is a question, not progress. One card tolerates one unblock-and-retry: the second same-kind block routes to native `triage`, and only completion resets that count. Repair completely first—`ancor_board edit` with a corrected contract, or a comment saying why the card needs no change. Contract changes go through `edit`; comments never override the card body. Never unblock an unchanged card; answer or withdraw its open question first, or the host closes it as stale.
+A worker block is a question, not progress. Each block clears the native recurrence counter, so a repaired card resumes normally; a card that uses up `block_unblock_cycles` falls back to native `triage`, which only `revise` releases. Repair completely first—`ancor_board edit` with a corrected contract, or a comment saying why the card needs no change. Contract changes go through `edit`; comments never override the card body. Never unblock an unchanged card; answer or withdraw its open question first, or the host closes it as stale.
 
 Call `ancor_requirement action=advance`; never edit requirement status. Pause requires quiescence and commits `requirement.paused`; resume commits `requirement.resumed`, then reread state before unblocking. Replacement archives old cards and establishes quiescence first. On `host.recovery`, reconcile snapshot and outbox; never blind-retry `sending` or `uncertain`.
 

@@ -13,7 +13,7 @@ When drafting or changing a requirement, restate the user's need at the altitude
 
 Resolve ambiguous entities such as repository, site, branch, dataset, model, version, environment, or exact value by asking; never guess.
 
-Call `ancor_requirement action=draft` with a single-line `title`, a `brief`, and `acceptance_criteria`; `summary` is optional. `brief`: outcome, scope, non-goals, and only user-given hard constraints. `acceptance_criteria`: an end state the user can recognize, not a test plan or evidence format. Present the complete returned draft, then call native `clarify` with the returned `clarify_args` unchanged. A draft is not active until confirmed. For a change, draft with `replacement_of`; never edit an active requirement in place.
+Call `ancor_requirement action=draft` with a single-line `title` and a `brief`; `summary` is optional. `brief`: outcome, scope, non-goals, and only user-given hard constraints. Present the complete returned draft, then call native `clarify` with the returned `clarify_args` unchanged. A draft is not active until confirmed. For a change, draft with `replacement_of`; never edit an active requirement in place.
 
 Before submission: Did I change the meaning or altitude? Add an unconfirmed decision or constraint? Would the user recognize this as their request?
 
