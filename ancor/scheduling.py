@@ -253,6 +253,15 @@ class Scheduling:
                                 'waiting_on': {'question_ids': [row['id'] for row in questions]},
                                 'task_ids': [task['id'] for task, _ in waiting]})
                 continue
+            # Requirement-scoped questions can precede task creation. Independent
+            # ready/running work above remains executable while a question is open.
+            scoped_questions = self._question(notifications, rid, None, open_only=True)
+            if scoped_questions:
+                state, reason = self._blocked_wait(notifications, rid, None, now)
+                results.append({**base, 'state': 'waiting_on_human' if state == 'waiting' else state,
+                                'reason': reason, 'task_ids': [],
+                                'waiting_on': {'question_ids': [q['id'] for q in scoped_questions]}})
+                continue
             done = [task for task in items if task.get('status') == 'done']
             if items and len(done) == len(items):
                 results.append({**base, 'state': 'stalled', 'reason': 'acceptance_pending',

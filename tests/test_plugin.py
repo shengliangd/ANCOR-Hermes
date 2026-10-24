@@ -197,7 +197,7 @@ def test_only_ancor_roles_have_business_tools():
         plugin.register(ctx)
         assert bool(tools) is expected
         if role == 'ancor-interactor':
-            assert set(tools) == {'ancor_requirement', 'ancor_get_context', 'ancor_board', 'ancor_notify'}
+            assert set(tools) == {'ancor_requirement', 'ancor_get_context', 'ancor_board', 'ancor_notify', 'ancor_change', 'ancor_question'}
             assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == [
                 'draft', 'confirm', 'cancel', 'pause', 'resume', 'respond',
                 'accept', 'request_changes']
@@ -215,7 +215,7 @@ def test_only_ancor_roles_have_business_tools():
             assert set(tools) == {'ancor_requirement', 'ancor_get_context',
                                   'ancor_ack_events', 'ancor_acceptance',
                                   'ancor_board', 'ancor_wake', 'ancor_notify',
-                                  'ancor_note'}
+                                  'ancor_note', 'ancor_change', 'ancor_question', 'ancor_reconcile'}
             assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['advance']
             forbidden = json.loads(tools['ancor_requirement']['handler']({
                 'action': 'draft', 'title': 'No', 'brief': 'No'}))
@@ -223,7 +223,7 @@ def test_only_ancor_roles_have_business_tools():
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
             assert 'contract' in tools['ancor_board']['schema']['parameters']['properties']
             assert tools['ancor_note']['schema']['parameters']['properties']['action']['enum'] == [
-                'list', 'get', 'add', 'update', 'delete']
+                'list', 'get', 'add', 'update', 'delete', 'append', 'replace', 'invalidate', 'history']
         elif role == 'ancor-worker':
             assert not tools
 

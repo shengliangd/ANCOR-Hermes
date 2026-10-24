@@ -42,6 +42,22 @@ class Service:
 
     def requirement(self, args):
         action = args['action']
+        if action in {'pause', 'resume', 'cancel', 'accept', 'request_changes'}:
+            ids = args.get('requirement_ids', [args.get('requirement_id')])
+            if len(ids) == 1 and ids[0] and self.store.get_requirement(ids[0])['content_mode'] == 'points':
+                req = self.store.get_requirement(ids[0])
+                op = {'op': action}
+                if action == 'accept':
+                    verification = self.store.latest_verification(ids[0])
+                    if verification is None:
+                        raise ValueError('verification required before acceptance')
+                    op['verification_id'] = verification['id']
+                elif action == 'request_changes':
+                    op['feedback'] = args['feedback']
+                else:
+                    op['reason'] = args.get('reason') or action
+                return self.change({'action': 'propose', 'requirement_id': ids[0], 'base': req,
+                                    'input': args.get('feedback') or args.get('reason') or action, 'operations': [op]})
         if action == 'draft':
             summary = self.store._optional_text(args.get('summary'))
             draft = self.store.create_draft(args['brief'], args.get('replacement_of'),
@@ -69,6 +85,40 @@ class Service:
                 args['requirement_id'], action, args.get('feedback'))
             return self.command_presentation(command)
         raise ValueError('unknown requirement action')
+
+    def change(self, args):
+        action = args['action']
+        if action == 'propose':
+            # Actor/source identity comes from this adapter, never a model argument.
+            actor = getattr(self.ctx, 'profile_name', 'ancor-interactor')
+            proposal = self.store.propose_change(
+                args.get('requirement_id'), args['operations'], actor=actor,
+                source={'kind': 'interactor_proposal', 'human_identity': None,
+                        'input': args['input']}, base=args.get('base'))
+            return self.change_presentation(proposal)
+        if action == 'get':
+            proposal = self.store.get_change(args['change_id'])
+            if proposal['source'].get('kind') == 'coordinator_note':
+                raise PermissionError('coordinator notes are private')
+            return self.change_presentation(proposal)
+        if action == 'history':
+            return self.store.list_changes(args['requirement_id'], before=args.get('before'),
+                                           limit=args.get('limit', 50),
+                include_notes=getattr(self.ctx, 'profile_name', '') == self.ctx.get_config('coordinator_profile', 'ancor-coordinator'))
+        raise ValueError('unknown change action')
+
+    def change_presentation(self, proposal):
+        identifier = proposal['id']
+        text = (f"ANCOR change {identifier}\nRequirement: {proposal['requirement_id']}\n"
+                + 'Base versions: ' + json.dumps(proposal['base'], ensure_ascii=False, sort_keys=True)
+                + '\nOriginal input:\n' + str(proposal['source'].get('input', ''))
+                + '\nExact operations:\n' + json.dumps(proposal['operations'], ensure_ascii=False, indent=2))
+        path = self._write_presentation(identifier, text)
+        return {**proposal, 'draft_file': path, 'clarify_args': {'questions': [{
+            'question': text + '\n\nApply this exact change?',
+            'choices': [f'Do not apply {identifier}', f'Apply ANCOR change {identifier}'],
+            'multi_select': False}]},
+            'next_step': 'Submit the exact clarify_args through native clarify. A proposal is not effective until confirmed.'}
 
     def _write_presentation(self, identifier, text):
         directory = Path(self.store.path + '.drafts')
@@ -260,7 +310,9 @@ class Service:
         if tool_name != 'clarify':
             return
         encoded = json.dumps(args, sort_keys=True, ensure_ascii=False)
-        if 'ANCOR human acceptance ' in encoded:
+        if 'ANCOR change ' in encoded:
+            kind, pattern = 'change', r'Apply ANCOR change ([0-9a-f]{32})'
+        elif 'ANCOR human acceptance ' in encoded:
             kind, pattern = 'human_decision', r'ANCOR human acceptance ([0-9a-f]{32})'
         elif 'ANCOR draft ' in encoded:
             kind, pattern = 'draft', r'Confirm ANCOR draft ([0-9a-f]{32})'
@@ -281,7 +333,9 @@ class Service:
             if len(matches) != 1:
                 raise ValueError('exact ANCOR confirmation choice required')
             target = matches[0]
-            if kind == 'human_decision':
+            if kind == 'change':
+                expected = self.change_presentation(self.store.get_change(target))['clarify_args']
+            elif kind == 'human_decision':
                 expected = self.command_presentation(
                     self.store.get_requirement_command(target))['clarify_args']
             elif kind == 'draft':
@@ -333,7 +387,10 @@ class Service:
                 payload = json.loads(result) if isinstance(result, str) else result
                 if isinstance(payload, dict) and payload.get('error'):
                     raise RuntimeError(f"clarify failed: {payload['error']}")
-                if kind == 'draft':
+                if kind == 'change':
+                    question = self.change_presentation(self.store.get_change(target))['clarify_args']['questions'][0]
+                    answer = f'Apply ANCOR change {target}'
+                elif kind == 'draft':
                     question = self.presentation(self.store.get_draft(target))['clarify_args']['questions'][0]
                     answer = f'Confirm ANCOR draft {target}'
                 elif kind == 'cancellation':
@@ -371,7 +428,9 @@ class Service:
                                     'session_id': session_id, 'tool_call_id': tool_call_id},
                                    sort_keys=True)
             try:
-                if kind == 'draft':
+                if kind == 'change':
+                    self.store.commit_change(target, reference)
+                elif kind == 'draft':
                     self.store.confirm(target, reference)
                 elif kind == 'cancellation':
                     self.store.confirm_cancellation(target, reference)
@@ -405,8 +464,13 @@ class Service:
         return self.store.snapshot()
 
     def note(self, args):
-        action = args['action']
+        action = {'append': 'add', 'replace': 'update', 'invalidate': 'delete'}.get(args['action'], args['action'])
         requirement_id = args['requirement_id']
+        actor = getattr(self.ctx, 'profile_name', 'ancor-coordinator')
+        if args['action'] in {'replace', 'invalidate'} and type(args.get('expected_revision')) is not int:
+            raise ValueError('expected_revision required for note replace/invalidate')
+        if action == 'history':
+            return self.store.note_history(requirement_id, args['note_id'])
         if action == 'list':
             result = self.store.list_notes(
                 requirement_id, limit=args.get('limit', 50),
@@ -416,12 +480,12 @@ class Service:
         if action == 'get':
             return note_detail(self.store.get_note(requirement_id, args['note_id']))
         if action == 'add':
-            return note_detail(self.store.add_note(requirement_id, args['body']))
+            return note_detail(self.store.add_note(requirement_id, args['body'], actor=actor))
         if action == 'update':
             return note_detail(self.store.update_note(
-                requirement_id, args['note_id'], args['body']))
+                requirement_id, args['note_id'], args['body'], expected_revision=args.get('expected_revision'), actor=actor))
         if action == 'delete':
-            return note_detail(self.store.delete_note(requirement_id, args['note_id']))
+            return note_detail(self.store.delete_note(requirement_id, args['note_id'], expected_revision=args.get('expected_revision'), actor=actor))
         raise ValueError('unknown note action')
 
     def acceptance(self, args):
@@ -433,7 +497,12 @@ class Service:
         if args['action'] not in {'accept', 'verify'}:
             raise ValueError('unknown acceptance action')
         evidence = args.get('evidence')
-        if not isinstance(evidence, dict) or evidence.get('brief') != requirement['brief']:
+        if not isinstance(evidence, dict):
+            raise ValueError('evidence object required')
+        if requirement['content_mode'] == 'points':
+            with self.store._transaction() as db:
+                self.store._check_verification(db, requirement, json.dumps(evidence))
+        elif evidence.get('brief') != requirement['brief']:
             raise ValueError('evidence must bind the exact stored brief')
         for field in ('verification', 'artifacts', 'task_ids'):
             values = evidence.get(field)
@@ -461,4 +530,4 @@ class Service:
             if actual.get('status') != 'archived':
                 raise RuntimeError('native archive verification failed')
         return self.store.submit_acceptance(
-            requirement['id'], json.dumps(evidence, ensure_ascii=False))
+            requirement['id'], json.dumps(evidence, ensure_ascii=False), generation=requirement['generation'])

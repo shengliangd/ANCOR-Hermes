@@ -221,7 +221,7 @@ class NotificationOutbox:
                 'WHERE id<>? AND kind=? AND message=? AND target=? '
                 'AND requirement_id IS ? AND task_id IS ? LIMIT 1',
                 (identifier, kind, message, self.target, requirement_id, task_id)).fetchone()
-            if duplicate is not None:
+            if duplicate is not None and kind == 'question':
                 state = 'closed' if duplicate['closed_at'] is not None else duplicate['state']
                 raise ValueError(
                     f'identical notification already exists as {duplicate["id"]} ({state}); '
@@ -476,6 +476,10 @@ class NotificationDispatcher:
                 return 'close', 'completion_no_longer_pending'
             if requirement.get('status') != 'awaiting_acceptance':
                 return 'close', 'completion_no_longer_pending'
+            if requirement.get('content_mode') == 'points':
+                from .views import completion_id
+                if row['id'] != completion_id(requirement):
+                    return 'close', 'verification_superseded'
             return 'send', None
         if row['kind'] != 'question':
             return 'send', None

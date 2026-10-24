@@ -194,7 +194,8 @@ def test_acceptance_schema_matches_service_contract(tmp_path):
                           register_tool=lambda **kw: tools.update({kw['name']: kw}))
     ancor.register(ctx)
     schema = tools['ancor_acceptance']['schema']['parameters']['properties']['evidence']
-    assert set(schema['required']) == {'brief', 'verification', 'artifacts', 'task_ids'}
+    assert set(schema['required']) == {'verification', 'artifacts', 'task_ids'}
+    assert schema['anyOf'] == [{'required': ['brief']}, {'required': ['generation', 'coverage']}]
     store = Store(tmp_path / 'store.db')
     draft = store.create_draft('brief')
     req = store.confirm(draft['id'], 'fixture')

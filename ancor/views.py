@@ -79,6 +79,9 @@ def requirement_ref(requirement, progression=None, *, exact_via=False):
         'status': requirement['status'],
         'replacement_of': requirement.get('replacement_of'),
     }
+    for key in ('generation', 'observed_generation'):
+        if key in requirement:
+            item[key] = requirement[key]
     if requirement.get('target_status') is not None:
         item['target_status'] = requirement['target_status']
     if progression is not None:
@@ -106,6 +109,9 @@ def requirement_progress(requirement, progression=None, tasks=(), notifications=
         'reason': progression.get('reason'),
         'tasks': {'open': counts['open'], 'total': counts['total']},
     }
+    for key in ('generation', 'observed_generation'):
+        if key in requirement:
+            item[key] = requirement[key]
     if requirement.get('target_status') is not None:
         item['target_status'] = requirement['target_status']
     waiting_on = progression.get('waiting_on')
@@ -143,6 +149,13 @@ def requirement_progress(requirement, progression=None, tasks=(), notifications=
     return item
 
 
+def completion_id(requirement):
+    base = 'accept:' + requirement['id']
+    if requirement.get('content_mode') == 'points':
+        return base + ':' + str(requirement.get('verification_id'))
+    return base
+
+
 def awaiting_acceptances(requirements, notifications):
     """Requirements whose coordinator-verified result needs the human's decision."""
     waiting = {requirement['id']: requirement for requirement in requirements or ()
@@ -165,7 +178,7 @@ def awaiting_acceptances(requirements, notifications):
             'status': 'awaiting_acceptance',
             'state': 'awaiting_human_acceptance',
             'reason': 'human_acceptance_pending',
-            'notice_id': 'accept:' + requirement_id,
+            'notice_id': completion_id(requirement),
             'result_preview': result_preview,
             'accept_via': {
                 'tool': 'ancor_requirement',
@@ -203,6 +216,11 @@ def requirement_detail(requirement, draft=None):
         'replacement_of': requirement.get('replacement_of'),
         'brief': requirement['brief'],
     }
+    for key in ('content_mode', 'generation', 'title_version', 'control_version', 'notes_version', 'observed_generation', 'verification_id'):
+        if key in requirement:
+            item[key] = requirement[key]
+    if requirement.get('status') == 'awaiting_acceptance':
+        item['completion_notice_id'] = completion_id(requirement)
     if draft and draft.get('summary'):
         item['summary'] = draft['summary']
     return item

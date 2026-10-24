@@ -68,7 +68,7 @@ def _safe_event(row: dict) -> dict:
 
 
 def _requirements(conn):
-    return _rows(conn, "SELECT id,title,status,replacement_of FROM requirements ORDER BY rowid")
+    return _rows(conn, "SELECT * FROM requirements ORDER BY rowid")
 
 
 def _links(conn):
@@ -112,12 +112,14 @@ def _notifications():
 @router.get("/overview")
 def overview():
     conn = _ro(_store_path())
-    requirements, links, events = [], [], []
+    requirements, links, events, questions = [], [], [], []
     if conn is not None:
         try:
             requirements = _requirements(conn)
             links = _links(conn)
             events = _rows(conn, "SELECT id,kind,payload,source_key FROM events ORDER BY id")
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='questions'").fetchone():
+                questions = _rows(conn, "SELECT id,requirement_id,body,state,revision FROM questions ORDER BY created_at")
         finally:
             conn.close()
     tasks = _read_tasks()
@@ -126,10 +128,15 @@ def overview():
     task_items = [task_ref(task, by_req.get(task.get("id")), titles.get(by_req.get(task.get("id")))) for task in tasks]
     notifications = _notifications()
     visible = notification_selection(notifications)
+    question_ids = {q["id"] for q in questions}
+    question_items = [{"id": q["id"], "title": q["body"][:200], "state": q["state"],
+                       "detail_kind": "questions"} for q in questions if q["state"] == "open"]
+    question_items.extend({**notification_summary(n), "detail_kind": "notifications"}
+                          for n in visible if n["kind"] == "question" and n["id"] not in question_ids)
     return {
         "requirements": {"items": [requirement_ref(row) for row in requirements], "count": len(requirements), "returned": len(requirements), "truncated": False},
         "tasks": {"items": task_items, "count": len(task_items), "returned": len(task_items), "truncated": False},
-        "questions": {"items": [notification_summary(row) for row in visible if row.get("kind") == "question"], "count": sum(row.get("kind") == "question" for row in notifications), "returned": sum(row.get("kind") == "question" for row in visible), "truncated": False},
+        "questions": {"items": question_items[:50], "count": len(question_items), "returned": min(50, len(question_items)), "truncated": len(question_items) > 50},
         "notifications": {"items": [notification_summary(row) for row in visible], "count": len(notifications), "returned": len(visible), "truncated": len(visible) < len(notifications)},
         "events": {"items": [_safe_event(row) for row in events[-50:]], "count": len(events), "returned": min(50, len(events)), "truncated": len(events) > 50},
         "poll_interval_seconds": 5,
@@ -144,7 +151,18 @@ def requirement(requirement_id: str):
     try:
         row = _one(conn, "SELECT * FROM requirements WHERE id=?", (requirement_id,), "requirement")
         links = _rows(conn, "SELECT task_id FROM task_links WHERE requirement_id=? ORDER BY task_id", (requirement_id,))
-        return {"requirement": requirement_detail(row), "task_ids": [item["task_id"] for item in links]}
+        result = {"requirement": requirement_detail(row), "task_ids": [item["task_id"] for item in links]}
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='point_versions'").fetchone():
+            points = _rows(conn, "SELECT * FROM point_versions WHERE requirement_id=? AND invalidated_at IS NULL ORDER BY position,point_id", (requirement_id,))
+            result["fields"] = {field: [p for p in points if p["field"] == field] for field in ("outcome", "constraint", "advice", "context")}
+            result["questions"] = _rows(conn, "SELECT * FROM questions WHERE requirement_id=? ORDER BY created_at", (requirement_id,))
+            result["coordination"] = _rows(conn, "SELECT * FROM impact_reviews WHERE requirement_id=? AND generation=? ORDER BY task_id", (requirement_id, row["generation"]))
+            changes = _rows(conn, "SELECT id,actor,operations,created_at,committed_at FROM changes WHERE requirement_id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note' ORDER BY committed_at DESC LIMIT 50", (requirement_id,))
+            for change in changes:
+                change["operations"] = json.loads(change["operations"])
+            total = conn.execute("SELECT COUNT(*) FROM changes WHERE requirement_id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note'", (requirement_id,)).fetchone()[0]
+            result["changes"] = {"items": changes, "count": total, "returned": len(changes), "truncated": total > len(changes)}
+        return _redact(result)
     finally:
         conn.close()
 
@@ -190,3 +208,31 @@ def event(event_id: int):
 @router.get("/health")
 def health():
     return {"ok": True, "readonly": True, "poll_interval_seconds": 5}
+
+
+@router.get("/changes/{change_id}")
+def change(change_id: str):
+    conn = _ro(_store_path())
+    if conn is None:
+        raise HTTPException(status_code=404, detail="change not found")
+    try:
+        row = _one(conn, "SELECT * FROM changes WHERE id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note'", (change_id,), "change")
+        for field in ("base", "operations", "source", "result"):
+            row[field] = json.loads(row[field]) if row[field] is not None else None
+        return _redact(row)
+    finally:
+        conn.close()
+
+
+@router.get("/questions/{question_id}")
+def question(question_id: str):
+    conn = _ro(_store_path())
+    if conn is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    try:
+        row = _one(conn, "SELECT * FROM questions WHERE id=?", (question_id,), "question")
+        row["point_ids"] = json.loads(row["point_ids"])
+        row["replies"] = _rows(conn, "SELECT * FROM question_replies WHERE question_id=? ORDER BY created_at", (question_id,))
+        return _redact(row)
+    finally:
+        conn.close()

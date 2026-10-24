@@ -134,7 +134,7 @@ class Operations:
         return contract
 
     def reconcile(self):
-        """Recover durable native links; immutable requirement IDs use revision 1."""
+        """Recover durable native links; association protocol stays at revision 1."""
         store = self.service.store
         requirements = {r['id']: r for r in store.snapshot()['requirements']}
         for task in self.board.list():
@@ -153,6 +153,21 @@ class Operations:
     def _require_stable_active(requirement):
         if requirement['status'] != 'active' or requirement.get('target_status') is not None:
             raise ValueError('requirement is not stably active')
+
+    @staticmethod
+    def _allow_dispatch(store, rid, tid):
+        req = store.get_requirement(rid)
+        if req['content_mode'] != 'points':
+            return
+        state = store.coordination(rid)
+        if state['needs_review']:
+            raise RuntimeError('review current requirement changes before releasing work')
+        review = next((r for r in state['reviews'] if r['task_id'] == tid), None)
+        basis = next((b for b in state['task_basis'] if b['task_id'] == tid), None)
+        if review and (review['state'] != 'applied' or review['decision'] == 'retire'):
+            raise RuntimeError('apply the task impact decision before releasing work')
+        if not basis or (basis['generation'] != req['generation'] and not (review and review['decision'] == 'unaffected')):
+            raise RuntimeError('task requires current basis or explicit unaffected review')
 
     def call(self, args):
         expected = self.ctx.get_config('coordinator_profile', 'ancor-coordinator')
@@ -187,14 +202,23 @@ class Operations:
                     raise ValueError('unlinked parent task')
                 self._require_stable_active(store.get_requirement(linked[parent]))
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
+            if req['content_mode'] == 'points':
+                versions = {p['version_id'] for items in store.content(req['id'])['fields'].values() for p in items}
+                if args.get('generation') != req['generation'] or not args.get('point_versions') or not set(args['point_versions']) <= versions:
+                    raise ValueError('structured tasks require current generation and point_versions')
             body = render_card(contract)
             task = self.board.create(req['id'], 1, args['key'], title=args['title'],
                                      body=body,
-                                     assignee=worker_profile, parent_ids=parent_ids, hold=hold)
+                                     assignee=worker_profile, parent_ids=parent_ids,
+                                     hold=hold or req['content_mode'] == 'points')
             actual = self.detail(task['id'])
+            if req['content_mode'] == 'points' and actual['task']['body'].split('\n', 1)[-1] != body:
+                raise RuntimeError('existing task key has a different contract; review and edit the stopped card')
             if actual['task']['assignee'] != worker_profile:
                 raise RuntimeError('native task assignee verification failed')
             store.link_task(req['id'], task['id'])
+            if req['content_mode'] == 'points':
+                store.bind_task(req['id'], task['id'], args['generation'], args['point_versions'])
             return self._receipt(actual, req['id'], ['create'])
         snapshot = store.snapshot()
         links = {link['task_id']: link['requirement_id'] for link in snapshot['task_links']}
@@ -247,6 +271,7 @@ class Operations:
             actual = self.detail(tid)
             return self._receipt(actual, links[tid], ['archive'])
         if action == 'revise':
+            self._allow_dispatch(store, links[tid], tid)
             reason = store._text(args['reason'])
             self._require_stable_active(store.get_requirement(links[tid]))
             if detail['task']['status'] != 'triage' or detail['task'].get('archived_at'):
@@ -264,17 +289,28 @@ class Operations:
             if 'title' in fields:
                 store._text(fields['title'])
             if 'contract' in args:
+                if req['content_mode'] == 'points':
+                    if detail['task']['status'] in {'running', 'ready'}:
+                        raise ValueError('block the affected task before revising its contract')
+                    self.require_quiescence(detail)
+                    active = {p['version_id'] for items in store.content(req['id'])['fields'].values() for p in items}
+                    if args.get('generation') != req['generation'] or not args.get('point_versions') or not set(args['point_versions']) <= active:
+                        raise ValueError('contract revision requires current generation and point_versions')
                 contract = self._contract(args['contract'])
                 metadata = self.board.link(detail['task'])
                 if not metadata or metadata['requirement_id'] != req['id'] or metadata['revision'] != 1:
                     raise ValueError('native task association mismatch')
                 link_line = detail['task']['body'].split('\n', 1)[0]
                 fields['body'] = link_line + '\n' + render_card(contract)
-            return self._receipt(self.board.edit(tid, **fields), links[tid], list(fields))
+            edited = self.board.edit(tid, **fields)
+            if 'contract' in args and req['content_mode'] == 'points':
+                store.bind_task(req['id'], tid, args['generation'], args['point_versions'])
+            return self._receipt(edited, links[tid], list(fields))
         text = None
         if action == 'block':
             self.board.block(tid, store._text(args['reason']))
         elif action == 'unblock':
+            self._allow_dispatch(store, links[tid], tid)
             self.require_quiescence(detail)
             self._require_stable_active(store.get_requirement(links[tid]))
             self.board._call('unblock', tid, '--reason', store._text(args['reason']), json_output=False)

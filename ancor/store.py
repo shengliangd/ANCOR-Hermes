@@ -10,6 +10,7 @@ import time
 from uuid import uuid4
 
 from .views import TITLE_MAX_CHARS
+from .changes import Changes
 
 
 STABLE_STATUSES = frozenset({'active', 'paused'})
@@ -19,7 +20,7 @@ TRANSITION_TARGETS = frozenset({'active', 'paused', 'cancelled', 'invalidated'})
 NOTE_MAX_CHARS = 16000
 
 
-class Store:
+class Store(Changes):
     def __init__(self, path):
         self.path = str(path)
         with self._transaction() as db:
@@ -60,6 +61,7 @@ class Store:
             self._ensure_columns(db, 'requirements', {'target_status': 'TEXT'})
             self._drop_retired_columns(db)
             self._migrate_legacy_acceptances(db)
+            self._init_changes(db)
 
     @staticmethod
     def _migrate_legacy_acceptances(db):
@@ -291,7 +293,7 @@ class Store:
             required = 'active' if action == 'pause' else 'paused'
             if not self._stable(requirement) or requirement['status'] != required:
                 raise ValueError(f'{action} requires a stable {required} requirement')
-            db.execute('UPDATE requirements SET target_status=? WHERE id=?',
+            db.execute('UPDATE requirements SET target_status=?,control_version=control_version+1 WHERE id=?',
                        (target, requirement['id']))
             self._add_event(db, 'requirement.transition_requested', {
                 'requirement_id': requirement['id'], 'command_id': command_id,
@@ -326,9 +328,13 @@ class Store:
                 'AND reason IS ? AND confirmation_reference IS NULL '
                 'ORDER BY rowid LIMIT 1',
                 (stored_action, requirement_id, feedback)).fetchone()
+            verification = self._latest_verification(db, requirement_id)
             if existing:
-                return dict(existing)
+                binding = db.execute('SELECT * FROM command_bindings WHERE command_id=?', (existing['id'],)).fetchone()
+                if binding and binding['generation'] == requirement['generation'] and binding['verification_id'] == verification['id']:
+                    return dict(existing)
             identifier = uuid4().hex
+            db.execute('INSERT INTO command_bindings VALUES(?,?,?)', (identifier, requirement['generation'], verification['id']))
             db.execute('INSERT INTO requirement_commands VALUES (?, ?, ?, ?, ?, NULL)',
                        (identifier, stored_action, requirement_id, feedback, None))
             return dict(db.execute('SELECT * FROM requirement_commands WHERE id=?',
@@ -354,8 +360,11 @@ class Store:
             verification = self._latest_verification(db, requirement['id'])
             if verification is None:
                 raise ValueError('coordinator verification evidence is missing')
+            binding = db.execute('SELECT * FROM command_bindings WHERE command_id=?', (command_id,)).fetchone()
+            if not binding or binding['generation'] != requirement['generation'] or binding['verification_id'] != verification['id']:
+                raise RuntimeError('acceptance proposal is stale; prepare a new decision')
             if command['action'] == 'human_accept':
-                db.execute("UPDATE requirements SET status='accepted', target_status=NULL "
+                db.execute("UPDATE requirements SET status='accepted', target_status=NULL,control_version=control_version+1 "
                            'WHERE id=?', (requirement['id'],))
                 self._add_event(
                     db, 'requirement.accepted',
@@ -366,7 +375,7 @@ class Store:
                      'command_id': command_id},
                     acknowledged=True)
             else:
-                db.execute("UPDATE requirements SET status='active', target_status=NULL "
+                db.execute("UPDATE requirements SET status='active', target_status=NULL,control_version=control_version+1 "
                            'WHERE id=?', (requirement['id'],))
                 self._add_event(
                     db, 'requirement.changes_requested',
@@ -404,7 +413,7 @@ class Store:
             raise KeyError(note_id)
         return dict(row)
 
-    def add_note(self, requirement_id, body):
+    def add_note(self, requirement_id, body, *, actor='ancor-coordinator'):
         body = self._note_body(body)
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
@@ -416,7 +425,9 @@ class Store:
                 '(id, requirement_id, body, revision, created_at, updated_at, deleted_at) '
                 'VALUES (?, ?, ?, 1, ?, ?, NULL)',
                 (identifier, requirement_id, body, now, now))
-            return self._get_note(db, requirement_id, identifier)
+            note = self._get_note(db, requirement_id, identifier)
+            self._note_history(db, note, actor)
+            return note
 
     def get_note(self, requirement_id, note_id):
         with self._transaction() as db:
@@ -440,25 +451,31 @@ class Store:
                 (requirement_id, limit)).fetchall()
             return {'items': [dict(row) for row in rows], 'count': total}
 
-    def update_note(self, requirement_id, note_id, body):
+    def update_note(self, requirement_id, note_id, body, *, expected_revision=None, actor='ancor-coordinator'):
         body = self._note_body(body)
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
             self._require_note_mutable(requirement)
             note = self._get_note(db, requirement_id, note_id)
+            if expected_revision is not None and note['revision'] != expected_revision:
+                raise RuntimeError('note version changed')
             if note['deleted_at'] is not None:
                 raise ValueError('deleted note cannot be updated')
             db.execute(
                 'UPDATE requirement_notes SET body=?, revision=revision+1, updated_at=? '
                 'WHERE id=? AND requirement_id=?',
                 (body, int(time.time()), note_id, requirement_id))
-            return self._get_note(db, requirement_id, note_id)
+            note = self._get_note(db, requirement_id, note_id)
+            self._note_history(db, note, actor)
+            return note
 
-    def delete_note(self, requirement_id, note_id):
+    def delete_note(self, requirement_id, note_id, *, expected_revision=None, actor='ancor-coordinator'):
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
             self._require_note_mutable(requirement)
             note = self._get_note(db, requirement_id, note_id)
+            if expected_revision is not None and note['revision'] != expected_revision:
+                raise RuntimeError('note version changed')
             if note['deleted_at'] is not None:
                 return note
             now = int(time.time())
@@ -466,7 +483,9 @@ class Store:
                 'UPDATE requirement_notes SET deleted_at=?, revision=revision+1, updated_at=? '
                 'WHERE id=? AND requirement_id=?',
                 (now, now, note_id, requirement_id))
-            return self._get_note(db, requirement_id, note_id)
+            note = self._get_note(db, requirement_id, note_id)
+            self._note_history(db, note, actor)
+            return note
 
     @staticmethod
     def _event(row):
@@ -530,7 +549,7 @@ class Store:
                 replacement_ids = json.loads(draft['replacement_of'])
             bases = self._require_replacement_bases(db, replacement_ids)
             for base in bases:
-                db.execute("UPDATE requirements SET target_status = 'invalidated' WHERE id = ?",
+                db.execute("UPDATE requirements SET target_status = 'invalidated',control_version=control_version+1 WHERE id = ?",
                            (base['id'],))
             identifier = uuid4().hex
             status = 'pending' if bases else 'active'
@@ -667,6 +686,11 @@ class Store:
                 'requirement.activated' if target == 'active' else
                 'requirement.cancelled' if target == 'cancelled' else
                 'requirement.invalidated')
+        requested = self._latest_transition_request(db, requirement_id, target)
+        if requested and requested.get('change_id'):
+            for key in ('command_id', 'reason', 'summary', 'confirmation_reference'):
+                payload.pop(key, None)
+            payload.update({key: requested[key] for key in ('change_id', 'reason', 'confirmation_reference') if key in requested})
         return kind, payload
 
     @staticmethod
@@ -693,7 +717,7 @@ class Store:
                 raise RuntimeError('replacement bases are not yet invalidated')
         kind, payload = self._transition_event(db, requirement, target)
         cursor = db.execute(
-            'UPDATE requirements SET status=?, target_status=NULL '
+            'UPDATE requirements SET status=?, target_status=NULL, control_version=control_version+1 '
             'WHERE id=? AND status=? AND target_status=?',
             (target, requirement['id'], requirement['status'], target))
         if cursor.rowcount != 1:
@@ -701,19 +725,23 @@ class Store:
         self._add_event(db, kind, payload)
         return self._get(db, 'requirements', requirement['id'])
 
-    def submit_acceptance(self, requirement_id, evidence):
+    def submit_acceptance(self, requirement_id, evidence, *, generation=None):
         """Record coordinator verification and wait for the human's final decision."""
         self._text(evidence)
         with self._transaction() as db:
             requirement = self._get(db, 'requirements', requirement_id)
             if requirement['status'] != 'active' or requirement['target_status'] is not None:
                 raise ValueError('requirement is not stably active')
+            if generation is not None and requirement['generation'] != generation:
+                raise RuntimeError('requirement changed during verification')
+            if requirement['content_mode'] == 'points':
+                self._check_verification(db, requirement, evidence)
             event = self._add_event(
                 db, 'requirement.verified',
                 {'requirement_id': requirement_id, 'evidence': evidence,
-                 'status': AWAITING_ACCEPTANCE})
-            db.execute('UPDATE requirements SET status=? WHERE id=?',
-                       (AWAITING_ACCEPTANCE, requirement_id))
+                 'generation': requirement['generation'], 'status': AWAITING_ACCEPTANCE})
+            db.execute('UPDATE requirements SET status=?,verification_id=? WHERE id=?',
+                       (AWAITING_ACCEPTANCE, event['id'], requirement_id))
             # Verification itself needs no coordinator follow-up. Keeping this
             # audit event acknowledged prevents a redundant wake while the
             # requirement waits for the human gate.
@@ -743,7 +771,7 @@ class Store:
             verification = self._latest_verification(db, requirement_id)
             if verification is None:
                 raise ValueError('coordinator verification evidence is missing')
-            db.execute("UPDATE requirements SET status='accepted', target_status=NULL "
+            db.execute("UPDATE requirements SET status='accepted', target_status=NULL,control_version=control_version+1 "
                        'WHERE id=?', (requirement_id,))
             self._add_event(
                 db, 'requirement.accepted',
@@ -768,7 +796,7 @@ class Store:
             verification = self._latest_verification(db, requirement_id)
             if verification is None:
                 raise ValueError('coordinator verification evidence is missing')
-            db.execute("UPDATE requirements SET status='active', target_status=NULL "
+            db.execute("UPDATE requirements SET status='active', target_status=NULL,control_version=control_version+1 "
                        'WHERE id=?', (requirement_id,))
             self._add_event(
                 db, 'requirement.changes_requested',
@@ -785,7 +813,7 @@ class Store:
         if any(not self._stable(row) for row in rows):
             raise ValueError('all requirements must be stable active or paused')
         for row in rows:
-            db.execute("UPDATE requirements SET target_status = 'cancelled' WHERE id = ?",
+            db.execute("UPDATE requirements SET target_status = 'cancelled',control_version=control_version+1 WHERE id = ?",
                        (row['id'],))
             self._add_event(db, 'requirement.transition_requested', {
                 'requirement_id': row['id'], 'from_status': row['status'],

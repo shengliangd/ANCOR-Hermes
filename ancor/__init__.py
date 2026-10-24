@@ -4,6 +4,9 @@ import hashlib
 import json
 import logging
 
+from .atomic_tools import question_ref
+from .views import completion_id
+
 from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
                     actionable_notifications, attention_items, awaiting_acceptances,
                     bounded_latest, collection, conditions_with_state, draft_summary,
@@ -20,6 +23,11 @@ _SCAN_CONNECTION_POLL_SECONDS = 1.0
 
 
 _ACTION_FIELDS = {
+    'ancor_change': {'propose': ['input', 'operations'], 'get': ['change_id'], 'history': ['requirement_id']},
+    'ancor_question': {'list': [], 'get': ['id'], 'create': ['requirement_id', 'id', 'body', 'reason'],
+                       'withdraw': ['id', 'reason']},
+    'ancor_reconcile': {'get': ['requirement_id'], 'review': ['requirement_id', 'generation', 'coverage_reason'],
+                        'finish': ['requirement_id', 'generation', 'task_id']},
     'ancor_requirement': {
         'draft': ['title', 'brief'],
         'confirm': ['draft_id'],
@@ -59,6 +67,7 @@ _ACTION_FIELDS = {
         'replace': ['wake_id', 'reason', 'due_at'],
     },
     'ancor_acceptance': {
+        'verify': ['requirement_id', 'evidence'],
         'accept': ['requirement_id', 'evidence'],
         'reject': ['requirement_id', 'reason'],
     },
@@ -68,6 +77,10 @@ _ACTION_FIELDS = {
         'add': ['requirement_id', 'body'],
         'update': ['requirement_id', 'note_id', 'body'],
         'delete': ['requirement_id', 'note_id'],
+        'append': ['requirement_id', 'body'],
+        'replace': ['requirement_id', 'note_id', 'body'],
+        'invalidate': ['requirement_id', 'note_id'],
+        'history': ['requirement_id', 'note_id'],
     },
 }
 
@@ -127,7 +140,7 @@ def _validate_action_request(name, args):
     if missing:
         return _invalid_request(name, action, missing=missing)
     if name == 'ancor_board' and action == 'edit':
-        editable = ['title', 'body', 'priority']
+        editable = ['title', 'body', 'priority', 'contract']
         if not any(field in args and args[field] is not None
                    and not (isinstance(args[field], str) and not args[field].strip())
                    for field in editable):
@@ -405,6 +418,11 @@ def register(ctx, *, scan_runner=None):
                                  if (event.get('payload') or {}).get('requirement_id') == requirement_id]
             selected_notifications = notification_selection(relevant, notification_limit)
             result = {
+                'content': service.store.content(requirement_id),
+                'grants': collection(service.store.active_grants(requirement_id)),
+                'coordination': service.store.coordination(requirement_id),
+                'questions': collection([question_ref(q)
+                    for q in service.store.questions(requirement_id) if q['state'] == 'open']),
                 'requirement': requirement_detail(
                     requirement, drafts_by_id.get(requirement['draft_id'])),
                 'tasks': collection(
@@ -579,8 +597,8 @@ def register(ctx, *, scan_runner=None):
                 req = service.store.get_requirement(requirement_id)
                 if req['status'] != 'awaiting_acceptance':
                     raise ValueError('completion requires a requirement awaiting human acceptance')
-                if identifier != 'accept:' + req['id']:
-                    raise ValueError('completion id must be accept:<requirement_id>')
+                if identifier != completion_id(req):
+                    raise ValueError('completion id must be ' + completion_id(req))
             if args['kind'] == 'question':
                 if not task_id:
                     raise ValueError('question requires requirement_id and task_id')
@@ -603,18 +621,25 @@ def register(ctx, *, scan_runner=None):
                         raise RuntimeError(
                             f'question requires a blocked task; {task_id} is '
                             f'{task.get("status")}')
+            if args['kind'] == 'question' and req['content_mode'] == 'points':
+                service.store.create_question(req['id'], identifier=identifier, body=args['message'],
+                    reason=args.get('reason') or 'Coordinator question', actor=ctx.profile_name, task_id=task_id)
             box.enqueue(identifier, args['kind'], args['message'], actor=ctx.profile_name,
                         requirement_id=requirement_id, task_id=task_id)
             return notification_detail(box.get(identifier))
         if action == 'withdraw':
             if not coordinator:
                 raise PermissionError('coordinator profile required to withdraw questions')
+            if any(q['id'] == identifier for q in service.store.questions()):
+                service.store.withdraw_question(identifier, args['reason'], ctx.profile_name)
             return notification_detail(box.withdraw(identifier, actor=ctx.profile_name,
                                                     reason=args['reason']))
         if action == 'respond':
             if not interactor:
                 raise PermissionError('interactor profile required to respond')
             existing = box.get(identifier)
+            if existing.get('requirement_id') and service.store.get_requirement(existing['requirement_id'])['content_mode'] == 'points':
+                raise ValueError('Use ancor_change with reply, content operations and resolve_question as appropriate')
             if existing['kind'] != 'question':
                 raise ValueError('not a question')
             if existing['answer'] is not None:
@@ -634,6 +659,8 @@ def register(ctx, *, scan_runner=None):
         if args['action'] != 'respond':
             return service.requirement(args)
         req = service.store.get_requirement(args['requirement_id'])
+        if req['content_mode'] == 'points':
+            raise ValueError('Use ancor_change propose to record structured requirement updates; respond is legacy-only')
         body = service.store._text(args['body'])
         # Foreground transcription is advisory input, never consent evidence.
         return service.store.add_event('requirement.response', {
@@ -646,7 +673,7 @@ def register(ctx, *, scan_runner=None):
         return operations.call(args)
 
     def acceptance(args, **_native):
-        if args['action'] == 'accept':
+        if args['action'] in {'accept', 'verify'}:
             operations.reconcile()
         return service.acceptance(args)
 
@@ -743,9 +770,10 @@ def register(ctx, *, scan_runner=None):
                  'requirement_id': {'type': 'string'}}, ['action', 'requirement_id']),
             'ancor_note': (
                 'Maintain requirement-scoped working notes across coordinator wakes. Notes are durable coordination memory, not requirement text, authorization, acceptance evidence, or a task contract. list returns bounded previews; get returns one full note. Every note carries created_at and updated_at Unix timestamps. add, update and delete require a stable active or paused requirement; delete is a soft delete and revisions are retained. Never store credentials or secrets.',
-                {'action': {'type': 'string', 'enum': ['list', 'get', 'add', 'update', 'delete']},
+                {'action': {'type': 'string', 'enum': ['list', 'get', 'add', 'update', 'delete', 'append', 'replace', 'invalidate', 'history']},
                  'requirement_id': {'type': 'string'}, 'note_id': {'type': 'string'},
                  'body': {'type': 'string'},
+                 'expected_revision': {'type': 'integer', 'minimum': 1},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'include_deleted': {'type': 'boolean'}},
                 ['action', 'requirement_id']),
@@ -776,6 +804,8 @@ def register(ctx, *, scan_runner=None):
                  'priority': {'type': 'integer'},
                  'parent_ids': {'type': 'array', 'items': {'type': 'string'}},
                  'hold': {'type': 'boolean'},
+                 'generation': {'type': 'integer', 'minimum': 1},
+                 'point_versions': {'type': 'array', 'items': {'type': 'string'}},
                  'status': {'type': 'string'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
                  'include_archived': {'type': 'boolean'},
@@ -808,13 +838,24 @@ def register(ctx, *, scan_runner=None):
                      'type': 'object',
                      'description': 'Required for verify/accept. Bind the exact stored requirement brief and independently verified artifacts to linked task IDs.',
                      'properties': {
-                         'brief': {'type': 'string', 'description': 'Exact stored requirement brief text.'},
+                         'brief': {'type': 'string', 'description': 'Exact stored legacy brief; structured requirements use generation and coverage.'},
+                         'generation': {'type': 'integer', 'minimum': 1},
+                         'coverage': {'type': 'array', 'items': {'type': 'object', 'properties': {
+                             'version_id': {'type': 'string'}, 'evidence': {'type': 'string'}},
+                             'required': ['version_id', 'evidence'], 'additionalProperties': False}},
                          **{field: {'type': 'array', 'minItems': 1,
                                     'items': {'type': 'string', 'pattern': r'\S'}}
                             for field in ('verification', 'artifacts', 'task_ids')}},
-                     'required': ['brief', 'verification', 'artifacts', 'task_ids']},
+                     'required': ['verification', 'artifacts', 'task_ids'],
+                     'anyOf': [{'required': ['brief']}, {'required': ['generation', 'coverage']}]},
                  'reason': {'type': 'string'}}, ['requirement_id', 'action']),
         }
+
+    if interactor or coordinator:
+        from .atomic_tools import interfaces
+        atomic_definitions, atomic_methods = interfaces(service, operations, interactor=interactor, coordinator=coordinator)
+        definitions.update(atomic_definitions)
+        methods.update(atomic_methods)
 
     coordination_observed = False
     for name, (description, properties, required) in definitions.items():
@@ -829,6 +870,10 @@ def register(ctx, *, scan_runner=None):
                 allowed = (interactor_profile if interactor else coordinator_profile)
                 if ctx.profile_name != allowed:
                     raise PermissionError('ANCOR role profile required')
+                if _name == 'ancor_change' and coordinator and args.get('action') not in {'get', 'history'}:
+                    raise PermissionError('coordinator may only read changes')
+                if _name == 'ancor_question' and interactor and args.get('action') not in {'list', 'get'}:
+                    raise PermissionError('interactor may only read questions; answer via confirmed change')
                 if _name == 'ancor_requirement' and coordinator and args.get('action') != 'advance':
                     raise PermissionError('coordinator may only advance requirements')
                 mutation = (_name == 'ancor_acceptance'

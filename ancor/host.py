@@ -15,6 +15,7 @@ import time
 
 from .board import NativeBoard
 from .runtime import Coordinator
+from .views import completion_id
 from .store import Store
 from .views import (actionable_notifications, collection,
                     conditions_with_state, is_terminal_task,
@@ -192,7 +193,7 @@ class Host:
         """Close questions and completion notices whose structural reason disappeared."""
         from .notification import NotificationOutbox
         path = Path(self.store.path + '.notifications.db')
-        if not path.exists():
+        if not path.exists() and not self.store.questions():
             return []
         snapshot = snapshot or self.store.snapshot()
         requirements = {row['id']: row for row in snapshot['requirements']}
@@ -200,6 +201,8 @@ class Host:
         box = self.notification_outbox()
         if box is None:
             return NotificationOutbox.read_existing(path)
+        self.store.sync_questions(box)
+        managed = {q['id']: q for q in self.store.questions()}
         decisions = {}
         for row in box.list():
             if row['kind'] != 'question' or row['answer'] is not None or row['closed_at'] is not None:
@@ -221,6 +224,8 @@ class Host:
             task = tasks.get(row.get('task_id'))
             if task is not None and task.get('status') != 'blocked':
                 decisions[row['id']] = 'task_not_blocked'
+                if row['id'] in managed:
+                    self.store.withdraw_question(row['id'], 'task_not_blocked', 'host')
         if decisions:
             box.close_questions(decisions, closed_by='host')
             log.info('ANCOR closed %d stale question(s): %s', len(decisions),
@@ -237,6 +242,8 @@ class Host:
                         row.get('requirement_id'), 'requirement_missing')
                 else:
                     orphaned_completions[row['id']] = 'requirement_missing'
+            elif requirement.get('content_mode') == 'points' and row['id'] != completion_id(requirement):
+                orphaned_completions[row['id']] = 'verification_superseded'
             elif requirement.get('status') != 'awaiting_acceptance' or requirement.get('target_status'):
                 completion_requirements.setdefault(
                     row.get('requirement_id'), 'completion_no_longer_pending')
@@ -275,6 +282,16 @@ class Host:
                               'Reuse task keys and notification IDs; never resend sending/uncertain notices. '
                               'No automatic stop: the coordinator decides how to resolve invalidated tasks.'})
             self.startup = False
+        pending = self.store.pending_events()
+        for work in self.store.pending_coordination():
+            key = f"coordination:{work['id']}:{work['generation']}"
+            existing = next((e for e in pending if e.get('source_key') == key), None)
+            if existing is None:
+                event = self.store.add_event('requirement.reconcile_needed', {
+                    'requirement_id': work['id'], 'generation': work['generation']}, source_key=key)
+                if event['acknowledged']:
+                    with self.store._transaction() as db:
+                        db.execute('UPDATE events SET acknowledged=0 WHERE id=?', (event['id'],))
         pending = self.store.pending_events()
         state = self.state()
         conditions = state.get('conditions')
@@ -388,6 +405,10 @@ class Host:
             'requirements': collection(
                 [requirement_ref(r, progression.get(r['id'])) for r in requirements]),
             'invalidated_tasks': collection(self.invalidated_tasks(data)),
+            'pending_coordination': collection(self.store.pending_coordination()),
+            'questions': collection([{'id': q['id'], 'requirement_id': q['requirement_id'],
+                'task_id': q['task_id'], 'revision': q['revision'], 'state': q['state']}
+                for q in self.store.questions() if q['state'] == 'open']),
             'conditions': collection(conditions),
             'notifications': collection(
                 [notification_summary(row) for row in selected],
