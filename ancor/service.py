@@ -109,6 +109,15 @@ class Service:
 
     def change_presentation(self, proposal):
         identifier = proposal['id']
+        saved = self.store.change_presentation_args(identifier)
+        if saved is not None:
+            text = saved['questions'][0]['question']
+            path = self._write_presentation(identifier, text)
+            return {**proposal, 'presentation': text, 'draft_file': path, 'clarify_args': saved,
+                    'next_step': 'Present the human-readable confirmation unchanged through native clarify. '
+                                 'Do not expose internal IDs, base versions, or operation JSON as the user-facing explanation. '
+                                 'Only exact native confirmation commits this proposal.'}
+        # Pending proposals from older releases retain their exact original presentation.
         text = (f"ANCOR change {identifier}\nRequirement: {proposal['requirement_id']}\n"
                 + 'Base versions: ' + json.dumps(proposal['base'], ensure_ascii=False, sort_keys=True)
                 + '\nOriginal input:\n' + str(proposal['source'].get('input', ''))
@@ -310,7 +319,12 @@ class Service:
         if tool_name != 'clarify':
             return
         encoded = json.dumps(args, sort_keys=True, ensure_ascii=False)
-        if 'ANCOR change ' in encoded:
+        questions = args.get('questions') if isinstance(args, dict) else None
+        question_text = questions[0].get('question', '') if isinstance(questions, list) and questions and isinstance(questions[0], dict) else ''
+        human_reference = re.search(r'\n确认单：([0-9a-f]{12})$', question_text) if isinstance(question_text, str) else None
+        if human_reference:
+            kind, pattern = 'change', None
+        elif 'ANCOR change ' in encoded:
             kind, pattern = 'change', r'Apply ANCOR change ([0-9a-f]{32})'
         elif 'ANCOR human acceptance ' in encoded:
             kind, pattern = 'human_decision', r'ANCOR human acceptance ([0-9a-f]{32})'
@@ -329,10 +343,13 @@ class Service:
         try:
             if not session_id or not tool_call_id:
                 raise ValueError('formal confirmation requires session and tool-call identity')
-            matches = re.findall(pattern, encoded)
-            if len(matches) != 1:
-                raise ValueError('exact ANCOR confirmation choice required')
-            target = matches[0]
+            if human_reference:
+                target = self.store.change_by_reference(human_reference.group(1))
+            else:
+                matches = re.findall(pattern, encoded)
+                if len(matches) != 1:
+                    raise ValueError('exact ANCOR confirmation choice required')
+                target = matches[0]
             if kind == 'change':
                 expected = self.change_presentation(self.store.get_change(target))['clarify_args']
             elif kind == 'human_decision':
@@ -389,7 +406,7 @@ class Service:
                     raise RuntimeError(f"clarify failed: {payload['error']}")
                 if kind == 'change':
                     question = self.change_presentation(self.store.get_change(target))['clarify_args']['questions'][0]
-                    answer = f'Apply ANCOR change {target}'
+                    answer = question['choices'][1]
                 elif kind == 'draft':
                     question = self.presentation(self.store.get_draft(target))['clarify_args']['questions'][0]
                     answer = f'Confirm ANCOR draft {target}'

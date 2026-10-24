@@ -31,7 +31,9 @@ def interfaces(service, operations, *, interactor, coordinator):
             'Create an immutable atomic change proposal, inspect it, or page committed history. '
             'Use this for structured creation, in-place point changes, answers, lifecycle decisions and grants. '
             'Propose requires exact original input and current base versions from requirement detail; '
-            'only exact native clarify confirmation commits. Title changes do not alter content generation. '
+            'only exact native clarify confirmation commits. Present the returned human-readable confirmation unchanged; '
+            'do not narrate operation JSON, base versions or internal IDs to the user. '
+            'Title changes do not alter content generation. '
             'Arrays are unordered semantically. Never invent requirements or authorization. '
             'A reply alone does not change requirements; include point operations and resolve_question as appropriate. '
             'Legacy briefs require explicit convert with complete fields. Coordinator can only read history/get.',

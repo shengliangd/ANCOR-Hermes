@@ -39,6 +39,8 @@ class Changes:
                 base TEXT NOT NULL, operations TEXT NOT NULL, source TEXT NOT NULL,
                 actor TEXT NOT NULL, created_at REAL NOT NULL,
                 committed_at REAL, confirmation_reference TEXT, result TEXT);
+            CREATE TABLE IF NOT EXISTS change_presentations (
+                change_id TEXT PRIMARY KEY, reference TEXT UNIQUE NOT NULL, args TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS changes_scope ON changes(requirement_id, committed_at);
             CREATE TABLE IF NOT EXISTS point_versions (
                 version_id TEXT PRIMARY KEY, point_id TEXT NOT NULL,
@@ -110,6 +112,18 @@ class Changes:
         for field in ('base', 'operations', 'source', 'result'):
             row[field] = json.loads(row[field]) if row[field] is not None else None
         return row
+
+    def change_presentation_args(self, cid):
+        with self._transaction() as db:
+            row = db.execute('SELECT args FROM change_presentations WHERE change_id=?', (cid,)).fetchone()
+            return json.loads(row['args']) if row else None
+
+    def change_by_reference(self, reference):
+        with self._transaction() as db:
+            row = db.execute('SELECT change_id FROM change_presentations WHERE reference=?', (reference,)).fetchone()
+            if row is None:
+                raise ValueError('unknown confirmation reference')
+            return row['change_id']
 
     def get_change(self, cid):
         with self._transaction() as db:
@@ -183,6 +197,9 @@ class Changes:
             finally:
                 db.execute('ROLLBACK TO validate_change')
                 db.execute('RELEASE validate_change')
+            from .presentation import change_confirmation
+            presentation = change_confirmation(self, db, rid, operations, cid)
+            db.execute('INSERT INTO change_presentations VALUES(?,?,?)', (cid, cid[:12], encode(presentation)))
             db.execute('INSERT INTO changes VALUES(?,?,?,?,?,?,?,NULL,NULL,NULL)',
                        (cid, rid, encode(expected), encode(operations), encode(source), actor, time.time()))
             return self._change(db, cid)
