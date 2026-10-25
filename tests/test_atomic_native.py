@@ -30,7 +30,7 @@ def test_native_block_edit_resume_preserves_other_work(tmp_path, monkeypatch):
         assert kb.claim_task(conn, affected)
         assert kb.claim_task(conn, unrelated)
         before = asdict(kb.get_task(conn, unrelated))
-        assert kb.block_task(conn, affected, reason='Requirement revision', kind='needs_input')
+        assert kb.block_task(conn, affected, reason='Request revision', kind='needs_input')
         require_quiescence({'runs': [asdict(r) for r in kb.list_runs(conn, affected)]})
         assert kb.edit_task(conn, affected, body='new contract')
         assert kb.unblock_task(conn, affected)

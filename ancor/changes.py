@@ -1,6 +1,6 @@
 """Versioned points and transactional changes, independent of transport and prompts.
 
-The requirements row is a current projection; versions and committed changes are
+The requests row is a current projection; versions and committed changes are
 retained. Legacy briefs remain authoritative until an explicitly confirmed convert.
 """
 import json
@@ -24,7 +24,7 @@ def envelope(items, total=None):
 
 class Changes:
     def _init_changes(self, db):
-        self._ensure_columns(db, 'requirements', {
+        self._ensure_columns(db, 'requests', {
             'content_mode': "TEXT NOT NULL DEFAULT 'legacy'",
             'generation': 'INTEGER NOT NULL DEFAULT 1',
             'title_version': 'INTEGER NOT NULL DEFAULT 1',
@@ -35,16 +35,16 @@ class Changes:
         })
         db.executescript('''
             CREATE TABLE IF NOT EXISTS changes (
-                id TEXT PRIMARY KEY, requirement_id TEXT NOT NULL,
+                id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
                 base TEXT NOT NULL, operations TEXT NOT NULL, source TEXT NOT NULL,
                 actor TEXT NOT NULL, created_at REAL NOT NULL,
                 committed_at REAL, confirmation_reference TEXT, result TEXT);
             CREATE TABLE IF NOT EXISTS change_presentations (
                 change_id TEXT PRIMARY KEY, reference TEXT UNIQUE NOT NULL, args TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS changes_scope ON changes(requirement_id, committed_at);
+            CREATE INDEX IF NOT EXISTS changes_scope ON changes(request_id, committed_at);
             CREATE TABLE IF NOT EXISTS point_versions (
                 version_id TEXT PRIMARY KEY, point_id TEXT NOT NULL,
-                requirement_id TEXT NOT NULL, field TEXT NOT NULL, body TEXT NOT NULL,
+                request_id TEXT NOT NULL, field TEXT NOT NULL, body TEXT NOT NULL,
                 revision INTEGER NOT NULL, created_at REAL NOT NULL,
                 created_by TEXT NOT NULL, change_id TEXT NOT NULL,
                 replaces TEXT, invalidated_at REAL, invalidated_by TEXT,
@@ -53,7 +53,7 @@ class Changes:
             CREATE UNIQUE INDEX IF NOT EXISTS point_current
                 ON point_versions(point_id) WHERE invalidated_at IS NULL;
             CREATE TABLE IF NOT EXISTS questions (
-                id TEXT PRIMARY KEY, requirement_id TEXT NOT NULL, task_id TEXT,
+                id TEXT PRIMARY KEY, request_id TEXT NOT NULL, task_id TEXT,
                 body TEXT NOT NULL, reason TEXT NOT NULL, point_ids TEXT NOT NULL,
                 state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
                 created_at REAL NOT NULL, created_by TEXT NOT NULL,
@@ -64,21 +64,21 @@ class Changes:
             CREATE TABLE IF NOT EXISTS question_delivery (
                 question_id TEXT PRIMARY KEY, forwarded INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS grants (
-                id TEXT PRIMARY KEY, requirement_id TEXT NOT NULL, action TEXT NOT NULL,
+                id TEXT PRIMARY KEY, request_id TEXT NOT NULL, action TEXT NOT NULL,
                 target TEXT NOT NULL, scope TEXT NOT NULL, change_id TEXT NOT NULL,
                 created_at REAL NOT NULL, revoked_change_id TEXT);
             CREATE TABLE IF NOT EXISTS task_basis (
-                requirement_id TEXT NOT NULL, task_id TEXT NOT NULL,
+                request_id TEXT NOT NULL, task_id TEXT NOT NULL,
                 generation INTEGER NOT NULL, point_versions TEXT NOT NULL,
-                PRIMARY KEY(requirement_id, task_id));
+                PRIMARY KEY(request_id, task_id));
             CREATE TABLE IF NOT EXISTS impact_reviews (
-                requirement_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                request_id TEXT NOT NULL, generation INTEGER NOT NULL,
                 task_id TEXT NOT NULL, decision TEXT NOT NULL, reason TEXT NOT NULL,
                 state TEXT NOT NULL, updated_at REAL NOT NULL,
-                PRIMARY KEY(requirement_id, generation, task_id));
+                PRIMARY KEY(request_id, generation, task_id));
             CREATE TABLE IF NOT EXISTS coverage_reviews (
-                requirement_id TEXT NOT NULL, generation INTEGER NOT NULL,
-                reason TEXT NOT NULL, PRIMARY KEY(requirement_id, generation));
+                request_id TEXT NOT NULL, generation INTEGER NOT NULL,
+                reason TEXT NOT NULL, PRIMARY KEY(request_id, generation));
             CREATE TABLE IF NOT EXISTS command_bindings (
                 command_id TEXT PRIMARY KEY, generation INTEGER NOT NULL,
                 verification_id INTEGER NOT NULL);
@@ -91,17 +91,17 @@ class Changes:
         # Only extant note bodies can be recovered from pre-versioning databases.
         db.execute('''INSERT OR IGNORE INTO note_versions
             SELECT id,revision,body,updated_at,deleted_at,'legacy_import',1
-            FROM requirement_notes''')
+            FROM request_notes''')
 
     def _points(self, db, rid, history=False):
-        query = 'SELECT * FROM point_versions WHERE requirement_id=?'
+        query = 'SELECT * FROM point_versions WHERE request_id=?'
         if not history:
             query += ' AND invalidated_at IS NULL'
         return [dict(row) for row in db.execute(query + ' ORDER BY position, point_id, revision', (rid,))]
 
     def content(self, rid, *, history=False):
         with self._transaction() as db:
-            req = self._get(db, 'requirements', rid)
+            req = self._get(db, 'requests', rid)
             points = self._points(db, rid, history)
             return {'mode': req['content_mode'], 'generation': req['generation'],
                     'fields': {f: [p for p in points if p['field'] == f] for f in FIELDS},
@@ -133,8 +133,8 @@ class Changes:
         if type(limit) is not int or not 1 <= limit <= 200:
             raise ValueError('limit must be between 1 and 200')
         with self._transaction() as db:
-            self._get(db, 'requirements', rid)
-            rows = db.execute('SELECT id FROM changes WHERE requirement_id=? AND committed_at IS NOT NULL '
+            self._get(db, 'requests', rid)
+            rows = db.execute('SELECT id FROM changes WHERE request_id=? AND committed_at IS NOT NULL '
                               'ORDER BY committed_at DESC, rowid DESC', (rid,)).fetchall()
             ids = [r['id'] for r in rows]
             if not include_notes:
@@ -176,20 +176,20 @@ class Changes:
         if len(lifecycle) > 1:
             raise ValueError('at most one lifecycle action per change')
         if any(op['op'] == 'accept' for op in operations) and any(op['op'] in POINT_OPS | {'convert'} for op in operations):
-            raise ValueError('cannot accept and change requirements together')
+            raise ValueError('cannot accept and change requests together')
         cid = uuid4().hex
         creating = operations[0]['op'] == 'create'
         rid = rid or (uuid4().hex if creating else None)
         with self._transaction() as db:
             if creating:
-                if db.execute('SELECT 1 FROM requirements WHERE id=?', (rid,)).fetchone():
-                    raise ValueError('requirement already exists')
+                if db.execute('SELECT 1 FROM requests WHERE id=?', (rid,)).fetchone():
+                    raise ValueError('request already exists')
                 expected = {}
             else:
-                req = self._get(db, 'requirements', rid)
+                req = self._get(db, 'requests', rid)
                 expected = {key: req[key] for key in self._touched_versions(operations)}
                 if not isinstance(base, dict) or any(type(base.get(k)) is not int or base[k] != v for k, v in expected.items()):
-                    raise RuntimeError('stale or missing base versions; read current requirement and propose again')
+                    raise RuntimeError('stale or missing base versions; read current request and propose again')
             # Validate the exact entire batch in a rollback-only savepoint.
             db.execute('SAVEPOINT validate_change')
             try:
@@ -225,17 +225,17 @@ class Changes:
             change = self._change(db, cid)
             if change['committed_at'] is not None:
                 return change['result']
-            rid = change['requirement_id']
+            rid = change['request_id']
             if change['base']:
-                req = self._get(db, 'requirements', rid)
+                req = self._get(db, 'requests', rid)
                 if any(req[key] != value for key, value in change['base'].items()):
                     raise RuntimeError('change conflicts with current versions; propose and confirm again')
             result = self._apply_operations(db, rid, change['operations'], cid,
                                             change['actor'], confirmation_reference)
             db.execute('UPDATE changes SET committed_at=?, confirmation_reference=?, result=? WHERE id=?',
                        (time.time(), confirmation_reference, encode(result), cid))
-            self._add_event(db, 'requirement.changed', {
-                'requirement_id': rid, 'change_id': cid,
+            self._add_event(db, 'request.changed', {
+                'request_id': rid, 'change_id': cid,
                 'generation': result['generation'],
                 'content_changed': result['content_changed']}, source_key='change:' + cid,
                 acknowledged=not result['needs_coordination'])
@@ -248,12 +248,12 @@ class Changes:
             op = operations[0]
             title = self._title(op['title'])
             db.execute('INSERT INTO drafts(id,title,brief) VALUES(?,?,?)', (cid, title, ''))
-            db.execute('INSERT INTO requirements(id,draft_id,title,brief,confirmation_reference,status,content_mode) '
+            db.execute('INSERT INTO requests(id,draft_id,title,brief,confirmation_reference,status,content_mode) '
                        "VALUES(?,?,?,'',?,'active','points')", (rid, cid, title, reference))
-        req = self._get(db, 'requirements', rid)
+        req = self._get(db, 'requests', rid)
         title_only = all(op['op'] == 'title' for op in operations)
         if not title_only and (req['status'] in {'cancelled', 'invalidated', 'accepted'} or req['target_status'] is not None):
-            raise ValueError('requirement is terminal or transitioning')
+            raise ValueError('request is terminal or transitioning')
         content_changed, title_changed, control_changed = creating, False, False
         significant = False
         touched_points = set()
@@ -262,21 +262,21 @@ class Changes:
             kind = op['op']
             if kind == 'create':
                 if not creating or index != 0:
-                    raise ValueError('create must be the first operation on a new requirement')
+                    raise ValueError('create must be the first operation on a new request')
                 self._append_fields(db, rid, op.get('fields', {}), cid, actor, now)
             elif kind == 'convert':
                 if req['content_mode'] != 'legacy' or content_changed:
-                    raise ValueError('convert requires a legacy requirement')
+                    raise ValueError('convert requires a legacy request')
                 self._append_fields(db, rid, op['fields'], cid, actor, now)
-                db.execute("UPDATE requirements SET content_mode='points' WHERE id=?", (rid,))
+                db.execute("UPDATE requests SET content_mode='points' WHERE id=?", (rid,))
                 content_changed = True
             elif kind in POINT_OPS:
-                if self._get(db, 'requirements', rid)['content_mode'] != 'points':
+                if self._get(db, 'requests', rid)['content_mode'] != 'points':
                     raise ValueError('convert legacy brief before editing points')
                 if kind == 'append':
                     self._append_point(db, rid, op['field'], op['body'], cid, actor, now)
                 else:
-                    point = db.execute('SELECT * FROM point_versions WHERE version_id=? AND requirement_id=? '
+                    point = db.execute('SELECT * FROM point_versions WHERE version_id=? AND request_id=? '
                                        'AND invalidated_at IS NULL', (op['version_id'], rid)).fetchone()
                     if point is None or point['point_id'] in touched_points:
                         raise RuntimeError('point version is no longer current or modified twice')
@@ -289,12 +289,12 @@ class Changes:
                                            previous=point)
                 content_changed = True
             elif kind == 'title':
-                db.execute('UPDATE requirements SET title=? WHERE id=?', (self._title(op['title']), rid))
+                db.execute('UPDATE requests SET title=? WHERE id=?', (self._title(op['title']), rid))
                 title_changed = True
             elif kind in {'reply', 'resolve_question'}:
                 q = self._get(db, 'questions', op['question_id'])
                 initial_revision = question_revisions.setdefault(q['id'], q['revision'])
-                if q['requirement_id'] != rid or q['state'] != 'open' or initial_revision != op['revision']:
+                if q['request_id'] != rid or q['state'] != 'open' or initial_revision != op['revision']:
                     raise RuntimeError('question changed or is closed')
                 if kind == 'reply':
                     db.execute('INSERT INTO question_replies VALUES(?,?,?,?,?)',
@@ -306,24 +306,24 @@ class Changes:
                                'resolved_change_id=?,closed_reason=? WHERE id=?', (cid, op['reason'], q['id']))
                 significant = True
             elif kind in {'pause', 'resume', 'cancel'}:
-                current = self._get(db, 'requirements', rid)
+                current = self._get(db, 'requests', rid)
                 allowed = {'paused'} if kind == 'resume' else {'active'} if kind == 'pause' else {'active', 'paused', 'awaiting_acceptance'}
                 if current['status'] not in allowed or current['target_status']:
-                    raise ValueError(f'{kind} requires a compatible stable requirement')
+                    raise ValueError(f'{kind} requires a compatible stable request')
                 target = {'pause': 'paused', 'resume': 'active', 'cancel': 'cancelled'}[kind]
                 self._text(op['reason'])
-                db.execute('UPDATE requirements SET target_status=? WHERE id=?', (target, rid))
-                self._add_event(db, 'requirement.transition_requested', {
-                    'requirement_id': rid, 'from_status': current['status'], 'target_status': target,
+                db.execute('UPDATE requests SET target_status=? WHERE id=?', (target, rid))
+                self._add_event(db, 'request.transition_requested', {
+                    'request_id': rid, 'from_status': current['status'], 'target_status': target,
                     'reason': op['reason'], 'change_id': cid, 'confirmation_reference': reference})
                 control_changed = significant = True
             elif kind == 'request_changes':
                 if req['status'] != 'awaiting_acceptance':
                     raise ValueError('request_changes requires awaiting acceptance')
-                self._add_event(db, 'requirement.changes_requested', {
-                    'requirement_id': rid, 'feedback': self._text(op['feedback']),
+                self._add_event(db, 'request.changes_requested', {
+                    'request_id': rid, 'feedback': self._text(op['feedback']),
                     'change_id': cid, 'confirmation_reference': reference})
-                db.execute("UPDATE requirements SET status='active' WHERE id=?", (rid,))
+                db.execute("UPDATE requests SET status='active' WHERE id=?", (rid,))
                 control_changed = significant = True
             elif kind == 'accept':
                 verification = self._latest_verification(db, rid)
@@ -331,9 +331,9 @@ class Changes:
                         or verification['id'] != op['verification_id']
                         or verification['payload'].get('generation', 1) != req['generation']):
                     raise RuntimeError('acceptance must bind the current verification and generation')
-                db.execute("UPDATE requirements SET status='accepted' WHERE id=?", (rid,))
-                self._add_event(db, 'requirement.accepted', {
-                    'requirement_id': rid, 'change_id': cid, 'generation': req['generation'],
+                db.execute("UPDATE requests SET status='accepted' WHERE id=?", (rid,))
+                self._add_event(db, 'request.accepted', {
+                    'request_id': rid, 'change_id': cid, 'generation': req['generation'],
                     'verification_event_id': verification['id'],
                     'evidence': verification['payload']['evidence'],
                     'confirmation_reference': reference}, acknowledged=True)
@@ -345,8 +345,8 @@ class Changes:
                 control_changed = significant = True
             elif kind == 'revoke':
                 grant = self._get(db, 'grants', op['grant_id'])
-                if grant['requirement_id'] != rid or grant['revoked_change_id'] is not None:
-                    raise ValueError('grant is not active on this requirement')
+                if grant['request_id'] != rid or grant['revoked_change_id'] is not None:
+                    raise ValueError('grant is not active on this request')
                 db.execute('UPDATE grants SET revoked_change_id=? WHERE id=?', (cid, grant['id']))
                 control_changed = significant = True
         if content_changed:
@@ -355,17 +355,17 @@ class Changes:
                 raise ValueError('at least one active outcome required')
             brief = '\n\n'.join(f'{field}:\n' + '\n'.join('- ' + p['body'] for p in points if p['field'] == field)
                                 for field in FIELDS if any(p['field'] == field for p in points))
-            db.execute('UPDATE requirements SET brief=?,generation=generation+? WHERE id=?',
+            db.execute('UPDATE requests SET brief=?,generation=generation+? WHERE id=?',
                        (brief, 0 if creating else 1, rid))
             if req['status'] == 'awaiting_acceptance':
-                db.execute("UPDATE requirements SET status='active' WHERE id=?", (rid,))
+                db.execute("UPDATE requests SET status='active' WHERE id=?", (rid,))
                 control_changed = True
         if title_changed:
-            db.execute('UPDATE requirements SET title_version=title_version+1 WHERE id=?', (rid,))
+            db.execute('UPDATE requests SET title_version=title_version+1 WHERE id=?', (rid,))
         if control_changed:
-            db.execute('UPDATE requirements SET control_version=control_version+1 WHERE id=?', (rid,))
-        current = self._get(db, 'requirements', rid)
-        return {'requirement_id': rid, 'change_id': cid, 'generation': current['generation'],
+            db.execute('UPDATE requests SET control_version=control_version+1 WHERE id=?', (rid,))
+        current = self._get(db, 'requests', rid)
+        return {'request_id': rid, 'change_id': cid, 'generation': current['generation'],
                 'content_changed': content_changed, 'needs_coordination': content_changed or significant,
                 'status': current['status']}
 
@@ -382,7 +382,7 @@ class Changes:
         if field not in FIELDS:
             raise ValueError('unknown point field')
         self._text(body)
-        position = db.execute('SELECT COALESCE(MAX(position),0)+1 FROM point_versions WHERE requirement_id=?',
+        position = db.execute('SELECT COALESCE(MAX(position),0)+1 FROM point_versions WHERE request_id=?',
                               (rid,)).fetchone()[0]
         db.execute('INSERT INTO point_versions VALUES(?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?)',
                    (uuid4().hex, previous['point_id'] if previous else uuid4().hex, rid, field, body,
@@ -394,16 +394,16 @@ class Changes:
         for value in (identifier, body, reason, actor):
             self._text(value)
         with self._transaction() as db:
-            req = self._get(db, 'requirements', rid)
+            req = self._get(db, 'requests', rid)
             if req['status'] != 'active' or req['target_status']:
-                raise ValueError('question requires stable active requirement')
+                raise ValueError('question requires stable active request')
             existing = db.execute('SELECT * FROM questions WHERE id=?', (identifier,)).fetchone()
             if existing:
-                if any(existing[k] != v for k, v in {'requirement_id': rid, 'task_id': task_id,
+                if any(existing[k] != v for k, v in {'request_id': rid, 'task_id': task_id,
                        'body': body, 'reason': reason, 'point_ids': encode(list(point_ids))}.items()):
                     raise RuntimeError('question identity already used')
                 return dict(existing)
-            if task_id and not db.execute('SELECT 1 FROM task_links WHERE requirement_id=? AND task_id=?',
+            if task_id and not db.execute('SELECT 1 FROM task_links WHERE request_id=? AND task_id=?',
                                          (rid, task_id)).fetchone():
                 raise ValueError('question task must be linked')
             active = {p['point_id'] for p in self._points(db, rid)}
@@ -416,7 +416,7 @@ class Changes:
 
     def questions(self, rid=None):
         with self._transaction() as db:
-            rows = [dict(r) for r in db.execute('SELECT * FROM questions WHERE (? IS NULL OR requirement_id=?) '
+            rows = [dict(r) for r in db.execute('SELECT * FROM questions WHERE (? IS NULL OR request_id=?) '
                                               'ORDER BY created_at,id', (rid, rid))]
             for row in rows:
                 row['point_ids'] = json.loads(row['point_ids'])
@@ -431,16 +431,16 @@ class Changes:
             if q['state'] == 'open':
                 db.execute("UPDATE questions SET state='withdrawn',revision=revision+1,closed_reason=? WHERE id=?",
                            (reason, qid))
-                self._add_event(db, 'question.withdrawn', {'question_id': qid, 'requirement_id': q['requirement_id'],
+                self._add_event(db, 'question.withdrawn', {'question_id': qid, 'request_id': q['request_id'],
                                                          'reason': reason, 'actor': actor}, acknowledged=True)
             return self._get(db, 'questions', qid)
 
     def bind_task(self, rid, tid, generation, versions):
         with self._transaction() as db:
-            req = self._get(db, 'requirements', rid)
+            req = self._get(db, 'requests', rid)
             if generation != req['generation'] or not isinstance(versions, list):
                 raise RuntimeError('task basis must use current generation')
-            if not db.execute('SELECT 1 FROM task_links WHERE requirement_id=? AND task_id=?', (rid, tid)).fetchone():
+            if not db.execute('SELECT 1 FROM task_links WHERE request_id=? AND task_id=?', (rid, tid)).fetchone():
                 raise ValueError('task must be linked')
             active = {p['version_id'] for p in self._points(db, rid)}
             if not set(versions) <= active or (req['content_mode'] == 'points' and not versions):
@@ -449,14 +449,14 @@ class Changes:
 
     def coordination(self, rid):
         with self._transaction() as db:
-            req = self._get(db, 'requirements', rid)
-            reviews = [dict(r) for r in db.execute('SELECT * FROM impact_reviews WHERE requirement_id=? '
+            req = self._get(db, 'requests', rid)
+            reviews = [dict(r) for r in db.execute('SELECT * FROM impact_reviews WHERE request_id=? '
                        'AND generation=? ORDER BY task_id', (rid, req['generation']))]
-            basis = [dict(r) for r in db.execute('SELECT * FROM task_basis WHERE requirement_id=?', (rid,))]
+            basis = [dict(r) for r in db.execute('SELECT * FROM task_basis WHERE request_id=?', (rid,))]
             for row in basis:
                 row['point_versions'] = json.loads(row['point_versions'])
             changes = []
-            for row in db.execute('SELECT id,result,operations FROM changes WHERE requirement_id=? AND committed_at IS NOT NULL ORDER BY committed_at', (rid,)):
+            for row in db.execute('SELECT id,result,operations FROM changes WHERE request_id=? AND committed_at IS NOT NULL ORDER BY committed_at', (rid,)):
                 result = json.loads(row['result'])
                 if result.get('content_changed') and result.get('generation', 0) > req['observed_generation']:
                     changes.append({'change_id': row['id'], 'generation': result['generation'],
@@ -470,17 +470,17 @@ class Changes:
     def review_impact(self, rid, generation, decisions, coverage_reason):
         self._text(coverage_reason)
         with self._transaction() as db:
-            req = self._get(db, 'requirements', rid)
+            req = self._get(db, 'requests', rid)
             if generation != req['generation'] or req['status'] != 'active' or req['target_status']:
                 raise RuntimeError('review requires current stable active generation')
-            linked = {r[0] for r in db.execute('SELECT task_id FROM task_links WHERE requirement_id=?', (rid,))}
+            linked = {r[0] for r in db.execute('SELECT task_id FROM task_links WHERE request_id=?', (rid,))}
             if not isinstance(decisions, list) or {d['task_id'] for d in decisions} != linked or len(decisions) != len(linked):
                 raise ValueError('review must cover every linked task, including completed work')
             for d in decisions:
                 if d['decision'] not in {'unaffected', 'reverify', 'revise', 'retire'}:
                     raise ValueError('invalid impact decision')
                 self._text(d['reason'])
-                old = db.execute('SELECT * FROM impact_reviews WHERE requirement_id=? AND generation=? AND task_id=?',
+                old = db.execute('SELECT * FROM impact_reviews WHERE request_id=? AND generation=? AND task_id=?',
                                  (rid, generation, d['task_id'])).fetchone()
                 state = 'applied' if d['decision'] == 'unaffected' else 'pending'
                 if old and old['decision'] == d['decision'] and old['reason'] == d['reason']:
@@ -488,37 +488,37 @@ class Changes:
                 db.execute('INSERT OR REPLACE INTO impact_reviews VALUES(?,?,?,?,?,?,?)',
                            (rid, generation, d['task_id'], d['decision'], d['reason'], state, time.time()))
             db.execute('INSERT OR REPLACE INTO coverage_reviews VALUES(?,?,?)', (rid, generation, coverage_reason))
-            db.execute('UPDATE requirements SET observed_generation=? WHERE id=?', (generation, rid))
+            db.execute('UPDATE requests SET observed_generation=? WHERE id=?', (generation, rid))
         return self.coordination(rid)
 
     def finish_impact(self, rid, generation, tid, evidence=None):
         with self._transaction() as db:
-            req = self._get(db, 'requirements', rid)
+            req = self._get(db, 'requests', rid)
             if generation != req['generation']:
                 raise RuntimeError('stale impact review')
-            previous = db.execute('SELECT state FROM impact_reviews WHERE requirement_id=? AND generation=? AND task_id=?',
+            previous = db.execute('SELECT state FROM impact_reviews WHERE request_id=? AND generation=? AND task_id=?',
                                   (rid, generation, tid)).fetchone()
             if previous and previous['state'] == 'applied':
                 return
-            cursor = db.execute("UPDATE impact_reviews SET state='applied',updated_at=? WHERE requirement_id=? "
+            cursor = db.execute("UPDATE impact_reviews SET state='applied',updated_at=? WHERE request_id=? "
                                 'AND generation=? AND task_id=?', (time.time(), rid, generation, tid))
             if not cursor.rowcount:
                 raise KeyError(tid)
-            self._add_event(db, 'task.impact_applied', {'requirement_id': rid, 'generation': generation,
+            self._add_event(db, 'task.impact_applied', {'request_id': rid, 'generation': generation,
                 'task_id': tid, 'evidence': evidence}, acknowledged=True)
 
     def _note_history(self, db, note, actor='ancor-coordinator'):
         db.execute('INSERT INTO note_versions VALUES(?,?,?,?,?,?,0)',
                    (note['id'], note['revision'], note['body'], note['updated_at'], note['deleted_at'], actor))
-        req = self._get(db, 'requirements', note['requirement_id'])
+        req = self._get(db, 'requests', note['request_id'])
         cid = uuid4().hex
         now = time.time()
         kind = 'invalidate' if note['deleted_at'] else 'append' if note['revision'] == 1 else 'replace'
         operation = {'op': kind, 'field': 'notes', 'point_id': note['id'], 'revision': note['revision'], 'body': note['body']}
         db.execute('INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?,?)',
-                   (cid, note['requirement_id'], encode({'notes_version': req['notes_version']}), encode([operation]),
+                   (cid, note['request_id'], encode({'notes_version': req['notes_version']}), encode([operation]),
                     encode({'kind': 'coordinator_note'}), actor, now, now, None, encode({'note_id': note['id']})))
-        db.execute('UPDATE requirements SET notes_version=notes_version+1 WHERE id=?', (note['requirement_id'],))
+        db.execute('UPDATE requests SET notes_version=notes_version+1 WHERE id=?', (note['request_id'],))
 
     def note_history(self, rid, nid):
         with self._transaction() as db:
@@ -529,12 +529,12 @@ class Changes:
         data = json.loads(evidence)
         if data.get('generation') != req['generation']:
             raise RuntimeError('verification must bind current generation')
-        if not db.execute('SELECT 1 FROM coverage_reviews WHERE requirement_id=? AND generation=?',
+        if not db.execute('SELECT 1 FROM coverage_reviews WHERE request_id=? AND generation=?',
                           (req['id'], req['generation'])).fetchone():
             raise RuntimeError('coverage review required')
         if req['observed_generation'] != req['generation']:
             raise RuntimeError('current generation has not been reviewed')
-        if db.execute("SELECT 1 FROM impact_reviews WHERE requirement_id=? AND generation=? AND state='pending'",
+        if db.execute("SELECT 1 FROM impact_reviews WHERE request_id=? AND generation=? AND state='pending'",
                       (req['id'], req['generation'])).fetchone():
             raise RuntimeError('impact adjustments are still pending')
         required = {p['version_id'] for p in self._points(db, req['id']) if p['field'] in {'outcome', 'constraint'}}
@@ -552,10 +552,10 @@ class Changes:
         with the same ID is safe after a crash before marking an intent forwarded.
         """
         for row in box.list():
-            if row['kind'] != 'question' or not row.get('requirement_id'):
+            if row['kind'] != 'question' or not row.get('request_id'):
                 continue
             with self._transaction() as db:
-                if not db.execute('SELECT 1 FROM requirements WHERE id=?', (row['requirement_id'],)).fetchone():
+                if not db.execute('SELECT 1 FROM requests WHERE id=?', (row['request_id'],)).fetchone():
                     continue
                 exists = db.execute('SELECT * FROM questions WHERE id=?', (row['id'],)).fetchone()
                 if exists and exists['created_by'] == 'legacy_import':
@@ -569,7 +569,7 @@ class Changes:
                 if not exists:
                     state = 'resolved' if row.get('answer') is not None else 'withdrawn' if row.get('closed_at') else 'open'
                     db.execute('INSERT INTO questions VALUES(?,?,?,?,?,?,?,1,?,?,NULL,?)',
-                               (row['id'], row['requirement_id'], row.get('task_id'), row['message'],
+                               (row['id'], row['request_id'], row.get('task_id'), row['message'],
                                 'Imported legacy notification; answer remains historical input.', '[]', state,
                                 row.get('queued_at') or time.time(), 'legacy_import', row.get('close_reason')))
                     if row.get('answer') is not None:
@@ -582,31 +582,31 @@ class Changes:
             if question['state'] != 'open' or box.target is None:
                 continue
             box.enqueue(question['id'], 'question', question['body'], actor=box.coordinator_profile,
-                        requirement_id=question['requirement_id'], task_id=question['task_id'])
+                        request_id=question['request_id'], task_id=question['task_id'])
             with self._transaction() as db:
                 db.execute('UPDATE question_delivery SET forwarded=1 WHERE question_id=?', (question['id'],))
         rows = {r['id']: r for r in box.list()}
         for question in self.questions():
-            req = self.get_requirement(question['requirement_id'])
+            req = self.get_request(question['request_id'])
             if question['state'] == 'open' and (req['status'] in {'accepted', 'cancelled', 'invalidated'}
                     or req['target_status'] in {'cancelled', 'invalidated'}):
-                question = self.withdraw_question(question['id'], 'requirement_' + (req['target_status'] or req['status']), 'host')
+                question = self.withdraw_question(question['id'], 'request_' + (req['target_status'] or req['status']), 'host')
             row = rows.get(question['id'])
             if not row:
                 continue
             if question['state'] != 'open' and row.get('answer') is None and not row.get('closed_at'):
-                box.close_question(question['id'], closed_by='requirement_store',
+                box.close_question(question['id'], closed_by='request_store',
                                    reason=question.get('closed_reason') or 'question_' + question['state'])
 
     def active_grants(self, rid):
         with self._transaction() as db:
-            self._get(db, 'requirements', rid)
-            return [dict(r) for r in db.execute('SELECT * FROM grants WHERE requirement_id=? '
+            self._get(db, 'requests', rid)
+            return [dict(r) for r in db.execute('SELECT * FROM grants WHERE request_id=? '
                                                'AND revoked_change_id IS NULL ORDER BY created_at,id', (rid,))]
 
     def pending_coordination(self):
         with self._transaction() as db:
-            return [dict(r) for r in db.execute("SELECT id,generation,observed_generation FROM requirements r "
+            return [dict(r) for r in db.execute("SELECT id,generation,observed_generation FROM requests r "
                 "WHERE content_mode='points' AND status='active' AND target_status IS NULL AND "
                 "(observed_generation<>generation OR EXISTS(SELECT 1 FROM impact_reviews i WHERE "
-                "i.requirement_id=r.id AND i.generation=r.generation AND i.state='pending'))")]
+                "i.request_id=r.id AND i.generation=r.generation AND i.state='pending'))")]

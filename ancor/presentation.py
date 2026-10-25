@@ -6,13 +6,13 @@ LABELS = {'outcome': '目标', 'constraint': '约束', 'advice': '建议', 'cont
 
 def change_confirmation(store, db, rid, operations, identifier):
     creating = operations[0]['op'] == 'create'
-    requirement = None if creating else store._get(db, 'requirements', rid)
-    title = operations[0]['title'] if creating else requirement['title']
-    verb = '创建需求' if creating else '更新需求'
+    request = None if creating else store._get(db, 'requests', rid)
+    title = operations[0]['title'] if creating else request['title']
+    verb = '创建请求' if creating else '更新请求'
     if len(operations) == 1:
-        verb = {'accept': '验收需求', 'pause': '暂停需求', 'resume': '恢复需求',
-                'cancel': '取消需求', 'request_changes': '要求返工',
-                'reply': '回复问题', 'title': '修改需求名称'}.get(operations[0]['op'], verb)
+        verb = {'accept': '验收请求', 'pause': '暂停请求', 'resume': '恢复请求',
+                'cancel': '取消请求', 'request_changes': '要求返工',
+                'reply': '回复问题', 'title': '修改请求名称'}.get(operations[0]['op'], verb)
     lines = [f'{verb}「{title}」', '']
 
     def value(label, text):
@@ -25,7 +25,7 @@ def change_confirmation(store, db, rid, operations, identifier):
         kind = op['op']
         if kind in {'create', 'convert'}:
             if kind == 'convert':
-                value('将原需求正文整理为条目。原文：', requirement['brief'])
+                value('将原请求正文整理为条目。原文：', request['brief'])
                 lines.append('整理后的完整要求：')
             for field, label in LABELS.items():
                 for body in op['fields'].get(field, []):
@@ -46,7 +46,7 @@ def change_confirmation(store, db, rid, operations, identifier):
                 value('  新内容：', op['body'])
             content_changed = True
         elif kind == 'title':
-            lines.append('• 修改需求名称')
+            lines.append('• 修改请求名称')
             value('  原名称：', title)
             value('  新名称：', op['title'])
             title = op['title']
@@ -57,7 +57,7 @@ def change_confirmation(store, db, rid, operations, identifier):
             if kind == 'reply' and not any(o['op'] == 'resolve_question' and o['question_id'] == q['id'] for o in operations):
                 lines.append('  本次仅记录回复，问题保持开放。')
         elif kind in {'pause', 'resume', 'cancel'}:
-            lines.append('• ' + {'pause': '暂停推进此需求', 'resume': '恢复推进此需求', 'cancel': '取消此需求'}[kind])
+            lines.append('• ' + {'pause': '暂停推进此请求', 'resume': '恢复推进此请求', 'cancel': '取消此请求'}[kind])
             value('  原因：', op['reason'])
             lines.append({'pause': '  确认后，系统将停止相关执行；暂停完成前会显示处理中。',
                           'resume': '  确认后，协调者将重新检查现有工作并安排继续执行。',

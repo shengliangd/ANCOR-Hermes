@@ -15,11 +15,11 @@ class StoreTests(unittest.TestCase):
         self.path = Path(self.directory.name) / 'store.sqlite'
         self.store = Store(self.path)
 
-    def advance(self, requirement):
-        return self.store.finalize_transition(requirement['id'])['requirement']
+    def advance(self, request):
+        return self.store.finalize_transition(request['id'])['request']
 
-    def advance_all(self, requirements):
-        return [self.advance(requirement) for requirement in requirements]
+    def advance_all(self, requests):
+        return [self.advance(request) for request in requests]
 
     def test_legacy_schema_requires_explicit_title_migration(self):
         database = Path(self.directory.name) / 'old-store.sqlite'
@@ -32,7 +32,7 @@ class StoreTests(unittest.TestCase):
             db.execute('INSERT INTO drafts VALUES (?, ?, ?, ?)',
                        ('old', 'previous brief', 'previous criteria', None))
             db.execute(
-                'CREATE TABLE requirements ('
+                'CREATE TABLE requests ('
                 'id TEXT PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL, '
                 'brief TEXT NOT NULL, acceptance_criteria TEXT NOT NULL, '
                 'replacement_of TEXT, confirmation_reference TEXT NOT NULL, '
@@ -52,12 +52,12 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn('title', columns)
         self.assertEqual(rows, [('old', 'previous brief')])
 
-    def test_concurrent_confirmation_creates_one_requirement_and_event(self):
+    def test_concurrent_confirmation_creates_one_request_and_event(self):
         draft = self.store.create_draft('brief')
         with ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda _: Store(self.path).confirm(draft['id'], 'ref'), range(8)))
         self.assertEqual(len({item['id'] for item in results}), 1)
-        self.assertEqual(len(self.store.snapshot()['requirements']), 1)
+        self.assertEqual(len(self.store.snapshot()['requests']), 1)
         self.assertEqual(len(self.store.pending_events()), 1)
 
     def test_event_write_failure_rolls_back_replacement(self):
@@ -71,54 +71,54 @@ class StoreTests(unittest.TestCase):
             db.close()
         with self.assertRaises(sqlite3.IntegrityError):
             self.store.confirm(draft['id'], 'ref2')
-        self.assertEqual(self.store.get_requirement(old['id'])['status'], 'active')
-        self.assertEqual(len(self.store.snapshot()['requirements']), 1)
+        self.assertEqual(self.store.get_request(old['id'])['status'], 'active')
+        self.assertEqual(len(self.store.snapshot()['requests']), 1)
         self.assertEqual(len(self.store.pending_events()), 1)
 
     def test_snapshot_links_native_tasks_without_copying_board_state(self):
         draft = self.store.create_draft('brief')
-        requirement = self.store.confirm(draft['id'], 'ref')
-        self.store.link_task(requirement['id'], 'native-42')
-        self.store.link_task(requirement['id'], 'native-42')
+        request = self.store.confirm(draft['id'], 'ref')
+        self.store.link_task(request['id'], 'native-42')
+        self.store.link_task(request['id'], 'native-42')
         snapshot = Store(self.path).snapshot()
         self.assertEqual(snapshot['drafts'], [draft])
-        self.assertEqual(snapshot['requirements'], [requirement])
+        self.assertEqual(snapshot['requests'], [request])
         self.assertEqual(snapshot['task_links'],
-                         [{'requirement_id': requirement['id'], 'task_id': 'native-42'}])
+                         [{'request_id': request['id'], 'task_id': 'native-42'}])
         self.assertEqual(snapshot['pending_events'], self.store.pending_events())
         with self.assertRaises(KeyError):
             self.store.link_task('unknown', 'native-43')
 
-    def test_requirement_lifecycle_emits_events_and_acceptance_needs_evidence(self):
+    def test_request_lifecycle_emits_events_and_acceptance_needs_evidence(self):
         draft = self.store.create_draft('brief')
-        requirement = self.store.confirm(draft['id'], 'ref')
+        request = self.store.confirm(draft['id'], 'ref')
         self.assertEqual([e['kind'] for e in self.store.pending_events()],
-                         ['requirement.activated'])
+                         ['request.activated'])
         self.store.confirm(draft['id'], 'retry')
         self.assertEqual(len(self.store.pending_events()), 1)
         with self.assertRaises(ValueError):
-            self.store.accept(requirement['id'], ' ')
-        self.store.reject(requirement['id'], 'not yet')
-        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'active')
-        verified = self.store.submit_acceptance(requirement['id'], 'test report URL')
+            self.store.accept(request['id'], ' ')
+        self.store.reject(request['id'], 'not yet')
+        self.assertEqual(self.store.get_request(request['id'])['status'], 'active')
+        verified = self.store.submit_acceptance(request['id'], 'test report URL')
         self.assertEqual(verified['status'], 'awaiting_acceptance')
-        self.store.accept(requirement['id'], 'human:accept')
-        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'accepted')
+        self.store.accept(request['id'], 'human:accept')
+        self.assertEqual(self.store.get_request(request['id'])['status'], 'accepted')
         self.assertEqual(self.store.acceptances()[-1]['payload']['evidence'], 'test report URL')
         with self.assertRaises(ValueError):
-            self.store.accept(requirement['id'], 'human:again')
+            self.store.accept(request['id'], 'human:again')
         with self.assertRaises(ValueError):
-            self.store.reject(requirement['id'], 'late')
+            self.store.reject(request['id'], 'late')
         self.assertEqual([e['kind'] for e in self.store.pending_events()],
-                         ['requirement.activated', 'requirement.rejected'])
+                         ['request.activated', 'request.rejected'])
 
     def test_replacement_emits_invalidation_and_blocks_old_acceptance(self):
         old = self.store.confirm(self.store.create_draft('old')['id'], 'ref')
         new = self.store.confirm(self.store.create_draft('new', old['id'])['id'], 'ref2')
         self.assertEqual([e['kind'] for e in self.store.pending_events()],
-                         ['requirement.activated', 'requirement.transition_requested',
-                          'requirement.staged'])
-        self.assertEqual(self.store.get_requirement(old['id'])['target_status'], 'invalidated')
+                         ['request.activated', 'request.transition_requested',
+                          'request.staged'])
+        self.assertEqual(self.store.get_request(old['id'])['target_status'], 'invalidated')
         self.assertEqual(new['status'], 'pending')
         with self.assertRaises(ValueError):
             self.store.accept(old['id'], 'obsolete evidence')
@@ -139,18 +139,18 @@ class StoreTests(unittest.TestCase):
         first = self.store.create_draft('new', original['id'])
         stale = self.store.create_draft('stale', original['id'])
         replacement = self.store.confirm(first['id'], 'ref2')
-        self.assertEqual(self.store.get_requirement(original['id'])['target_status'], 'invalidated')
+        self.assertEqual(self.store.get_request(original['id'])['target_status'], 'invalidated')
         self.assertEqual(replacement['status'], 'pending')
         with self.assertRaises(ValueError):
             self.store.confirm(stale['id'], 'ref3')
         self.assertEqual(self.store.confirm(first['id'], 'retry'), replacement)
-        with self.assertRaisesRegex(ValueError, 'does not reference an existing requirement'):
+        with self.assertRaisesRegex(ValueError, 'does not reference an existing request'):
             self.store.create_draft('missing', 'nonexistent')
 
-    def test_replacement_requires_confirmed_active_or_paused_requirement(self):
+    def test_replacement_requires_confirmed_active_or_paused_request(self):
         provisional = self.store.create_draft('provisional')
         before = self.store.snapshot()['drafts']
-        with self.assertRaisesRegex(ValueError, 'is a draft, not a confirmed requirement'):
+        with self.assertRaisesRegex(ValueError, 'is a draft, not a confirmed request'):
             self.store.create_draft('invalid', [provisional['id']])
         self.assertEqual(self.store.snapshot()['drafts'], before)
 
@@ -176,23 +176,23 @@ class StoreTests(unittest.TestCase):
             db.close()
 
         before = self.store.snapshot()
-        with self.assertRaisesRegex(ValueError, 'is a draft, not a confirmed requirement'):
+        with self.assertRaisesRegex(ValueError, 'is a draft, not a confirmed request'):
             self.store.confirm(draft_id, 'ref')
         after = self.store.snapshot()
-        self.assertEqual(after['requirements'], before['requirements'])
+        self.assertEqual(after['requests'], before['requests'])
         self.assertEqual(after['drafts'], before['drafts'])
         self.assertEqual(after['pending_events'], before['pending_events'])
 
     def test_draft_confirmation_is_durable_exact_and_idempotent(self):
         draft = self.store.create_draft(' brief\n')
         draft['brief'] = 'external mutation'
-        requirement = self.store.confirm(draft['id'], 'integration:message-1')
-        self.assertEqual(requirement['brief'], ' brief\n')
-        self.assertEqual(requirement['status'], 'active')
+        request = self.store.confirm(draft['id'], 'integration:message-1')
+        self.assertEqual(request['brief'], ' brief\n')
+        self.assertEqual(request['status'], 'active')
         reopened = Store(self.path)
-        self.assertEqual(reopened.confirm(draft['id'], 'retry'), requirement)
+        self.assertEqual(reopened.confirm(draft['id'], 'retry'), request)
         self.assertEqual(reopened.get_draft(draft['id'])['brief'], ' brief\n')
-        self.assertEqual(reopened.get_requirement(requirement['id']), requirement)
+        self.assertEqual(reopened.get_request(request['id']), request)
         with self.assertRaises(ValueError):
             reopened.confirm(draft['id'], ' ')
 
@@ -204,21 +204,21 @@ class StoreTests(unittest.TestCase):
         draft = self.store.create_draft('brief', None)
         self.assertIsNone(draft['replacement_of'])
 
-    def test_cancel_is_durable_and_only_active_requirements_can_cancel(self):
-        requirement = self.store.confirm(self.store.create_draft('brief')['id'], 'ref')
-        requested = self.store.cancel([requirement['id']], 'user withdrew the request')
+    def test_cancel_is_durable_and_only_active_requests_can_cancel(self):
+        request = self.store.confirm(self.store.create_draft('brief')['id'], 'ref')
+        requested = self.store.cancel([request['id']], 'user withdrew the request')
         self.assertEqual(requested[0]['target_status'], 'cancelled')
         result = self.advance_all(requested)
         self.assertEqual(result[0]['status'], 'cancelled')
-        self.assertEqual(self.store.pending_events()[-1]['kind'], 'requirement.cancelled')
+        self.assertEqual(self.store.pending_events()[-1]['kind'], 'request.cancelled')
         self.assertEqual(self.store.pending_events()[-1]['payload']['reason'], 'user withdrew the request')
         with self.assertRaises(ValueError):
-            self.store.cancel([requirement['id']], 'duplicate cancellation')
+            self.store.cancel([request['id']], 'duplicate cancellation')
 
-    def test_cancel_accepts_one_id_and_returns_one_requirement(self):
-        requirement = self.store.confirm(self.store.create_draft('brief')['id'], 'ref')
-        result = self.advance_all(self.store.cancel([requirement['id']], 'withdrawn'))
-        self.assertEqual(result[0]['id'], requirement['id'])
+    def test_cancel_accepts_one_id_and_returns_one_request(self):
+        request = self.store.confirm(self.store.create_draft('brief')['id'], 'ref')
+        result = self.advance_all(self.store.cancel([request['id']], 'withdrawn'))
+        self.assertEqual(result[0]['id'], request['id'])
         self.assertEqual(result[0]['status'], 'cancelled')
 
     def test_batch_cancel_and_replacement(self):
@@ -234,14 +234,14 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(combined['status'], 'pending')
         self.advance(a)
         self.assertEqual(self.advance(b)['status'], 'invalidated')
-        self.assertEqual(self.store.get_requirement(combined['id'])['status'], 'active')
+        self.assertEqual(self.store.get_request(combined['id'])['status'], 'active')
 
     def test_confirmed_cancellation_is_atomic_and_idempotent(self):
         first = self.store.confirm(self.store.create_draft('one')['id'], 'ref1')
         second = self.store.confirm(self.store.create_draft('two')['id'], 'ref2')
         proposal = self.store.create_cancellation([first['id'], second['id']], 'withdrawn together')
-        self.assertEqual([r['status'] for r in (self.store.get_requirement(first['id']),
-                                                self.store.get_requirement(second['id']))],
+        self.assertEqual([r['status'] for r in (self.store.get_request(first['id']),
+                                                self.store.get_request(second['id']))],
                          ['active', 'active'])
         result = self.store.confirm_cancellation(proposal['id'], 'confirmation-1')
         self.assertEqual([r['target_status'] for r in result], ['cancelled', 'cancelled'])
@@ -250,82 +250,82 @@ class StoreTests(unittest.TestCase):
         retry = self.store.confirm_cancellation(proposal['id'], 'confirmation-1')
         self.assertEqual([r['status'] for r in retry], ['cancelled', 'cancelled'])
         cancelled = [e for e in self.store.pending_events()
-                     if e['kind'] == 'requirement.cancelled']
+                     if e['kind'] == 'request.cancelled']
         self.assertEqual(len(cancelled), 2)
 
-    def test_cancellation_proposal_requires_all_active_requirements(self):
+    def test_cancellation_proposal_requires_all_active_requests(self):
         first = self.store.confirm(self.store.create_draft('one')['id'], 'ref1')
         second = self.store.confirm(self.store.create_draft('two')['id'], 'ref2')
         proposal = self.store.create_cancellation([first['id'], second['id']], None)
         self.store.cancel([second['id']], 'already withdrawn')
         with self.assertRaises(ValueError):
             self.store.confirm_cancellation(proposal['id'], 'confirmation-2')
-        self.assertEqual(self.store.get_requirement(first['id'])['status'], 'active')
+        self.assertEqual(self.store.get_request(first['id'])['status'], 'active')
     def test_pause_and_resume_commands_are_durable_and_idempotent(self):
-        requirement = self.store.confirm(
+        request = self.store.confirm(
             self.store.create_draft('brief')['id'], 'ref')
-        proposal = self.store.create_requirement_command(
-            'pause', requirement['id'], 'user asked', 'Stop briefly')
-        self.assertEqual(proposal, self.store.create_requirement_command(
-            'pause', requirement['id'], 'user asked', 'Stop briefly'))
-        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'active')
+        proposal = self.store.create_request_command(
+            'pause', request['id'], 'user asked', 'Stop briefly')
+        self.assertEqual(proposal, self.store.create_request_command(
+            'pause', request['id'], 'user asked', 'Stop briefly'))
+        self.assertEqual(self.store.get_request(request['id'])['status'], 'active')
 
-        requested = self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
+        requested = self.store.confirm_request_command(proposal['id'], 'confirmation-1')
         self.assertEqual(requested['target_status'], 'paused')
         paused = self.advance(requested)
         self.assertEqual(paused['status'], 'paused')
-        retry = self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
+        retry = self.store.confirm_request_command(proposal['id'], 'confirmation-1')
         self.assertEqual(retry['status'], 'paused')
         events = [e for e in self.store.pending_events()
-                  if e['kind'] == 'requirement.paused']
+                  if e['kind'] == 'request.paused']
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]['payload']['reason'], 'user asked')
         with self.assertRaises(ValueError):
-            self.store.create_requirement_command(
-                'pause', requirement['id'], 'again', 'Already paused')
+            self.store.create_request_command(
+                'pause', request['id'], 'again', 'Already paused')
 
-        resume = self.store.create_requirement_command(
-            'resume', requirement['id'], 'user ready', 'Continue the work')
-        requested = self.store.confirm_requirement_command(resume['id'], 'confirmation-2')
+        resume = self.store.create_request_command(
+            'resume', request['id'], 'user ready', 'Continue the work')
+        requested = self.store.confirm_request_command(resume['id'], 'confirmation-2')
         self.assertEqual(requested['target_status'], 'active')
         active = self.advance(requested)
         self.assertEqual(active['status'], 'active')
         self.assertEqual(len([e for e in self.store.pending_events()
-                              if e['kind'] == 'requirement.resumed']), 1)
+                              if e['kind'] == 'request.resumed']), 1)
         with self.assertRaises(ValueError):
-            self.store.create_requirement_command(
-                'resume', requirement['id'], 'again', 'Already active')
+            self.store.create_request_command(
+                'resume', request['id'], 'again', 'Already active')
 
-    def test_paused_requirement_can_be_cancelled_or_replaced(self):
-        requirement = self.store.confirm(
+    def test_paused_request_can_be_cancelled_or_replaced(self):
+        request = self.store.confirm(
             self.store.create_draft('brief')['id'], 'ref')
-        pause = self.store.create_requirement_command(
-            'pause', requirement['id'], 'user asked', 'Stop briefly')
-        self.advance(self.store.confirm_requirement_command(pause['id'], 'pause-confirmation'))
-        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'paused')
+        pause = self.store.create_request_command(
+            'pause', request['id'], 'user asked', 'Stop briefly')
+        self.advance(self.store.confirm_request_command(pause['id'], 'pause-confirmation'))
+        self.assertEqual(self.store.get_request(request['id'])['status'], 'paused')
 
         replacement = self.store.confirm(self.store.create_draft(
-            'changed', requirement['id'])['id'], 'replacement-confirmation')
+            'changed', request['id'])['id'], 'replacement-confirmation')
         self.assertEqual(replacement['status'], 'pending')
-        self.advance(requirement)
-        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'invalidated')
-        self.assertEqual(self.store.get_requirement(replacement['id'])['status'], 'active')
+        self.advance(request)
+        self.assertEqual(self.store.get_request(request['id'])['status'], 'invalidated')
+        self.assertEqual(self.store.get_request(replacement['id'])['status'], 'active')
 
         paused = self.store.confirm(
             self.store.create_draft('cancel me')['id'], 'ref2')
-        command = self.store.create_requirement_command(
+        command = self.store.create_request_command(
             'pause', paused['id'], 'user asked', 'Stop briefly')
-        self.advance(self.store.confirm_requirement_command(command['id'], 'pause-confirmation-2'))
+        self.advance(self.store.confirm_request_command(command['id'], 'pause-confirmation-2'))
         cancellation = self.store.create_cancellation([paused['id']], 'withdrawn while paused')
         cancelled = self.advance_all(
             self.store.confirm_cancellation(cancellation['id'], 'cancel-confirmation'))
         self.assertEqual(cancelled[0]['status'], 'cancelled')
 
     def test_pause_event_failure_rolls_back_status(self):
-        requirement = self.store.confirm(
+        request = self.store.confirm(
             self.store.create_draft('brief')['id'], 'ref')
-        proposal = self.store.create_requirement_command(
-            'pause', requirement['id'], 'user asked', 'Stop briefly')
+        proposal = self.store.create_request_command(
+            'pause', request['id'], 'user asked', 'Stop briefly')
         db = sqlite3.connect(self.path)
         try:
             db.execute("CREATE TRIGGER fail_pause BEFORE INSERT ON events "
@@ -334,5 +334,5 @@ class StoreTests(unittest.TestCase):
         finally:
             db.close()
         with self.assertRaises(sqlite3.IntegrityError):
-            self.store.confirm_requirement_command(proposal['id'], 'confirmation-1')
-        self.assertEqual(self.store.get_requirement(requirement['id'])['status'], 'active')
+            self.store.confirm_request_command(proposal['id'], 'confirmation-1')
+        self.assertEqual(self.store.get_request(request['id'])['status'], 'active')

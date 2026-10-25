@@ -48,7 +48,7 @@ else:
 
 
 def test_replacement_transition_survives_restart_and_advances(tmp_path):
-    from ancor.transitions import advance_requirement
+    from ancor.transitions import advance_request
 
     path = tmp_path / 'store.db'
     ctx = Context(path)
@@ -65,17 +65,17 @@ def test_replacement_transition_survives_restart_and_advances(tmp_path):
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
     host.scan()
     snapshot = host.wake_packet()
-    requirements = {row['id']: row for row in snapshot['requirements']['items']}
-    assert requirements[old['id']]['target_status'] == 'invalidated'
-    assert requirements[new['id']]['target_status'] == 'active'
+    requests = {row['id']: row for row in snapshot['requests']['items']}
+    assert requests[old['id']]['target_status'] == 'invalidated'
+    assert requests[new['id']]['target_status'] == 'active'
     assert {row['reason'] for row in snapshot['progression']} == {'transition_pending'}
     assert snapshot['invalidated_tasks']['items'] == []
     assert host.pending(32)
 
-    result = advance_requirement(store, board, old['id'])
+    result = advance_request(store, board, old['id'])
     assert result['outcome'] == 'completed'
-    assert store.get_requirement(old['id'])['status'] == 'invalidated'
-    assert store.get_requirement(new['id'])['status'] == 'active'
+    assert store.get_request(old['id'])['status'] == 'invalidated'
+    assert store.get_request(new['id'])['status'] == 'active'
     assert board.tasks[0]['status'] == 'archived'
     assert board.guards == []
 
@@ -87,7 +87,7 @@ def test_replacement_transition_survives_restart_and_advances(tmp_path):
 
 
 def test_invalidated_drift_is_visible_without_mutating_native_work(tmp_path):
-    from ancor.transitions import advance_requirement
+    from ancor.transitions import advance_request
 
     path = tmp_path / 'store.db'
     ctx = Context(path)
@@ -96,7 +96,7 @@ def test_invalidated_drift_is_visible_without_mutating_native_work(tmp_path):
     store.confirm(store.create_draft('new', old['id'])['id'], 'human:new')
     store.link_task(old['id'], 'old-worker')
     board = Board({'id': 'old-worker', 'status': 'running'})
-    advance_requirement(store, board, old['id'])
+    advance_request(store, board, old['id'])
     host = Host(ctx, board=board, db_path=tmp_path / 'native.db')
     host.tasks = board.list()
     unresolved = host.invalidated_tasks(store.snapshot())
@@ -105,7 +105,7 @@ def test_invalidated_drift_is_visible_without_mutating_native_work(tmp_path):
     store.link_task(old['id'], 'drifted-worker')
     host.tasks = [*board.tasks, {'id': 'drifted-worker', 'status': 'running'}]
     unresolved = host.invalidated_tasks(store.snapshot())
-    assert unresolved[0]['requirement_id'] == old['id']
+    assert unresolved[0]['request_id'] == old['id']
     assert unresolved[0]['task_id'] == 'drifted-worker'
     assert host.tasks[-1]['status'] == 'running'
 
@@ -132,11 +132,11 @@ def test_accepted_before_enqueue_crash_wakes_once_without_resubmission(tmp_path)
         assert result.returncode == 0, result.stdout + result.stderr
         payload = json.loads(output.read_text())
         assert payload['events'][0]['kind'] == 'host.recovery'
-        requirement = payload['snapshot']['requirements']['items'][0]
-        assert requirement['status'] == 'awaiting_acceptance'
-        assert 'brief' not in requirement
+        request = payload['snapshot']['requests']['items'][0]
+        assert request['status'] == 'awaiting_acceptance'
+        assert 'brief' not in request
         restarted = Store(path)
-        assert restarted.get_requirement(requirement['id'])['confirmation_reference'] == 'human:exact'
+        assert restarted.get_request(request['id'])['confirmation_reference'] == 'human:exact'
         assert restarted.acceptances()[0]['payload']['evidence'] == 'preserved verification evidence'
         assert not Path(str(path) + '.notifications.db').exists(), 'host must not invent a send'
     finally:
@@ -186,9 +186,9 @@ def test_sent_question_is_not_completion_delivery(tmp_path):
     box.mark_sent(identifier, {'success': True})
     box.respond(identifier, 'yes', 'human:answer')
     host = Host(Context(path), board=Board())
-    requirements = host.wake_packet()['requirements']['items']
-    assert [row['id'] for row in requirements] == [req['id']]
-    assert requirements[0]['status'] == 'awaiting_acceptance'
+    requests = host.wake_packet()['requests']['items']
+    assert [row['id'] for row in requests] == [req['id']]
+    assert requests[0]['status'] == 'awaiting_acceptance'
     assert [e['kind'] for e in host.pending(32)] == ['host.recovery']
 
 
@@ -220,8 +220,8 @@ def test_interrupted_host_and_coordinator_resume_without_duplicate_flight(tmp_pa
         assert result.returncode == 0, result.stderr
         data = json.loads(output.read_text())
         assert 'host.recovery' in [e['kind'] for e in data['events']]
-        assert [row['id'] for row in data['snapshot']['requirements']['items']] == [req['id']]
-        assert len(store.snapshot()['requirements']) == 1
+        assert [row['id'] for row in data['snapshot']['requests']['items']] == [req['id']]
+        assert len(store.snapshot()['requests']) == 1
     finally:
         if process.poll() is None:
             process.kill()
@@ -245,9 +245,9 @@ def test_confirmed_demand_restart_requires_no_resubmit(tmp_path, acknowledged):
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
     data = json.loads(output.read_text())
-    assert [row['id'] for row in data['snapshot']['requirements']['items']] == [req['id']]
+    assert [row['id'] for row in data['snapshot']['requests']['items']] == [req['id']]
     kinds = [e['kind'] for e in data['events']]
-    assert ('requirement.activated' in kinds) == (not acknowledged)
+    assert ('request.activated' in kinds) == (not acknowledged)
     assert data['snapshot']['conditions']['count'] == 1
     assert data['snapshot']['conditions']['items'][0]['reason'] == 'no_work'
     assert ('host.recovery' in kinds) == acknowledged

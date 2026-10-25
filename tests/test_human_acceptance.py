@@ -30,7 +30,7 @@ def verified(tmp_path):
                              target='test:destination')
     notice_id = 'accept:' + req['id']
     box.enqueue(notice_id, 'completion', 'Verified result ready for human acceptance.',
-                actor='ancor-coordinator', requirement_id=req['id'])
+                actor='ancor-coordinator', request_id=req['id'])
     assert box.claim_next()['id'] == notice_id
     box.mark_sent(notice_id, {'success': True})
     return store, box, req, notice_id
@@ -45,7 +45,7 @@ def confirmation_payload(prepared):
 
 def test_verification_waits_for_human_without_coordinator_attention(tmp_path):
     store, _box, req, _notice = verified(tmp_path)
-    assert store.get_requirement(req['id'])['status'] == 'awaiting_acceptance'
+    assert store.get_request(req['id'])['status'] == 'awaiting_acceptance'
     assert store.pending_events() == []
     health = Scheduling(store).health(
         store.snapshot(), [{'id': 'task', 'status': 'done'}], [])
@@ -56,13 +56,13 @@ def test_verification_waits_for_human_without_coordinator_attention(tmp_path):
 def test_human_acceptance_commits_only_after_exact_confirmation(tmp_path):
     store, box, req, _notice = verified(tmp_path)
     service = Service(context(), store)
-    prepared = service.requirement({'action': 'accept', 'requirement_id': req['id']})
+    prepared = service.request({'action': 'accept', 'request_id': req['id']})
     args = prepared['clarify_args']
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
-    assert store.get_requirement(req['id'])['status'] == 'awaiting_acceptance'
+    assert store.get_request(req['id'])['status'] == 'awaiting_acceptance'
     service.post_tool_call('clarify', args, confirmation_payload(prepared),
                            session_id='s', tool_call_id='c')
-    assert store.get_requirement(req['id'])['status'] == 'accepted'
+    assert store.get_request(req['id'])['status'] == 'accepted'
     assert store.pending_events() == []
     notice = box.get('accept:' + req['id'])
     assert notice['closed'] is True
@@ -72,16 +72,16 @@ def test_human_acceptance_commits_only_after_exact_confirmation(tmp_path):
 def test_human_change_request_returns_to_active_with_feedback_and_wakes(tmp_path):
     store, box, req, _notice = verified(tmp_path)
     service = Service(context(), store)
-    prepared = service.requirement({
-        'action': 'request_changes', 'requirement_id': req['id'],
+    prepared = service.request({
+        'action': 'request_changes', 'request_id': req['id'],
         'feedback': 'The chart is unreadable; fix the axis labels.'})
     args = prepared['clarify_args']
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
     service.post_tool_call('clarify', args, confirmation_payload(prepared),
                            session_id='s', tool_call_id='c')
-    assert store.get_requirement(req['id'])['status'] == 'active'
+    assert store.get_request(req['id'])['status'] == 'active'
     pending = store.pending_events()
-    assert [event['kind'] for event in pending] == ['requirement.changes_requested']
+    assert [event['kind'] for event in pending] == ['request.changes_requested']
     assert pending[0]['payload']['feedback'] == 'The chart is unreadable; fix the axis labels.'
     notice = box.get('accept:' + req['id'])
     assert notice['closed'] is True
@@ -94,14 +94,14 @@ def test_legacy_coordinator_acceptance_reopens_human_gate_idempotently(tmp_path)
     req = store.confirm(store.create_draft(
         'Legacy brief', title='Legacy acceptance')['id'], 'legacy')
     with sqlite3.connect(path) as db:
-        db.execute("UPDATE requirements SET status='accepted' WHERE id=?", (req['id'],))
-    event = store.add_event('requirement.accepted', {
-        'requirement_id': req['id'], 'evidence': 'preserved legacy evidence'})
+        db.execute("UPDATE requests SET status='accepted' WHERE id=?", (req['id'],))
+    event = store.add_event('request.accepted', {
+        'request_id': req['id'], 'evidence': 'preserved legacy evidence'})
     store.ack_events([row['id'] for row in store.pending_events()])
 
     migrated = Store(path)
-    requirement = migrated.get_requirement(req['id'])
-    assert requirement['status'] == 'awaiting_acceptance'
+    request = migrated.get_request(req['id'])
+    assert request['status'] == 'awaiting_acceptance'
     verification = migrated.latest_verification(req['id'])
     assert verification['payload']['evidence'] == 'preserved legacy evidence'
     assert verification['payload']['migrated_from_event_id'] == event['id']
@@ -109,13 +109,13 @@ def test_legacy_coordinator_acceptance_reopens_human_gate_idempotently(tmp_path)
 
     reopened = Store(path)
     verifications = [row for row in reopened.acceptances()
-                     if row['kind'] == 'requirement.verified']
+                     if row['kind'] == 'request.verified']
     assert len(verifications) == 1
-    assert reopened.get_requirement(req['id'])['status'] == 'awaiting_acceptance'
+    assert reopened.get_request(req['id'])['status'] == 'awaiting_acceptance'
 
 
 def test_current_human_acceptance_is_not_reopened(tmp_path):
     store, _box, req, _notice = verified(tmp_path)
     store.accept(req['id'], 'native:human-accept')
     reopened = Store(store.path)
-    assert reopened.get_requirement(req['id'])['status'] == 'accepted'
+    assert reopened.get_request(req['id'])['status'] == 'accepted'

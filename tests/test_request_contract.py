@@ -40,7 +40,7 @@ def test_question_requires_blocked_task_and_allows_multiple_open_questions(tmp_p
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-coordinator', tasks)
     store.link_task(req['id'], 't1')
     args = {'action': 'send', 'id': 'q1', 'kind': 'question', 'message': 'Which label?',
-            'requirement_id': req['id'], 'task_id': 't1'}
+            'request_id': req['id'], 'task_id': 't1'}
 
     running = call(tools, 'ancor_notify', args)
     assert running['code'] == 'state_conflict'
@@ -66,18 +66,18 @@ def test_question_requires_blocked_task_and_allows_multiple_open_questions(tmp_p
 
 def test_draft_requires_authoritative_title(tmp_path, monkeypatch):
     tools, _, _ = registered(tmp_path, monkeypatch, 'ancor-interactor', {})
-    missing = call(tools, 'ancor_requirement', {
+    missing = call(tools, 'ancor_request', {
         'action': 'draft', 'brief': 'Brief'})
     assert missing['code'] == 'invalid_request'
     assert missing['missing_fields'] == ['title']
-    prepared = call(tools, 'ancor_requirement', {
+    prepared = call(tools, 'ancor_request', {
         'action': 'draft', 'title': 'Stable title',
         'brief': 'Brief'})
     assert prepared['title'] == 'Stable title'
     assert 'Title: Stable title' in prepared['clarify_args']['questions'][0]['question']
 
 
-def test_open_question_scope_is_requirement_and_task(tmp_path, monkeypatch):
+def test_open_question_scope_is_request_and_task(tmp_path, monkeypatch):
     tasks = {'t1': {'id': 't1', 'status': 'blocked'}}
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-coordinator', tasks)
     other = store.confirm(store.create_draft('Other report')['id'], 'fixture')
@@ -85,9 +85,9 @@ def test_open_question_scope_is_requirement_and_task(tmp_path, monkeypatch):
     store.link_task(other['id'], 't1')
     base = {'action': 'send', 'kind': 'question', 'message': 'Which label?', 'task_id': 't1'}
     assert not call(tools, 'ancor_notify',
-                    dict(base, id='q1', requirement_id=req['id'])).get('error')
+                    dict(base, id='q1', request_id=req['id'])).get('error')
     assert not call(tools, 'ancor_notify',
-                    dict(base, id='q2', requirement_id=other['id'])).get('error')
+                    dict(base, id='q2', request_id=other['id'])).get('error')
 
 
 def test_coordinator_can_withdraw_superseded_question(tmp_path, monkeypatch):
@@ -95,7 +95,7 @@ def test_coordinator_can_withdraw_superseded_question(tmp_path, monkeypatch):
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-coordinator', tasks)
     store.link_task(req['id'], 't1')
     args = {'action': 'send', 'id': 'q1', 'kind': 'question', 'message': 'Which label?',
-            'requirement_id': req['id'], 'task_id': 't1'}
+            'request_id': req['id'], 'task_id': 't1'}
     assert call(tools, 'ancor_notify', args)['state'] == 'pending'
     closed = call(tools, 'ancor_notify', {
         'action': 'withdraw', 'id': 'q1', 'reason': 'new input supplied the label'})
@@ -105,29 +105,28 @@ def test_coordinator_can_withdraw_superseded_question(tmp_path, monkeypatch):
     assert listed['notifications']['count'] == 0
 
 
-def test_requirement_response_is_idempotent(tmp_path, monkeypatch):
+def test_unconfirmed_request_response_is_rejected(tmp_path, monkeypatch):
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-interactor', {})
-    args = {'action': 'respond', 'requirement_id': req['id'], 'body': 'Use quarterly'}
-    first = call(tools, 'ancor_requirement', args, session_id='s', tool_call_id='c')
-    second = call(tools, 'ancor_requirement', args, session_id='s', tool_call_id='c')
-    assert first['id'] == second['id']
-    responses = [event for event in store.snapshot()['pending_events']
-                 if event['kind'] == 'requirement.response']
-    assert len(responses) == 1
+    before = store.snapshot()
+    args = {'action': 'respond', 'request_id': req['id'], 'body': 'Use quarterly'}
+    result = call(tools, 'ancor_request', args, session_id='s', tool_call_id='c')
+    assert result['code'] == 'invalid_request'
+    assert 'native confirmation' in result['error']
+    assert store.snapshot() == before
 
 
 def test_interactor_pause_action_requires_reason_and_only_proposes(tmp_path, monkeypatch):
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-interactor', {})
-    missing = call(tools, 'ancor_requirement', {
-        'action': 'pause', 'requirement_id': req['id'], 'summary': 'Stop briefly'})
+    missing = call(tools, 'ancor_request', {
+        'action': 'pause', 'request_id': req['id'], 'summary': 'Stop briefly'})
     assert missing['code'] == 'invalid_request'
     assert missing['missing_fields'] == ['reason']
-    proposal = call(tools, 'ancor_requirement', {
-        'action': 'pause', 'requirement_id': req['id'],
+    proposal = call(tools, 'ancor_request', {
+        'action': 'pause', 'request_id': req['id'],
         'summary': 'Stop briefly', 'reason': 'User asked'})
     assert proposal['action'] == 'pause'
     assert 'ANCOR pause ' + proposal['id'] in proposal['clarify_args']['questions'][0]['question']
-    assert store.get_requirement(req['id'])['status'] == 'active'
+    assert store.get_request(req['id'])['status'] == 'active'
 
 
 def test_missing_action_fields_return_actionable_validation(tmp_path, monkeypatch):
@@ -136,11 +135,11 @@ def test_missing_action_fields_return_actionable_validation(tmp_path, monkeypatc
     result = call(coordinator, 'ancor_board', {'action': 'create', 'key': 'k', 'title': 't',
                                                 'body': 'b', 'contract': {}})
     assert result['code'] == 'invalid_request'
-    assert result['missing_fields'] == ['requirement_id', 'contract']
+    assert result['missing_fields'] == ['request_id', 'contract']
     assert 'next_step' in result
 
     interactor, _, _ = registered(tmp_path, monkeypatch, 'ancor-interactor', tasks)
-    result = call(interactor, 'ancor_requirement', {'action': 'confirm'})
+    result = call(interactor, 'ancor_request', {'action': 'confirm'})
     assert result['code'] == 'invalid_request'
     assert result['missing_fields'] == ['draft_id']
 
@@ -161,14 +160,14 @@ def test_interactor_can_read_but_not_mutate_board(tmp_path, monkeypatch):
 
 def test_expanded_context_reports_paused_state_and_reason(tmp_path, monkeypatch):
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-interactor', {})
-    pause = store.create_requirement_command('pause', req['id'], 'User asked', 'Stop briefly')
-    store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+    pause = store.create_request_command('pause', req['id'], 'User asked', 'Stop briefly')
+    store.confirm_request_command(pause['id'], 'pause-confirmation')
     store.finalize_transition(req['id'])
-    context = call(tools, 'ancor_get_context', {'requirement_id': req['id']})
-    assert context['requirement']['status'] == 'paused'
+    context = call(tools, 'ancor_get_context', {'request_id': req['id']})
+    assert context['request']['status'] == 'paused'
     assert context['progression'][0]['state'] == 'paused'
     paused = next(item for item in context['transitions']['items']
-                  if item['kind'] == 'requirement.paused')
+                  if item['kind'] == 'request.paused')
     assert paused['reason_preview'] == 'User asked'
 
 
@@ -181,7 +180,7 @@ def test_notification_tool_output_does_not_expose_transport_error_key(tmp_path, 
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('q1', 'question', 'Need the exact input', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='t1')
+                request_id=req['id'], task_id='t1')
     db = sqlite3.connect(store.path + '.notifications.db')
     db.execute("UPDATE human_notifications SET error=? WHERE id='q1'",
                (json.dumps({'reason_code': 'transport_unavailable'}),))
@@ -214,7 +213,7 @@ def queued_question(store, req):
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('q1', 'question', 'Which label?', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='t1')
+                request_id=req['id'], task_id='t1')
     return box
 
 

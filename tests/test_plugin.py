@@ -95,9 +95,9 @@ def test_confirmation_cannot_be_model_supplied(tmp_path):
     store = Store(tmp_path / 'state.db')
     draft = store.create_draft('exact brief')
     service = Service(configured_context(), store)
-    prepared = service.requirement({'action': 'confirm', 'draft_id': draft['id'], 'confirmed': True})
+    prepared = service.request({'action': 'confirm', 'draft_id': draft['id'], 'confirmed': True})
     assert prepared['clarify_args']
-    assert store.snapshot()['requirements'] == []
+    assert store.snapshot()['requests'] == []
 def configured_context():
     return SimpleNamespace(get_config=lambda key, default=None: default)
 
@@ -107,7 +107,7 @@ def test_confirmation_uses_current_chat_without_delivery_configuration(tmp_path,
     from ancor.service import Service
     from ancor.store import Store
     service = Service(None, Store(tmp_path / 'state.db'))
-    draft = service.requirement({'action': 'draft', 'title': 'Confirmation delivery',
+    draft = service.request({'action': 'draft', 'title': 'Confirmation delivery',
                                  'summary': 'Short high-level summary',
                                  'brief': brief})
     question = draft['clarify_args']['questions'][0]
@@ -119,7 +119,7 @@ def test_confirmation_uses_current_chat_without_delivery_configuration(tmp_path,
               'choices_offered': question['choices'], 'status': 'answered',
               'user_response': question['choices'][1]}]}
     service.post_tool_call('clarify', draft['clarify_args'], result, session_id='s', tool_call_id='c')
-    assert service.store.snapshot()['requirements'][0]['draft_id'] == draft['id']
+    assert service.store.snapshot()['requests'][0]['draft_id'] == draft['id']
     assert not Path(service.store.path + '.presentations.db').exists()
 
 
@@ -146,11 +146,11 @@ class Context(PluginContext):
     def get_config(self, key, default=None):
         if key == 'store_path':
             import os
-            return os.path.join(os.environ['HOME'], 'requirements.db')
+            return os.path.join(os.environ['HOME'], 'requests.db')
         return default
 ctx = Context(PluginManifest(name='ancor'), manager)
 ancor.register(ctx)
-assert registry.get_entry('ancor_requirement', scope=manager.scope_key)
+assert registry.get_entry('ancor_request', scope=manager.scope_key)
 # Even parent_agent is not translated into clarify's callback by registry dispatch.
 from types import SimpleNamespace
 agent = SimpleNamespace(clarify_callback=lambda questions: {'answers': {'q1': 'Yes'}, 'outcome': 'submitted'})
@@ -161,7 +161,7 @@ print('native registration passed; nested clarify unavailable:', result['error']
 from agent.agent_runtime_helpers import invoke_tool
 from ancor.service import Service
 service = Service(ctx)
-draft = service.requirement({'action': 'draft', 'title': 'Native confirmation', 'summary': 'Native summary', 'brief': 'Complete native draft'})
+draft = service.request({'action': 'draft', 'title': 'Native confirmation', 'summary': 'Native summary', 'brief': 'Complete native draft'})
 assert 'Complete native draft' in draft['clarify_args']['questions'][0]['question']
 seen = []
 ctx.register_hook('post_tool_call', lambda **payload: seen.append(payload))
@@ -170,8 +170,8 @@ agent = SimpleNamespace(session_id='native-session', _memory_manager=None, clari
 result = invoke_tool(agent, 'clarify', draft['clarify_args'], '', tool_call_id='native-call')
 assert json.loads(result)['outcome'] == 'submitted', result
 snapshot = service.store.snapshot()
-assert len(snapshot['requirements']) == 1, snapshot
-assert snapshot['requirements'][0]['draft_id'] == draft['id']
+assert len(snapshot['requests']) == 1, snapshot
+assert snapshot['requests'][0]['draft_id'] == draft['id']
 assert seen[-1]['session_id'] == 'native-session'
 assert seen[-1]['tool_call_id'] == 'native-call'
 assert seen[-1]['result'] == result
@@ -197,27 +197,27 @@ def test_only_ancor_roles_have_business_tools():
         plugin.register(ctx)
         assert bool(tools) is expected
         if role == 'ancor-interactor':
-            assert set(tools) == {'ancor_requirement', 'ancor_get_context', 'ancor_board', 'ancor_notify', 'ancor_change', 'ancor_question'}
-            assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == [
+            assert set(tools) == {'ancor_request', 'ancor_get_context', 'ancor_board', 'ancor_notify', 'ancor_change', 'ancor_question'}
+            assert tools['ancor_request']['schema']['parameters']['properties']['action']['enum'] == [
                 'draft', 'confirm', 'cancel', 'pause', 'resume', 'respond',
                 'accept', 'request_changes']
-            forbidden = json.loads(tools['ancor_requirement']['handler']({
-                'action': 'advance', 'requirement_id': 'fixture'}))
+            forbidden = json.loads(tools['ancor_request']['handler']({
+                'action': 'advance', 'request_id': 'fixture'}))
             assert forbidden['code'] == 'forbidden'
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == [
                 'list', 'respond']
             assert set(tools['ancor_get_context']['schema']['parameters']['properties']) == {
-                'requirement_id', 'task_limit', 'notification_limit',
+                'request_id', 'task_limit', 'notification_limit',
                 'attention_limit', 'include_done', 'include_archived',
                 'include_closed_notifications', 'progress_only'}
             assert tools['ancor_board']['schema']['parameters']['properties']['action']['enum'] == ['list', 'show', 'history']
         elif role == 'ancor-coordinator':
-            assert set(tools) == {'ancor_requirement', 'ancor_get_context',
+            assert set(tools) == {'ancor_request', 'ancor_get_context',
                                   'ancor_ack_events', 'ancor_acceptance',
                                   'ancor_board', 'ancor_wake', 'ancor_notify',
                                   'ancor_note', 'ancor_change', 'ancor_question', 'ancor_reconcile'}
-            assert tools['ancor_requirement']['schema']['parameters']['properties']['action']['enum'] == ['advance']
-            forbidden = json.loads(tools['ancor_requirement']['handler']({
+            assert tools['ancor_request']['schema']['parameters']['properties']['action']['enum'] == ['advance']
+            forbidden = json.loads(tools['ancor_request']['handler']({
                 'action': 'draft', 'title': 'No', 'brief': 'No'}))
             assert forbidden['code'] == 'forbidden'
             assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
@@ -232,7 +232,7 @@ def confirmation(tmp_path):
     from ancor.service import Service
     from ancor.store import Store
     service = Service(configured_context(), Store(tmp_path / 'state.db'))
-    draft = service.requirement({'action': 'draft', 'title': 'Exact confirmation',
+    draft = service.request({'action': 'draft', 'title': 'Exact confirmation',
                                  'summary': 'High-level summary',
                                  'brief': 'Complete brief\nline two'})
     args = draft['clarify_args']
@@ -260,12 +260,12 @@ def test_confirmation_survives_service_restart_and_is_exactly_once(tmp_path):
     restarted = Service(configured_context(), service.store)
     restarted.post_tool_call('clarify', args, json.dumps(result), session_id='other', tool_call_id='c')
     restarted.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='other')
-    assert not service.store.snapshot()['requirements']
+    assert not service.store.snapshot()['requests']
     restarted.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
     restarted.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
     snapshot = service.store.snapshot()
-    assert len(snapshot['requirements']) == len(snapshot['pending_events']) == 1
-    assert snapshot['requirements'][0]['draft_id'] == draft['id']
+    assert len(snapshot['requests']) == len(snapshot['pending_events']) == 1
+    assert snapshot['requests'][0]['draft_id'] == draft['id']
     assert Path(draft['draft_file']).read_text().endswith('Complete brief\nline two')
     assert confirmation_row(service) == (1, 'confirmed', None)
 
@@ -273,8 +273,8 @@ def test_confirmation_survives_service_restart_and_is_exactly_once(tmp_path):
 def test_confirmation_leads_with_high_level_summary_then_exact_text(tmp_path):
     service, draft, args, result = confirmation(tmp_path)
     question = args['questions'][0]['question']
-    assert question.index('High-level summary:') < question.index('Exact requirement to be stored:')
-    assert question.index('Exact requirement to be stored:') < question.index('Complete brief\nline two')
+    assert question.index('High-level summary:') < question.index('Exact request to be stored:')
+    assert question.index('Exact request to be stored:') < question.index('Complete brief\nline two')
     assert 'High-level summary\n' in question
 
 
@@ -300,7 +300,7 @@ def test_nonconsent_results_never_activate_or_replay(tmp_path, mutation):
         result = 'not json'
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
     service.post_tool_call('clarify', args, valid, session_id='s', tool_call_id='c')
-    assert not service.store.snapshot()['requirements']
+    assert not service.store.snapshot()['requests']
     consumed, outcome, error = confirmation_row(service)
     expected = 'error' if mutation in {'error', 'malformed'} else 'rejected'
     assert consumed == 1 and outcome == expected and error
@@ -315,7 +315,7 @@ def test_confirmation_store_failure_is_audited(tmp_path, monkeypatch):
     monkeypatch.setattr(service.store, 'confirm', fail)
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
-    assert not service.store.snapshot()['requirements']
+    assert not service.store.snapshot()['requests']
     assert confirmation_row(service) == (1, 'error', 'store unavailable')
 
 
@@ -324,7 +324,7 @@ def test_confirmation_accepts_additive_response_fields(tmp_path):
     result['responses'][0]['surface_metadata'] = {'render': 'interactive_card'}
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
-    assert service.store.snapshot()['requirements'][0]['draft_id'] == draft['id']
+    assert service.store.snapshot()['requests'][0]['draft_id'] == draft['id']
     assert confirmation_row(service) == (1, 'confirmed', None)
 
 
@@ -336,7 +336,7 @@ def test_pre_hook_rejects_incomplete_presentation_and_missing_identity(tmp_path)
     altered['questions'][0]['question'] = 'ANCOR draft confirm?'
     assert service.pre_tool_call('clarify', altered, session_id='s', tool_call_id='c')['action'] == 'block'
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
-    assert not service.store.snapshot()['requirements']
+    assert not service.store.snapshot()['requests']
     assert service.pre_tool_call('clarify', {'questions': [{'question': 'Ordinary clarification?'}]}) is None
 
 
@@ -345,40 +345,40 @@ def test_immutable_draft_file_cannot_be_changed(tmp_path):
     Path(draft['draft_file']).write_text('changed')
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c')['action'] == 'block'
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
-    assert not service.store.snapshot()['requirements']
+    assert not service.store.snapshot()['requests']
 
 
 def cancellation(tmp_path):
     from ancor.service import Service
     from ancor.store import Store
     service = Service(configured_context(), Store(tmp_path / 'state.db'))
-    requirement = service.store.confirm(
+    request = service.store.confirm(
         service.store.create_draft('Cancel this brief')['id'], 'fixture')
-    proposal = service.requirement({
-        'action': 'cancel', 'requirement_ids': [requirement['id']],
+    proposal = service.request({
+        'action': 'cancel', 'request_ids': [request['id']],
         'summary': 'Stop the confirmed work', 'reason': 'User withdrew it'})
     args = proposal['clarify_args']
     question = args['questions'][0]
     result = {'outcome': 'submitted', 'responses': [{'question': question['question'],
               'choices_offered': question['choices'], 'status': 'answered',
               'user_response': question['choices'][1]}]}
-    return service, requirement, proposal, args, result
+    return service, request, proposal, args, result
 
 
 def test_cancellation_requires_exact_confirmation_and_is_idempotent(tmp_path):
-    service, requirement, proposal, args, result = cancellation(tmp_path)
-    assert service.store.get_requirement(requirement['id'])['status'] == 'active'
+    service, request, proposal, args, result = cancellation(tmp_path)
+    assert service.store.get_request(request['id'])['status'] == 'active'
     assert 'ANCOR cancellation ' + proposal['id'] in args['questions'][0]['question']
     question = args['questions'][0]['question']
     assert question.index('High-level summary:') < question.index('Exact cancellation to be stored:')
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
     service.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
     service.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
-    assert service.store.get_requirement(requirement['id'])['target_status'] == 'cancelled'
-    service.store.finalize_transition(requirement['id'])
-    assert service.store.get_requirement(requirement['id'])['status'] == 'cancelled'
+    assert service.store.get_request(request['id'])['target_status'] == 'cancelled'
+    service.store.finalize_transition(request['id'])
+    assert service.store.get_request(request['id'])['status'] == 'cancelled'
     cancelled = [event for event in service.store.pending_events()
-                 if event['kind'] == 'requirement.cancelled']
+                 if event['kind'] == 'request.cancelled']
     assert len(cancelled) == 1
     assert cancelled[0]['payload']['reason'] == 'User withdrew it'
 
@@ -386,31 +386,31 @@ def test_cancellation_requires_exact_confirmation_and_is_idempotent(tmp_path):
 @pytest.mark.parametrize('mutation', ['cancelled', 'timed_out', 'wrong_id', 'wrong_question', 'error'])
 def test_nonconsent_cancellation_results_never_cancel(tmp_path, mutation):
     import copy
-    service, requirement, proposal, args, valid = cancellation(tmp_path)
+    service, request, proposal, args, valid = cancellation(tmp_path)
     service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c')
     result = copy.deepcopy(valid)
     if mutation in {'cancelled', 'timed_out'}:
         result['outcome'] = mutation
     elif mutation == 'wrong_id':
-        result['responses'][0]['user_response'] = 'Cancel ANCOR requirements ' + '0' * 32
+        result['responses'][0]['user_response'] = 'Cancel ANCOR requests ' + '0' * 32
     elif mutation == 'wrong_question':
         result['responses'][0]['question'] = 'Cancel?'
     elif mutation == 'error':
         result = {'error': 'unavailable'}
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
     service.post_tool_call('clarify', args, valid, session_id='s', tool_call_id='c')
-    assert service.store.get_requirement(requirement['id'])['status'] == 'active'
+    assert service.store.get_request(request['id'])['status'] == 'active'
 
 
 def pause_proposal(tmp_path, action='pause'):
     from ancor.service import Service
     from ancor.store import Store
     service = Service(configured_context(), Store(tmp_path / 'state.db'))
-    requirement = service.store.confirm(
+    request = service.store.confirm(
         service.store.create_draft('Pause this brief')['id'], 'fixture')
     if action == 'resume':
-        first = service.requirement({
-            'action': 'pause', 'requirement_id': requirement['id'],
+        first = service.request({
+            'action': 'pause', 'request_id': request['id'],
             'summary': 'Stop briefly', 'reason': 'User asked'})
         args = first['clarify_args']
         question = args['questions'][0]
@@ -420,9 +420,9 @@ def pause_proposal(tmp_path, action='pause'):
                 'question': question['question'], 'choices_offered': question['choices'],
                 'status': 'answered', 'user_response': question['choices'][1]}]}),
             session_id='pause-s', tool_call_id='pause-c')
-        service.store.finalize_transition(requirement['id'])
-    proposal = service.requirement({
-        'action': action, 'requirement_id': requirement['id'],
+        service.store.finalize_transition(request['id'])
+    proposal = service.request({
+        'action': action, 'request_id': request['id'],
         'summary': 'Resume the confirmed work' if action == 'resume' else 'Stop briefly',
         'reason': 'User is ready' if action == 'resume' else 'User asked'})
     args = proposal['clarify_args']
@@ -430,56 +430,56 @@ def pause_proposal(tmp_path, action='pause'):
     result = {'outcome': 'submitted', 'responses': [{'question': question['question'],
               'choices_offered': question['choices'], 'status': 'answered',
               'user_response': question['choices'][1]}]}
-    return service, requirement, proposal, args, result
+    return service, request, proposal, args, result
 
 
 def test_pause_and_resume_require_exact_confirmation_and_are_idempotent(tmp_path):
-    service, requirement, proposal, args, result = pause_proposal(tmp_path)
-    assert service.store.get_requirement(requirement['id'])['status'] == 'active'
+    service, request, proposal, args, result = pause_proposal(tmp_path)
+    assert service.store.get_request(request['id'])['status'] == 'active'
     assert 'ANCOR pause ' + proposal['id'] in args['questions'][0]['question']
     question = args['questions'][0]['question']
     assert question.index('High-level summary:') < question.index('Exact pause to be stored:')
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
     service.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
     service.post_tool_call('clarify', args, json.dumps(result), session_id='s', tool_call_id='c')
-    assert service.store.get_requirement(requirement['id'])['target_status'] == 'paused'
-    service.store.finalize_transition(requirement['id'])
-    assert service.store.get_requirement(requirement['id'])['status'] == 'paused'
+    assert service.store.get_request(request['id'])['target_status'] == 'paused'
+    service.store.finalize_transition(request['id'])
+    assert service.store.get_request(request['id'])['status'] == 'paused'
     paused = [event for event in service.store.pending_events()
-              if event['kind'] == 'requirement.paused']
+              if event['kind'] == 'request.paused']
     assert len(paused) == 1
     assert paused[0]['payload']['reason'] == 'User asked'
 
-    resume_service, resume_requirement, resume, resume_args, resume_result = pause_proposal(
+    resume_service, resume_request, resume, resume_args, resume_result = pause_proposal(
         tmp_path, action='resume')
-    assert resume_service.store.get_requirement(resume_requirement['id'])['status'] == 'paused'
+    assert resume_service.store.get_request(resume_request['id'])['status'] == 'paused'
     assert resume_service.pre_tool_call('clarify', resume_args, session_id='s2', tool_call_id='c2') is None
     resume_service.post_tool_call('clarify', resume_args, json.dumps(resume_result),
                                   session_id='s2', tool_call_id='c2')
     resume_service.post_tool_call('clarify', resume_args, json.dumps(resume_result),
                                   session_id='s2', tool_call_id='c2')
-    assert resume_service.store.get_requirement(resume_requirement['id'])['target_status'] == 'active'
-    resume_service.store.finalize_transition(resume_requirement['id'])
-    assert resume_service.store.get_requirement(resume_requirement['id'])['status'] == 'active'
+    assert resume_service.store.get_request(resume_request['id'])['target_status'] == 'active'
+    resume_service.store.finalize_transition(resume_request['id'])
+    assert resume_service.store.get_request(resume_request['id'])['status'] == 'active'
     resumed = [event for event in resume_service.store.pending_events()
-               if event['kind'] == 'requirement.resumed']
+               if event['kind'] == 'request.resumed']
     assert len(resumed) == 1
 
 
 @pytest.mark.parametrize('mutation', ['cancelled', 'timed_out', 'wrong_id', 'wrong_question', 'error'])
 def test_nonconsent_pause_results_never_change_status(tmp_path, mutation):
     import copy
-    service, requirement, proposal, args, valid = pause_proposal(tmp_path)
+    service, request, proposal, args, valid = pause_proposal(tmp_path)
     service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c')
     result = copy.deepcopy(valid)
     if mutation in {'cancelled', 'timed_out'}:
         result['outcome'] = mutation
     elif mutation == 'wrong_id':
-        result['responses'][0]['user_response'] = 'Pause ANCOR requirement ' + '0' * 32
+        result['responses'][0]['user_response'] = 'Pause ANCOR request ' + '0' * 32
     elif mutation == 'wrong_question':
         result['responses'][0]['question'] = 'Pause?'
     elif mutation == 'error':
         result = {'error': 'unavailable'}
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
     service.post_tool_call('clarify', args, valid, session_id='s', tool_call_id='c')
-    assert service.store.get_requirement(requirement['id'])['status'] == 'active'
+    assert service.store.get_request(request['id'])['status'] == 'active'

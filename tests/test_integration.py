@@ -32,18 +32,18 @@ def call(name, args):
     return json.loads(ctx.dispatch_tool(name, args))
 entry = registry.get_entry('ancor_board', scope=manager.scope_key)
 assert entry
-draft = call('ancor_requirement', {'action':'draft', 'title':'Exact brief', 'summary':'High-level summary', 'brief':'exact brief'})
+draft = call('ancor_request', {'action':'draft', 'title':'Exact brief', 'summary':'High-level summary', 'brief':'exact brief'})
 assert draft['clarify_args']
-assert call('ancor_requirement', {'action':'confirm', 'draft_id':draft['id']})['id'] == draft['id']
+assert call('ancor_request', {'action':'confirm', 'draft_id':draft['id']})['id'] == draft['id']
 store = Store(ctx.get_config('store_path'))
-assert not store.snapshot()['requirements']
+assert not store.snapshot()['requests']
 # Fixture consent only; genuine native confirmation is covered separately.
 req = store.confirm(draft['id'], 'synthetic-fixture')
 text = '  Exact user reply\nDo not broaden scope.  '
-event = call('ancor_requirement', {'action':'respond', 'requirement_id':req['id'], 'body':text})
+event = call('ancor_request', {'action':'respond', 'request_id':req['id'], 'body':text})
 assert event['payload']['body'] == text and event['payload']['authorization'] is False
 assert event['payload']['source'] == 'interactor_transcription'
-assert store.get_requirement(req['id'])['status'] == 'active'
+assert store.get_request(req['id'])['status'] == 'active'
 ctx.role = 'ancor-coordinator'
 ancor.register(ctx)
 entry = registry.get_entry('ancor_board', scope=manager.scope_key)
@@ -77,9 +77,9 @@ store.link_task(req['id'], 'two')
 assert len(call('ancor_board', {'action':'list'})['items']) == 2
 assert call('ancor_board', {'action':'show', 'task_id':'one'})['id'] == 'one'
 evidence = {'brief':'exact brief', 'verification':['checked'], 'artifacts':['result'], 'task_ids':['one']}
-args = {'requirement_id':req['id'], 'action':'accept', 'evidence':evidence}
+args = {'request_id':req['id'], 'action':'accept', 'evidence':evidence}
 assert 'all linked native tasks' in call('ancor_acceptance', args)['error']
-assert store.get_requirement(req['id'])['status'] == 'active'
+assert store.get_request(req['id'])['status'] == 'active'
 tasks['two']['status'] = 'done'
 assert call('ancor_acceptance', args)['status'] == 'awaiting_acceptance'
 assert 'error' not in call('ancor_get_context', {'ack_event_ids':[event['id']]})

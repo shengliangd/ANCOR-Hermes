@@ -26,7 +26,7 @@ def _columns(db, table):
 
 
 def _require_legacy(db):
-    for table in ('drafts', 'requirements'):
+    for table in ('drafts', 'requests'):
         columns = _columns(db, table)
         if not columns:
             raise ValueError(f'missing table: {table}')
@@ -47,10 +47,10 @@ def export_titles(db_path, output_path):
                 'brief': item['brief'],
                 'replacement_of': item.get('replacement_of'),
             })
-        requirements = []
-        for row in db.execute('SELECT * FROM requirements ORDER BY rowid'):
+        requests = []
+        for row in db.execute('SELECT * FROM requests ORDER BY rowid'):
             item = dict(row)
-            requirements.append({
+            requests.append({
                 'id': item['id'],
                 'title': '',
                 'status': item['status'],
@@ -58,9 +58,9 @@ def export_titles(db_path, output_path):
                 'replacement_of': item.get('replacement_of'),
             })
     Path(output_path).write_text(
-        json.dumps({'drafts': drafts, 'requirements': requirements},
+        json.dumps({'drafts': drafts, 'requests': requests},
                    ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    return {'drafts': len(drafts), 'requirements': len(requirements)}
+    return {'drafts': len(drafts), 'requests': len(requests)}
 
 
 def _validate_title(value):
@@ -110,16 +110,16 @@ def apply_titles(db_path, titles_path):
     if not isinstance(payload, dict):
         raise ValueError('title mapping must be a JSON object')
     draft_titles = _mapping(payload, 'drafts')
-    requirement_titles = _mapping(payload, 'requirements')
+    request_titles = _mapping(payload, 'requests')
     with closing(_connect(db_path)) as db:
         _require_legacy(db)
         drafts = [dict(row) for row in db.execute('SELECT * FROM drafts ORDER BY rowid')]
-        requirements = [dict(row) for row in db.execute(
-            'SELECT * FROM requirements ORDER BY rowid')]
+        requests = [dict(row) for row in db.execute(
+            'SELECT * FROM requests ORDER BY rowid')]
         if set(draft_titles) != {row['id'] for row in drafts}:
             raise ValueError('title mapping must cover every draft id exactly')
-        if set(requirement_titles) != {row['id'] for row in requirements}:
-            raise ValueError('title mapping must cover every requirement id exactly')
+        if set(request_titles) != {row['id'] for row in requests}:
+            raise ValueError('title mapping must cover every request id exactly')
 
     backup = _backup(db_path)
     db = _connect(db_path)
@@ -129,7 +129,7 @@ def apply_titles(db_path, titles_path):
                         id TEXT PRIMARY KEY, title TEXT NOT NULL,
                         brief TEXT NOT NULL,
                         replacement_of TEXT, summary TEXT)''')
-        db.execute('''CREATE TABLE requirements_new (
+        db.execute('''CREATE TABLE requests_new (
                         id TEXT PRIMARY KEY, draft_id TEXT UNIQUE NOT NULL,
                         title TEXT NOT NULL, brief TEXT NOT NULL,
                         replacement_of TEXT,
@@ -139,22 +139,22 @@ def apply_titles(db_path, titles_path):
             db.execute('INSERT INTO drafts_new VALUES (?, ?, ?, ?, ?)', (
                 row['id'], draft_titles[row['id']], row['brief'],
                 row.get('replacement_of'), row.get('summary')))
-        for row in requirements:
-            db.execute('INSERT INTO requirements_new VALUES (?, ?, ?, ?, ?, ?, ?)', (
-                row['id'], row['draft_id'], requirement_titles[row['id']],
+        for row in requests:
+            db.execute('INSERT INTO requests_new VALUES (?, ?, ?, ?, ?, ?, ?)', (
+                row['id'], row['draft_id'], request_titles[row['id']],
                 row['brief'], row.get('replacement_of'),
                 row['confirmation_reference'], row['status']))
         db.execute('DROP TABLE drafts')
-        db.execute('DROP TABLE requirements')
+        db.execute('DROP TABLE requests')
         db.execute('ALTER TABLE drafts_new RENAME TO drafts')
-        db.execute('ALTER TABLE requirements_new RENAME TO requirements')
+        db.execute('ALTER TABLE requests_new RENAME TO requests')
         db.commit()
     except BaseException:
         db.rollback()
         raise
     finally:
         db.close()
-    return {'drafts': len(drafts), 'requirements': len(requirements),
+    return {'drafts': len(drafts), 'requests': len(requests),
             'backup': str(backup)}
 
 

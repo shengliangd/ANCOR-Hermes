@@ -9,18 +9,18 @@ from ancor.store import Store
 
 
 def test_read_only_structured_detail_and_audit_redaction(tmp_path, monkeypatch):
-    path = tmp_path / 'requirements.db'
+    path = tmp_path / 'requests.db'
     store = Store(path)
     proposal = store.propose_change(None, [{'op': 'create', 'title': 'Report', 'fields': {'outcome': ['Deliver report']}}],
                                     actor='interactor', source={'input': 'Deliver report', 'token': 'secret-source'})
-    rid = store.commit_change(proposal['id'], 'private-confirmation')['requirement_id']
+    rid = store.commit_change(proposal['id'], 'private-confirmation')['request_id']
     monkeypatch.setenv('ANCOR_STORE_PATH', str(path))
     api = importlib.import_module('ancor.dashboard.plugin_api')
     app = FastAPI()
     app.include_router(api.router, prefix='/api/plugins/ancor')
     before = path.read_bytes()
     with TestClient(app) as client:
-        result = client.get('/api/plugins/ancor/requirements/' + rid)
+        result = client.get('/api/plugins/ancor/requests/' + rid)
         assert result.status_code == 200
         detail = result.json()
         assert detail['fields']['outcome'][0]['body'] == 'Deliver report'
@@ -28,7 +28,7 @@ def test_read_only_structured_detail_and_audit_redaction(tmp_path, monkeypatch):
         audit = client.get('/api/plugins/ancor/changes/' + proposal['id']).json()
         assert audit['confirmation_reference'] == '[redacted]'
         assert audit['source']['token'] == '[redacted]'
-        assert client.post('/api/plugins/ancor/requirements/' + rid, json={}).status_code == 405
+        assert client.post('/api/plugins/ancor/requests/' + rid, json={}).status_code == 405
     assert path.read_bytes() == before
 
 
@@ -49,4 +49,4 @@ def test_dashboard_renders_structured_details_without_external_dependencies():
     ''')
     ctx.eval(code)
     result = ctx.eval('JSON.stringify(captured())')
-    assert 'ANCOR' in result and '只读需求' in result
+    assert 'ANCOR' in result and '只读请求' in result

@@ -73,8 +73,8 @@ def test_native_events_read_only_and_bounded(tmp_path, monkeypatch):
 
 def test_guard_blocks_stale_but_not_unrelated(tmp_path):
     tasks = [
-        {'id': 'stale', 'status': 'running', 'body': 'ANCOR-LINK:{"requirement_id":"r1","revision":1,"key":"a"}'},
-        {'id': 'fresh', 'status': 'running', 'body': 'ANCOR-LINK:{"requirement_id":"r1","revision":2,"key":"b"}'},
+        {'id': 'stale', 'status': 'running', 'body': 'ANCOR-LINK:{"request_id":"r1","revision":1,"key":"a"}'},
+        {'id': 'fresh', 'status': 'running', 'body': 'ANCOR-LINK:{"request_id":"r1","revision":2,"key":"b"}'},
         {'id': 'other', 'status': 'running', 'body': 'unmanaged'},
     ]
     blocked = []
@@ -98,7 +98,7 @@ def test_guard_blocks_stale_but_not_unrelated(tmp_path):
 def test_guard_defers_unsupported_states_and_isolates_failures():
     board = NativeBoard('test')
     tasks = [{'id': status, 'status': status,
-              'body': 'ANCOR-LINK:{"requirement_id":"old","revision":1,"key":"x"}'}
+              'body': 'ANCOR-LINK:{"request_id":"old","revision":1,"key":"x"}'}
              for status in ('todo', 'review', 'running', 'ready', 'triage')]
     board.list = lambda: tasks
     calls = []
@@ -179,7 +179,7 @@ def test_create_durable_link_and_explicit_cli_scope(tmp_path):
     board = NativeBoard('ancor', profile='ancor-coordinator', run=run)
     result = board.create('r1', 2, 'step1', title='Do it', body='details', assignee='ancor-worker')
     assert result['id'] == 't1'
-    assert board.link(result) == {'requirement_id': 'r1', 'revision': 2, 'key': 'step1'}
+    assert board.link(result) == {'request_id': 'r1', 'revision': 2, 'key': 'step1'}
     create = next(c for c in calls if 'create' in c)
     assert create[:6] == ['hermes', '-p', 'ancor-coordinator', 'kanban', '--board', 'ancor']
     assert '--idempotency-key' in create

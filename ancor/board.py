@@ -87,9 +87,9 @@ class NativeBoard:
             return None
         try:
             value = json.loads(first[len(prefix):])
-            if set(value) != {'requirement_id', 'revision', 'key'}:
+            if set(value) != {'request_id', 'revision', 'key'}:
                 return None
-            if not isinstance(value['requirement_id'], str) or not isinstance(value['key'], str) or type(value['revision']) is not int:
+            if not isinstance(value['request_id'], str) or not isinstance(value['key'], str) or type(value['revision']) is not int:
                 return None
             return value
         except (ValueError, TypeError):
@@ -107,7 +107,7 @@ class NativeBoard:
         return actual
 
     def dependency(self, action, parent_id, child_id):
-        """Native prerequisite edge, not an ANCOR requirement association."""
+        """Native prerequisite edge, not an ANCOR request association."""
         if action not in {'link', 'unlink'}:
             raise ValueError('unknown dependency action')
         self._call(action, parent_id, child_id, json_output=False)
@@ -194,7 +194,7 @@ class NativeBoard:
     def guard(self, revisions):
         """Best-effort stale revision stop, NOT a pre-dispatch atomic fence.
 
-        Missing requirements are considered stale. Native block revokes claims;
+        Missing requests are considered stale. Native block revokes claims;
         it cannot undo worker side effects or prevent the list/block race. Run on
         confirmed changes and before reconciliation, under coordinator lock.
         """
@@ -203,7 +203,7 @@ class NativeBoard:
             link = self.link(task)
             if not link or task.get('archived_at') or task['status'] in {'done', 'cancelled', 'blocked'}:
                 continue
-            if revisions.get(link['requirement_id']) == link['revision']:
+            if revisions.get(link['request_id']) == link['revision']:
                 continue
             # Public block only accepts running/ready. Do not rewrite native
             # state to force a transition; retry unsupported cards next scan.
@@ -211,15 +211,15 @@ class NativeBoard:
                 self.guard_state['deferred'].append(task['id'])
                 continue
             try:
-                self.block(task['id'], 'ANCOR requirement revision superseded; do not resume')
+                self.block(task['id'], 'ANCOR request revision superseded; do not resume')
             except Exception:
                 self.guard_state['failed'].append(task['id'])
             else:
                 self.guard_state['stopped'].append(task['id'])
         return self.guard_state['stopped']
 
-    def create(self, requirement_id, revision, key, *, title, body, assignee, parent_ids=(), hold=False):
-        link = {'requirement_id': requirement_id, 'revision': revision, 'key': key}
+    def create(self, request_id, revision, key, *, title, body, assignee, parent_ids=(), hold=False):
+        link = {'request_id': request_id, 'revision': revision, 'key': key}
         encoded = json.dumps(link, sort_keys=True, separators=(',', ':'))
         # Native idempotency + in-body metadata survives a crash before store linking.
         token = 'ancor:' + hashlib.sha256(encoded.encode()).hexdigest()
@@ -236,6 +236,6 @@ class NativeBoard:
             raise RuntimeError('native task link verification failed')
         return actual
 
-    def transfer(self, task_id, requirement_id, revision, key, body):
-        encoded = json.dumps({'requirement_id': requirement_id, 'revision': revision, 'key': key}, sort_keys=True, separators=(',', ':'))
+    def transfer(self, task_id, request_id, revision, key, body):
+        encoded = json.dumps({'request_id': request_id, 'revision': revision, 'key': key}, sort_keys=True, separators=(',', ':'))
         return self.edit(task_id, body='ANCOR-LINK:' + encoded + '\n' + body)

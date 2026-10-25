@@ -84,7 +84,7 @@ class Journey:
         from ancor.board import NativeBoard
         import ancor
         import tools.clarify_tool  # register the genuine native clarify handler
-        self.config = {'store_path': str(Path(os.environ['HOME']) / 'requirements.db'),
+        self.config = {'store_path': str(Path(os.environ['HOME']) / 'requests.db'),
                        'board': 'default', 'human_target': 'feishu:simulated-human',
                        'transport_profile': 'default'}
         config = self.config
@@ -106,7 +106,7 @@ class Journey:
         self.send = send
         ancor.register(self.ctx)
         ancor.register(self.coord)
-        assert registry.get_entry('ancor_requirement', scope=get_plugin_manager().scope_key)
+        assert registry.get_entry('ancor_request', scope=get_plugin_manager().scope_key)
         self.store = Store(config['store_path'])
         # An isolated native profile is needed by NativeBoard's explicit -p.
         profile = Path(os.environ['HERMES_HOME']) / 'profiles' / 'ancor-interactor'
@@ -129,7 +129,7 @@ class Journey:
                                  target=self.config['human_target'])
         tasks = {task['id']: task for task in self.board.list()}
         delivery = NotificationDispatcher(
-            box, self.send, resolve_requirement=self.store.get_requirement,
+            box, self.send, resolve_request=self.store.get_request,
             resolve_task=lambda task_id: tasks.get(task_id), retry_seconds=1)
         for _ in range(10):
             if not asyncio.run(delivery.deliver_once()):
@@ -138,7 +138,7 @@ class Journey:
 
     def call(self, tool, **args):
         context = self.coord if (tool in {'board', 'acceptance', 'wake'}
-                                 or (tool == 'requirement'
+                                 or (tool == 'request'
                                      and args.get('action') == 'advance')) else self.ctx
         if tool == 'notify' and args.get('action') == 'respond': context = self.ctx
         value = json.loads(context.dispatch_tool('ancor_' + tool, args))
@@ -157,7 +157,7 @@ class Journey:
                     brief=brief)
         if replacement_of:
             args['replacement_of'] = replacement_of
-        return self.call('requirement', **args)
+        return self.call('request', **args)
 
     def confirm(self, draft, outcome='submitted', choice=1):
         from agent.agent_runtime_helpers import invoke_tool
@@ -173,13 +173,13 @@ class Journey:
                                        tool_call_id='journey-call-' + str(self.calls)))
         assert shown and draft['brief'] in shown[0]['question']
         assert result.get('outcome') == outcome, result
-        requirements = [r for r in self.store.snapshot()['requirements'] if r['draft_id'] == draft['id']]
+        requests = [r for r in self.store.snapshot()['requests'] if r['draft_id'] == draft['id']]
         if outcome == 'submitted' and choice == 1:
-            assert len(requirements) == 1
-            return requirements[0]
-        assert not requirements
+            assert len(requests) == 1
+            return requests[0]
+        assert not requests
 
-    def requirement(self, **kwargs):
+    def request(self, **kwargs):
         return self.confirm(self.draft(**kwargs))
 
     def confirm_human(self, proposal, expected_status):
@@ -197,12 +197,12 @@ class Journey:
                                        tool_call_id='journey-call-' + str(self.calls)))
         assert shown and 'confirm' in shown[0]['question'].lower()
         assert result.get('outcome') == 'submitted', result
-        requirement = self.store.get_requirement(proposal['requirement_id'])
-        assert requirement['status'] == expected_status, requirement
-        return requirement
+        request = self.store.get_request(proposal['request_id'])
+        assert request['status'] == expected_status, request
+        return request
 
     def create(self, req, key):
-        detail = self.call('board', action='create', requirement_id=req['id'], key=key,
+        detail = self.call('board', action='create', request_id=req['id'], key=key,
                            title='Execute ' + key,
                            contract=self.contract(key))
         assert detail['task']['assignee'] == 'ancor-worker'
@@ -212,7 +212,7 @@ class Journey:
     @staticmethod
     def contract(key):
         return dict(outcome='Execute ' + key,
-                    inputs=['confirmed requirement'],
+                    inputs=['confirmed request'],
                     expected_output=[key + ' artifact'],
                     evidence=['Verify ' + key],
                     binding_constraints=['Preserve exact values'])
@@ -275,14 +275,14 @@ def journey_confirmation(j):
     req = j.confirm(draft)
     j.confirm(draft)
     assert req['status'] == 'active'
-    assert len(j.store.snapshot()['requirements']) == 1
+    assert len(j.store.snapshot()['requests']) == 1
     assert len(j.store.pending_events()) == 1
 
 
 def journey_rolling(j):
-    req = j.requirement()
+    req = j.request()
     a = j.create(req, 'A')
-    detail = j.call('board', action='create', requirement_id=req['id'], key='B',
+    detail = j.call('board', action='create', request_id=req['id'], key='B',
                     title='Execute B', parent_ids=[a], hold=True,
                     contract=j.contract('B'))
     b = detail['task']['id']
@@ -313,7 +313,7 @@ def journey_rolling(j):
 
 
 def journey_blocker(j):
-    req = j.requirement()
+    req = j.request()
     tid = j.create(req, 'blocked-worker')
     j.claim(tid)
     j.worker(tid, 'block', 'Need coordinator to identify report source', '--kind', 'needs_input')
@@ -323,7 +323,7 @@ def journey_blocker(j):
     assert not j.sent, 'worker blocker must not automatically notify the human'
     j.call('board', action='comment', task_id=tid, body='Coordinator resolved source: use approved fixture')
     j.call('notify', action='send', id='label-question', kind='question', message='Use label Quarterly?',
-           requirement_id=req['id'], task_id=tid)
+           request_id=req['id'], task_id=tid)
     j.deliver_notifications()
     answer = 'Yes, use Quarterly. Do not deploy.'
     from ancor.notification import NotificationOutbox
@@ -351,64 +351,64 @@ def journey_blocker(j):
 
 
 def journey_replacement(j):
-    old = j.requirement(brief='Old report')
-    unrelated = j.requirement(brief='Unrelated report')
+    old = j.request(brief='Old report')
+    unrelated = j.request(brief='Unrelated report')
     old_task = j.create(old, 'old')
     j.claim(old_task)
     other_task = j.create(unrelated, 'other')
     draft = j.draft(brief='Replacement report', replacement_of=old['id'])
     j.confirm(draft, outcome='cancelled')
-    assert j.store.get_requirement(old['id'])['status'] == 'active'
+    assert j.store.get_request(old['id'])['status'] == 'active'
     new = j.confirm(draft)
-    staged_old = j.store.get_requirement(old['id'])
+    staged_old = j.store.get_request(old['id'])
     assert staged_old['status'] == 'active'
     assert staged_old['target_status'] == 'invalidated'
     assert new['status'] == 'pending' and new['target_status'] == 'active'
     assert j.status(old_task) == 'running', 'confirmation records invalidation, not automatic stop'
-    inactive_error = j.error('board', action='create', requirement_id=old['id'], key='forbidden',
+    inactive_error = j.error('board', action='create', request_id=old['id'], key='forbidden',
                              title='No', contract=j.contract('forbidden'))
     assert 'not active' in inactive_error, inactive_error
     j.complete(other_task)
-    advanced = j.call('requirement', action='advance', requirement_id=old['id'])
+    advanced = j.call('request', action='advance', request_id=old['id'])
     assert advanced['outcome'] == 'completed'
-    assert j.store.get_requirement(old['id'])['status'] == 'invalidated'
-    assert j.store.get_requirement(new['id'])['status'] == 'active'
+    assert j.store.get_request(old['id'])['status'] == 'invalidated'
+    assert j.store.get_request(new['id'])['status'] == 'active'
     assert j.status(old_task) == 'archived'
     new_task = j.create(new, 'replacement')
     j.complete(new_task)
     assert j.status(other_task) == 'done'
-    assert j.store.get_requirement(unrelated['id'])['status'] == 'active'
+    assert j.store.get_request(unrelated['id'])['status'] == 'active'
 
 
 def journey_acceptance(j):
-    req = j.requirement()
+    req = j.request()
     tid = j.create(req, 'initial')
     abandoned = j.create(req, 'abandoned-alternative')
     j.call('board', action='block', task_id=abandoned, reason='Coordinator chooses replacement approach')
     j.call('board', action='archive', task_id=abandoned,
            reason='Alternative abandoned; preserve history, replacement covers the brief')
     assert j.status(abandoned) == 'archived'
-    premature = dict(action='send', id='accept:' + req['id'], requirement_id=req['id'],
+    premature = dict(action='send', id='accept:' + req['id'], request_id=req['id'],
                      kind='completion', message='Report delivered')
     assert 'awaiting human acceptance' in j.error('notify', **premature)
     j.complete(tid)
-    j.call('acceptance', action='reject', requirement_id=req['id'], reason='Independent check found missing total')
-    assert j.store.get_requirement(req['id'])['status'] == 'active'
+    j.call('acceptance', action='reject', request_id=req['id'], reason='Independent check found missing total')
+    assert j.store.get_request(req['id'])['status'] == 'active'
     repair = j.create(req, 'repair-total')
     evidence = j.evidence(req, [tid, repair])
-    assert 'all linked native tasks' in j.error('acceptance', action='accept', requirement_id=req['id'], evidence=evidence)
+    assert 'all linked native tasks' in j.error('acceptance', action='accept', request_id=req['id'], evidence=evidence)
     j.complete(repair)
-    assert j.call('acceptance', action='accept', requirement_id=req['id'], evidence=evidence)['status'] == 'awaiting_acceptance'
+    assert j.call('acceptance', action='accept', request_id=req['id'], evidence=evidence)['status'] == 'awaiting_acceptance'
     j.call('notify', **premature)
     j.deliver_notifications()
     assert len(j.sent) == 1
-    acceptance = j.call('requirement', action='accept', requirement_id=req['id'])
+    acceptance = j.call('request', action='accept', request_id=req['id'])
     j.confirm_human(acceptance, 'accepted')
     assert j.call('notify', action='list')['notifications']['items'][0]['state'] == 'closed'
 
 
 def journey_restart(j):
-    req = j.requirement()
+    req = j.request()
     tid = j.create(req, 'stable-key')
     assert j.create(req, 'stable-key') == tid
     j.complete(tid)

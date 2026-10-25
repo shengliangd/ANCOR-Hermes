@@ -1,8 +1,8 @@
 name: ancor
-version: 0.6.0
-description: Durable requirements and interactor/coordinator workflow over native Hermes Kanban.
+version: 0.7.0
+description: Durable requests and interactor/coordinator workflow over native Hermes Kanban.
 provides_tools:
-  - ancor_requirement
+  - ancor_request
   - ancor_get_context
   - ancor_ack_events
   - ancor_acceptance

@@ -6,7 +6,7 @@ import pytest
 
 from ancor.service import Service
 from ancor.store import Store
-from test_atomic_requirements import atomic, apply, points, propose, verify
+from test_atomic_requests import atomic, apply, points, propose, verify
 
 
 def presentation(store, proposal):
@@ -23,7 +23,7 @@ def test_point_changes_show_exact_before_after_and_field_strength(atomic):
     ])
     view = presentation(store, p)
     text = view['clarify_args']['questions'][0]['question']
-    assert '更新需求「Report」' in text
+    assert '更新请求「Report」' in text
     assert '将目标改为建议' in text and point['body'] in text
     assert '原内容：' in text and '新内容：' in text
     assert '      可选做法\n    保持这个换行  ' in text
@@ -64,7 +64,7 @@ def test_title_change_does_not_rewrite_existing_confirmation(atomic):
     restarted = Store(store.path)
     assert presentation(restarted, restarted.get_change(p['id']))['clarify_args'] == before
     restarted.commit_change(p['id'], 'confirmed')
-    assert restarted.get_requirement(rid)['title'] == 'New title'
+    assert restarted.get_request(rid)['title'] == 'New title'
 
 
 def test_tampering_with_human_text_or_choice_is_rejected(atomic):
@@ -87,7 +87,7 @@ def test_acceptance_names_artifacts_and_verification_without_internal_ids(atomic
     verify(store, rid)
     p = propose(store, rid, [{'op': 'accept', 'verification_id': store.latest_verification(rid)['id']}])
     text = presentation(store, p)['presentation']
-    assert '验收需求「Report」' in text and 'report.md' in text
+    assert '验收请求「Report」' in text and 'report.md' in text
     assert 'independent check' in text and 'No personal data' in text
     assert 'version_id' not in text and 'verification_id' not in text
 
@@ -117,7 +117,7 @@ def test_old_proposal_keeps_original_confirmation_protocol(atomic):
     service.post_tool_call('clarify', args, {'outcome': 'submitted', 'responses': [{
         'question': q['question'], 'choices_offered': q['choices'], 'status': 'answered', 'user_response': q['choices'][1]
     }]}, session_id='old', tool_call_id='old')
-    assert store.get_requirement(rid)['title'] == 'Legacy pending rename'
+    assert store.get_request(rid)['title'] == 'Legacy pending rename'
 
 
 def test_creation_and_conversion_present_full_content(tmp_path):
@@ -125,7 +125,7 @@ def test_creation_and_conversion_present_full_content(tmp_path):
     p = propose(store, None, [{'op': 'create', 'title': '新报告', 'fields': {
         'outcome': ['生成报告'], 'constraint': ['不能联网'], 'advice': ['参考旧版'], 'context': ['数据在本地']}}])
     text = presentation(store, p)['presentation']
-    assert '创建需求「新报告」' in text
+    assert '创建请求「新报告」' in text
     assert all(body in text for body in ('生成报告', '不能联网', '参考旧版', '数据在本地'))
     legacy = store.confirm(store.create_draft('原始正文\n  保留格式')['id'], 'legacy')
     p = propose(store, legacy['id'], [{'op': 'convert', 'fields': {'outcome': ['新目标']}}])

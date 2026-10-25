@@ -13,14 +13,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from ancor.views import event_summary, notification_detail, notification_selection, notification_summary, requirement_detail, requirement_ref, task_detail, task_ref
+from ancor.views import event_summary, notification_detail, notification_selection, notification_summary, request_detail, request_ref, task_detail, task_ref
 
 router = APIRouter()
 
 
 def _store_path() -> Path:
     raw = os.environ.get("ANCOR_STORE_PATH") or os.environ.get("ANCOR_DB_PATH")
-    return Path(raw).expanduser() if raw else Path.home() / ".hermes" / "ancor" / "requirements.db"
+    return Path(raw).expanduser() if raw else Path.home() / ".hermes" / "ancor" / "requests.db"
 
 
 def _notifications_path() -> Path:
@@ -67,12 +67,12 @@ def _safe_event(row: dict) -> dict:
     return event_summary(row)
 
 
-def _requirements(conn):
-    return _rows(conn, "SELECT * FROM requirements ORDER BY rowid")
+def _requests(conn):
+    return _rows(conn, "SELECT * FROM requests ORDER BY rowid")
 
 
 def _links(conn):
-    return _rows(conn, "SELECT requirement_id,task_id FROM task_links ORDER BY requirement_id,task_id")
+    return _rows(conn, "SELECT request_id,task_id FROM task_links ORDER BY request_id,task_id")
 
 
 def _read_tasks():
@@ -112,19 +112,19 @@ def _notifications():
 @router.get("/overview")
 def overview():
     conn = _ro(_store_path())
-    requirements, links, events, questions = [], [], [], []
+    requests, links, events, questions = [], [], [], []
     if conn is not None:
         try:
-            requirements = _requirements(conn)
+            requests = _requests(conn)
             links = _links(conn)
             events = _rows(conn, "SELECT id,kind,payload,source_key FROM events ORDER BY id")
             if conn.execute("SELECT 1 FROM sqlite_master WHERE name='questions'").fetchone():
-                questions = _rows(conn, "SELECT id,requirement_id,body,state,revision FROM questions ORDER BY created_at")
+                questions = _rows(conn, "SELECT id,request_id,body,state,revision FROM questions ORDER BY created_at")
         finally:
             conn.close()
     tasks = _read_tasks()
-    by_req = {link["task_id"]: link["requirement_id"] for link in links}
-    titles = {row["id"]: row["title"] for row in requirements}
+    by_req = {link["task_id"]: link["request_id"] for link in links}
+    titles = {row["id"]: row["title"] for row in requests}
     task_items = [task_ref(task, by_req.get(task.get("id")), titles.get(by_req.get(task.get("id")))) for task in tasks]
     notifications = _notifications()
     visible = notification_selection(notifications)
@@ -134,7 +134,7 @@ def overview():
     question_items.extend({**notification_summary(n), "detail_kind": "notifications"}
                           for n in visible if n["kind"] == "question" and n["id"] not in question_ids)
     return {
-        "requirements": {"items": [requirement_ref(row) for row in requirements], "count": len(requirements), "returned": len(requirements), "truncated": False},
+        "requests": {"items": [request_ref(row) for row in requests], "count": len(requests), "returned": len(requests), "truncated": False},
         "tasks": {"items": task_items, "count": len(task_items), "returned": len(task_items), "truncated": False},
         "questions": {"items": question_items[:50], "count": len(question_items), "returned": min(50, len(question_items)), "truncated": len(question_items) > 50},
         "notifications": {"items": [notification_summary(row) for row in visible], "count": len(notifications), "returned": len(visible), "truncated": len(visible) < len(notifications)},
@@ -143,24 +143,24 @@ def overview():
     }
 
 
-@router.get("/requirements/{requirement_id}")
-def requirement(requirement_id: str):
+@router.get("/requests/{request_id}")
+def request(request_id: str):
     conn = _ro(_store_path())
     if conn is None:
-        raise HTTPException(status_code=404, detail="requirement not found")
+        raise HTTPException(status_code=404, detail="request not found")
     try:
-        row = _one(conn, "SELECT * FROM requirements WHERE id=?", (requirement_id,), "requirement")
-        links = _rows(conn, "SELECT task_id FROM task_links WHERE requirement_id=? ORDER BY task_id", (requirement_id,))
-        result = {"requirement": requirement_detail(row), "task_ids": [item["task_id"] for item in links]}
+        row = _one(conn, "SELECT * FROM requests WHERE id=?", (request_id,), "request")
+        links = _rows(conn, "SELECT task_id FROM task_links WHERE request_id=? ORDER BY task_id", (request_id,))
+        result = {"request": request_detail(row), "task_ids": [item["task_id"] for item in links]}
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='point_versions'").fetchone():
-            points = _rows(conn, "SELECT * FROM point_versions WHERE requirement_id=? AND invalidated_at IS NULL ORDER BY position,point_id", (requirement_id,))
+            points = _rows(conn, "SELECT * FROM point_versions WHERE request_id=? AND invalidated_at IS NULL ORDER BY position,point_id", (request_id,))
             result["fields"] = {field: [p for p in points if p["field"] == field] for field in ("outcome", "constraint", "advice", "context")}
-            result["questions"] = _rows(conn, "SELECT * FROM questions WHERE requirement_id=? ORDER BY created_at", (requirement_id,))
-            result["coordination"] = _rows(conn, "SELECT * FROM impact_reviews WHERE requirement_id=? AND generation=? ORDER BY task_id", (requirement_id, row["generation"]))
-            changes = _rows(conn, "SELECT id,actor,operations,created_at,committed_at FROM changes WHERE requirement_id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note' ORDER BY committed_at DESC LIMIT 50", (requirement_id,))
+            result["questions"] = _rows(conn, "SELECT * FROM questions WHERE request_id=? ORDER BY created_at", (request_id,))
+            result["coordination"] = _rows(conn, "SELECT * FROM impact_reviews WHERE request_id=? AND generation=? ORDER BY task_id", (request_id, row["generation"]))
+            changes = _rows(conn, "SELECT id,actor,operations,created_at,committed_at FROM changes WHERE request_id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note' ORDER BY committed_at DESC LIMIT 50", (request_id,))
             for change in changes:
                 change["operations"] = json.loads(change["operations"])
-            total = conn.execute("SELECT COUNT(*) FROM changes WHERE requirement_id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note'", (requirement_id,)).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM changes WHERE request_id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note'", (request_id,)).fetchone()[0]
             result["changes"] = {"items": changes, "count": total, "returned": len(changes), "truncated": total > len(changes)}
         return _redact(result)
     finally:

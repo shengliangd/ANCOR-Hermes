@@ -55,8 +55,8 @@ def _preview_field(target, field, value, limit=DEFAULT_PREVIEW_CHARS):
             target[field + '_truncated'] = True
 
 
-def requirement_exact_via(requirement_id):
-    return {'tool': 'ancor_get_context', 'args': {'requirement_id': requirement_id}}
+def request_exact_via(request_id):
+    return {'tool': 'ancor_get_context', 'args': {'request_id': request_id}}
 
 
 def task_exact_via(task_id):
@@ -71,19 +71,19 @@ def event_exact_via(event_id):
     return {'tool': 'ancor_get_context', 'args': {'event_id': event_id}}
 
 
-def requirement_ref(requirement, progression=None, *, exact_via=False):
-    """Identity and health for one requirement in a collection."""
+def request_ref(request, progression=None, *, exact_via=False):
+    """Identity and health for one request in a collection."""
     item = {
-        'id': requirement['id'],
-        'title': requirement['title'],
-        'status': requirement['status'],
-        'replacement_of': requirement.get('replacement_of'),
+        'id': request['id'],
+        'title': request['title'],
+        'status': request['status'],
+        'replacement_of': request.get('replacement_of'),
     }
     for key in ('generation', 'observed_generation'):
-        if key in requirement:
-            item[key] = requirement[key]
-    if requirement.get('target_status') is not None:
-        item['target_status'] = requirement['target_status']
+        if key in request:
+            item[key] = request[key]
+    if request.get('target_status') is not None:
+        item['target_status'] = request['target_status']
     if progression is not None:
         item['progression'] = {
             'state': progression.get('state'),
@@ -93,27 +93,27 @@ def requirement_ref(requirement, progression=None, *, exact_via=False):
         if progression.get('human_waiting'):
             item['progression']['human_waiting'] = progression['human_waiting']
     if exact_via:
-        item['exact_via'] = requirement_exact_via(requirement['id'])
+        item['exact_via'] = request_exact_via(request['id'])
     return item
 
 
-def requirement_progress(requirement, progression=None, tasks=(), notifications=()):
+def request_progress(request, progression=None, tasks=(), notifications=()):
     """One compact row for the open-work progress table."""
     progression = progression or {}
     counts = task_counts(tasks)
     item = {
-        'id': requirement['id'],
-        'title': requirement['title'],
-        'status': requirement['status'],
+        'id': request['id'],
+        'title': request['title'],
+        'status': request['status'],
         'state': progression.get('state'),
         'reason': progression.get('reason'),
         'tasks': {'open': counts['open'], 'total': counts['total']},
     }
     for key in ('generation', 'observed_generation'):
-        if key in requirement:
-            item[key] = requirement[key]
-    if requirement.get('target_status') is not None:
-        item['target_status'] = requirement['target_status']
+        if key in request:
+            item[key] = request[key]
+    if request.get('target_status') is not None:
+        item['target_status'] = request['target_status']
     waiting_on = progression.get('waiting_on')
     if waiting_on:
         item['waiting_on'] = waiting_on
@@ -122,7 +122,7 @@ def requirement_progress(requirement, progression=None, tasks=(), notifications=
         item['human_waiting'] = human_waiting
     open_questions = sum(
         1 for row in notifications
-        if row.get('requirement_id') == requirement['id'] and is_open_question(row))
+        if row.get('request_id') == request['id'] and is_open_question(row))
     if open_questions:
         item['open_questions'] = open_questions
     task_by_id = {task['id']: task for task in tasks}
@@ -149,44 +149,44 @@ def requirement_progress(requirement, progression=None, tasks=(), notifications=
     return item
 
 
-def completion_id(requirement):
-    base = 'accept:' + requirement['id']
-    if requirement.get('content_mode') == 'points':
-        return base + ':' + str(requirement.get('verification_id'))
+def completion_id(request):
+    base = 'accept:' + request['id']
+    if request.get('content_mode') == 'points':
+        return base + ':' + str(request.get('verification_id'))
     return base
 
 
-def awaiting_acceptances(requirements, notifications):
-    """Requirements whose coordinator-verified result needs the human's decision."""
-    waiting = {requirement['id']: requirement for requirement in requirements or ()
-               if requirement.get('status') == 'awaiting_acceptance'}
+def awaiting_acceptances(requests, notifications):
+    """Requests whose coordinator-verified result needs the human's decision."""
+    waiting = {request['id']: request for request in requests or ()
+               if request.get('status') == 'awaiting_acceptance'}
     latest = {}
     for row in notifications or ():
         if row.get('kind') != 'completion' or row.get('closed_at') is not None:
             continue
-        requirement = waiting.get(row.get('requirement_id'))
-        if requirement is not None:
-            latest[requirement['id']] = row
+        request = waiting.get(row.get('request_id'))
+        if request is not None:
+            latest[request['id']] = row
     items = []
-    for requirement_id, requirement in waiting.items():
-        row = latest.get(requirement_id)
+    for request_id, request in waiting.items():
+        row = latest.get(request_id)
         result_preview, truncated = preview(
             row.get('message') if row else None, DEFAULT_PREVIEW_CHARS)
         item = {
-            'id': requirement_id,
-            'title': requirement['title'],
+            'id': request_id,
+            'title': request['title'],
             'status': 'awaiting_acceptance',
             'state': 'awaiting_human_acceptance',
             'reason': 'human_acceptance_pending',
-            'notice_id': completion_id(requirement),
+            'notice_id': completion_id(request),
             'result_preview': result_preview,
             'accept_via': {
-                'tool': 'ancor_requirement',
-                'args': {'action': 'accept', 'requirement_id': requirement_id},
+                'tool': 'ancor_request',
+                'args': {'action': 'accept', 'request_id': request_id},
             },
             'request_changes_via': {
-                'tool': 'ancor_requirement',
-                'args': {'action': 'request_changes', 'requirement_id': requirement_id,
+                'tool': 'ancor_request',
+                'args': {'action': 'request_changes', 'request_id': request_id,
                          'feedback': '<exact human change request>'},
             },
         }
@@ -206,32 +206,32 @@ def awaiting_acceptances(requirements, notifications):
     return items
 
 
-def requirement_detail(requirement, draft=None):
-    """Exact, single-requirement detail. Only this projection exposes the brief."""
+def request_detail(request, draft=None):
+    """Exact, single-request detail. Only this projection exposes the brief."""
     item = {
-        'id': requirement['id'],
-        'title': requirement['title'],
-        'status': requirement['status'],
-        'target_status': requirement.get('target_status'),
-        'replacement_of': requirement.get('replacement_of'),
-        'brief': requirement['brief'],
+        'id': request['id'],
+        'title': request['title'],
+        'status': request['status'],
+        'target_status': request.get('target_status'),
+        'replacement_of': request.get('replacement_of'),
+        'brief': request['brief'],
     }
     for key in ('content_mode', 'generation', 'title_version', 'control_version', 'notes_version', 'observed_generation', 'verification_id'):
-        if key in requirement:
-            item[key] = requirement[key]
-    if requirement.get('status') == 'awaiting_acceptance':
-        item['completion_notice_id'] = completion_id(requirement)
+        if key in request:
+            item[key] = request[key]
+    if request.get('status') == 'awaiting_acceptance':
+        item['completion_notice_id'] = completion_id(request)
     if draft and draft.get('summary'):
         item['summary'] = draft['summary']
     return item
 
 
 def note_summary(note):
-    """Compact requirement-note reference; full text requires note_detail."""
+    """Compact request-note reference; full text requires note_detail."""
     body_preview, truncated = preview(note['body'], NOTE_PREVIEW_CHARS)
     item = {
         'id': note['id'],
-        'requirement_id': note['requirement_id'],
+        'request_id': note['request_id'],
         'body_preview': body_preview,
         'revision': note['revision'],
         'created_at': note['created_at'],
@@ -245,10 +245,10 @@ def note_summary(note):
 
 
 def note_detail(note):
-    """Full requirement note, including soft-deleted history."""
+    """Full request note, including soft-deleted history."""
     item = {
         'id': note['id'],
-        'requirement_id': note['requirement_id'],
+        'request_id': note['request_id'],
         'body': note['body'],
         'revision': note['revision'],
         'created_at': note['created_at'],
@@ -275,7 +275,7 @@ def draft_summary(draft):
     return item
 
 
-def task_ref(task, requirement_id=None, requirement_title=None, *, exact_via=False):
+def task_ref(task, request_id=None, request_title=None, *, exact_via=False):
     """Short native-task identity used in all lists and nested references."""
     item = {
         'id': task['id'],
@@ -283,10 +283,10 @@ def task_ref(task, requirement_id=None, requirement_title=None, *, exact_via=Fal
         'status': task.get('status'),
         'assignee': task.get('assignee'),
     }
-    if requirement_id is not None:
-        item['requirement_id'] = requirement_id
-    if requirement_title is not None:
-        item['requirement_title'] = requirement_title
+    if request_id is not None:
+        item['request_id'] = request_id
+    if request_title is not None:
+        item['request_title'] = request_title
     for key in ('priority', 'created_at', 'started_at', 'completed_at',
                 'last_heartbeat_at', 'block_kind', 'block_recurrences'):
         value = task.get(key)
@@ -362,10 +362,10 @@ def notification_counts(rows):
             'closed': len(closed)}
 
 
-def requirement_counts(requirements):
+def request_counts(requests):
     counts = {}
-    for requirement in requirements or ():
-        status = requirement.get('status') or 'unknown'
+    for request in requests or ():
+        status = request.get('status') or 'unknown'
         counts[status] = counts.get(status, 0) + 1
     return counts
 
@@ -384,13 +384,13 @@ def conditions_from_progression(progression):
     for item in progression or ():
         if item.get('state') != 'stalled':
             continue
-        requirement_id = item.get('requirement_id')
-        if not requirement_id:
+        request_id = item.get('request_id')
+        if not request_id:
             continue
         conditions.append({
-            'id': 'stalled:' + requirement_id,
+            'id': 'stalled:' + request_id,
             'kind': 'stalled',
-            'requirement_id': requirement_id,
+            'request_id': request_id,
             'state': 'open',
             'reason': item.get('reason'),
             'task_ids': list(item.get('task_ids') or ()),
@@ -398,7 +398,7 @@ def conditions_from_progression(progression):
             'since': None,
             'generation': 0,
             'last_woken_at': None,
-            'exact_via': requirement_exact_via(requirement_id),
+            'exact_via': request_exact_via(request_id),
         })
     return conditions
 
@@ -422,12 +422,12 @@ def attention_items(progression, tasks=(), notifications=(), events=(), limit=8)
     for item in progression or ():
         if item.get('state') != 'stalled':
             continue
-        requirement_id = item.get('requirement_id')
+        request_id = item.get('request_id')
         reason = item.get('reason')
         items.append({
-            'kind': 'requirement',
-            'id': requirement_id,
-            'requirement_id': requirement_id,
+            'kind': 'request',
+            'id': request_id,
+            'request_id': request_id,
             'task_ids': list(item.get('task_ids') or ()),
             'why_code': reason,
             'preview': reason,
@@ -440,7 +440,7 @@ def attention_items(progression, tasks=(), notifications=(), events=(), limit=8)
             'kind': 'event',
             'id': event['id'],
             'event_kind': event.get('kind'),
-            'requirement_id': summary.get('requirement_id'),
+            'request_id': summary.get('request_id'),
             'task_id': summary.get('task_id'),
             'why_code': event.get('kind'),
             'preview': preview(summary.get('payload_preview') or event.get('kind'),
@@ -452,7 +452,7 @@ def attention_items(progression, tasks=(), notifications=(), events=(), limit=8)
         items.append({
             'kind': 'notification',
             'id': row['id'],
-            'requirement_id': row.get('requirement_id'),
+            'request_id': row.get('request_id'),
             'task_id': row.get('task_id'),
             'why_code': 'open_question',
         })
@@ -518,12 +518,12 @@ def bounded_latest(items, limit, *, id_key='id', before_id=None):
     return collection(rows[-limit:], total=total)
 
 
-def task_detail(detail, *, requirement_id=None, requirement_title=None,
+def task_detail(detail, *, request_id=None, request_title=None,
                 comments_limit=TASK_COMMENT_LIMIT,
                 events_limit=TASK_EVENT_LIMIT, runs_limit=TASK_RUN_LIMIT):
     """One exact card plus bounded history collections."""
     task = detail['task']
-    item = task_ref(task, requirement_id, requirement_title)
+    item = task_ref(task, request_id, request_title)
     item.update({
         'body': task.get('body'),
         'latest_summary': detail.get('latest_summary'),
@@ -552,16 +552,16 @@ def notification_selection(rows, limit=20):
     return [row for row in rows if row['id'] in chosen]
 
 
-def acceptance_ref(requirement, tasks=(), acceptance=None):
+def acceptance_ref(request, tasks=(), acceptance=None):
     """State whether exact acceptance is recorded, pending, or not yet possible."""
     tasks = list(tasks or ())
     done = sum(1 for task in tasks if task.get('status') in {'done', 'archived'})
     event_kind = acceptance.get('kind') if acceptance is not None else None
-    if requirement.get('status') == 'accepted' or event_kind == 'requirement.accepted':
+    if request.get('status') == 'accepted' or event_kind == 'request.accepted':
         status = 'accepted'
-    elif requirement.get('status') == 'awaiting_acceptance':
+    elif request.get('status') == 'awaiting_acceptance':
         status = 'awaiting_human'
-    elif event_kind == 'requirement.changes_requested':
+    elif event_kind == 'request.changes_requested':
         status = 'changes_requested'
     elif tasks and done == len(tasks):
         status = 'pending'
@@ -581,7 +581,7 @@ def notification_summary(row, *, exact_via=False):
         'answered': answer is not None,
         'closed': bool(row.get('closed_at')),
     }
-    for field in ('requirement_id', 'task_id'):
+    for field in ('request_id', 'task_id'):
         if row.get(field) is not None:
             summary[field] = row[field]
     if answer_preview:
@@ -615,12 +615,12 @@ def notification_detail(row):
 
 
 def transition_summary(event):
-    """Project retained requirement-transition history without transport identity."""
+    """Project retained request-transition history without transport identity."""
     payload = event.get('payload') or {}
     summary = {
         'id': event['id'],
         'kind': event['kind'],
-        'requirement_id': payload.get('requirement_id'),
+        'request_id': payload.get('request_id'),
         'command_id': payload.get('command_id'),
         'from_status': payload.get('from_status'),
         'target_status': payload.get('target_status'),
@@ -632,7 +632,7 @@ def transition_summary(event):
 
 
 _EVENT_REFERENCE_KEYS = (
-    'requirement_id', 'task_id', 'task_ids', 'notification_id', 'draft_id',
+    'request_id', 'task_id', 'task_ids', 'notification_id', 'draft_id',
     'cancellation_id', 'key',
 )
 
@@ -707,7 +707,7 @@ def wake_summary(wake):
     """Project one durable wake without its potentially long reason."""
     item = {
         'id': wake['id'],
-        'requirement_id': wake['requirement_id'],
+        'request_id': wake['request_id'],
         'due_at': wake['due_at'],
         'state': wake['state'],
     }

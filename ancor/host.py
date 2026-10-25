@@ -20,7 +20,7 @@ from .store import Store
 from .views import (actionable_notifications, collection,
                     conditions_with_state, is_terminal_task,
                     notification_counts, notification_selection,
-                    notification_summary, preview, requirement_ref, task_counts,
+                    notification_summary, preview, request_ref, task_counts,
                     task_ref)
 
 log = logging.getLogger(__name__)
@@ -86,18 +86,18 @@ class Host:
         temporary.replace(self.state_path)
 
     def update_conditions(self, states):
-        """Retain one backoff ledger entry per stalled requirement."""
+        """Retain one backoff ledger entry per stalled request."""
         state = self.state()
         conditions = state.get('conditions')
         if not isinstance(conditions, dict):
             conditions = state['conditions'] = {}
-        stalled = {item['requirement_id']: item.get('reason')
+        stalled = {item['request_id']: item.get('reason')
                    for item in states if item.get('state') == 'stalled'
-                   and item.get('requirement_id')}
+                   and item.get('request_id')}
         now = self.clock()
         changed = False
-        for requirement_id, reason in stalled.items():
-            key = 'stalled:' + requirement_id
+        for request_id, reason in stalled.items():
+            key = 'stalled:' + request_id
             current = conditions.get(key)
             if current is None:
                 conditions[key] = {'reason': reason, 'since': now, 'generation': 1,
@@ -120,7 +120,7 @@ class Host:
     def scan(self):
         self.scheduling.scan()
         snapshot = self.store.snapshot()
-        known = {r['id']: r for r in snapshot['requirements']}
+        known = {r['id']: r for r in snapshot['requests']}
         # Invalidation is a durable coordination event, not an automatic stop.
         # Only the coordinator decides whether affected native tasks should be blocked.
         try:
@@ -131,8 +131,8 @@ class Host:
         tracked = {link['task_id'] for link in snapshot['task_links']}
         for task in self.tasks:
             link = self.board.link(task)
-            if link and link['requirement_id'] in known:
-                self.store.link_task(link['requirement_id'], task['id'])
+            if link and link['request_id'] in known:
+                self.store.link_task(link['request_id'], task['id'])
                 tracked.add(task['id'])
         notifications = self.close_stale_notifications(snapshot)
         if not tracked:
@@ -196,7 +196,7 @@ class Host:
         if not path.exists() and not self.store.questions():
             return []
         snapshot = snapshot or self.store.snapshot()
-        requirements = {row['id']: row for row in snapshot['requirements']}
+        requests = {row['id']: row for row in snapshot['requests']}
         tasks = {task['id']: task for task in self.tasks}
         box = self.notification_outbox()
         if box is None:
@@ -207,19 +207,19 @@ class Host:
         for row in box.list():
             if row['kind'] != 'question' or row['answer'] is not None or row['closed_at'] is not None:
                 continue
-            requirement = requirements.get(row.get('requirement_id'))
-            if requirement is None:
-                decisions[row['id']] = 'requirement_missing'
+            request = requests.get(row.get('request_id'))
+            if request is None:
+                decisions[row['id']] = 'request_missing'
                 continue
-            target = requirement.get('target_status')
+            target = request.get('target_status')
             if target in {'cancelled', 'invalidated'}:
-                decisions[row['id']] = 'requirement_' + target
+                decisions[row['id']] = 'request_' + target
                 continue
             if target is not None:
                 continue
-            status = requirement['status']
+            status = request['status']
             if status in {'cancelled', 'invalidated', 'accepted'}:
-                decisions[row['id']] = 'requirement_' + status
+                decisions[row['id']] = 'request_' + status
                 continue
             task = tasks.get(row.get('task_id'))
             if task is not None and task.get('status') != 'blocked':
@@ -230,28 +230,28 @@ class Host:
             box.close_questions(decisions, closed_by='host')
             log.info('ANCOR closed %d stale question(s): %s', len(decisions),
                      ', '.join(f'{key}={value}' for key, value in sorted(decisions.items())))
-        completion_requirements = {}
+        completion_requests = {}
         orphaned_completions = {}
         for row in box.list():
             if (row['kind'] != 'completion' or row.get('closed_at') is not None):
                 continue
-            requirement = requirements.get(row.get('requirement_id'))
-            if requirement is None:
-                if row.get('requirement_id'):
-                    completion_requirements.setdefault(
-                        row.get('requirement_id'), 'requirement_missing')
+            request = requests.get(row.get('request_id'))
+            if request is None:
+                if row.get('request_id'):
+                    completion_requests.setdefault(
+                        row.get('request_id'), 'request_missing')
                 else:
-                    orphaned_completions[row['id']] = 'requirement_missing'
-            elif requirement.get('content_mode') == 'points' and row['id'] != completion_id(requirement):
+                    orphaned_completions[row['id']] = 'request_missing'
+            elif request.get('content_mode') == 'points' and row['id'] != completion_id(request):
                 orphaned_completions[row['id']] = 'verification_superseded'
-            elif requirement.get('status') != 'awaiting_acceptance' or requirement.get('target_status'):
-                completion_requirements.setdefault(
-                    row.get('requirement_id'), 'completion_no_longer_pending')
+            elif request.get('status') != 'awaiting_acceptance' or request.get('target_status'):
+                completion_requests.setdefault(
+                    row.get('request_id'), 'completion_no_longer_pending')
         for notification_id, reason in orphaned_completions.items():
             box.close_delivery(notification_id, closed_by='host', reason=reason)
-        for requirement_id, reason in completion_requirements.items():
-            if requirement_id:
-                box.close_completions(requirement_id, closed_by='host', reason=reason)
+        for request_id, reason in completion_requests.items():
+            if request_id:
+                box.close_completions(request_id, closed_by='host', reason=reason)
         return box.list()
 
     def notification_dispatcher(self):
@@ -266,7 +266,7 @@ class Host:
             return self.board.show(task_id)
         interval = max(30, float(self.ctx.get_config('poll_interval', 30)))
         return NotificationDispatcher(
-            box, NativeSender(profile), resolve_requirement=self.store.get_requirement,
+            box, NativeSender(profile), resolve_request=self.store.get_request,
             resolve_task=resolve_task, retry_seconds=interval, clock=self.clock)
 
     def pending(self, limit):
@@ -275,7 +275,7 @@ class Host:
             # A pending inbox already wakes the coordinator with this current snapshot.
             data = self.wake_packet()
             pending = [e for e in self.store.pending_events() if e['kind'] != 'host.stalled']
-            if (data['requirements']['items'] or data['notifications']['items']
+            if (data['requests']['items'] or data['notifications']['items']
                     or data['invalidated_tasks']['items']) and not pending:
                 self.store.add_event('host.recovery', {
                     'reason': 'Reconcile durable state after host startup; inspect current context. '
@@ -287,8 +287,8 @@ class Host:
             key = f"coordination:{work['id']}:{work['generation']}"
             existing = next((e for e in pending if e.get('source_key') == key), None)
             if existing is None:
-                event = self.store.add_event('requirement.reconcile_needed', {
-                    'requirement_id': work['id'], 'generation': work['generation']}, source_key=key)
+                event = self.store.add_event('request.reconcile_needed', {
+                    'request_id': work['id'], 'generation': work['generation']}, source_key=key)
                 if event['acknowledged']:
                     with self.store._transaction() as db:
                         db.execute('UPDATE events SET acknowledged=0 WHERE id=?', (event['id'],))
@@ -339,27 +339,27 @@ class Host:
         return events
 
     def invalidated_tasks(self, data):
-        """Surface residual drift after an invalidated requirement should be terminal."""
-        invalidated = {r['id']: r for r in data['requirements'] if r['status'] == 'invalidated'}
+        """Surface residual drift after an invalidated request should be terminal."""
+        invalidated = {r['id']: r for r in data['requests'] if r['status'] == 'invalidated'}
         tasks = {t['id']: t for t in self.tasks}
         unresolved = []
         for link in data['task_links']:
-            rid, tid = link['requirement_id'], link['task_id']
+            rid, tid = link['request_id'], link['task_id']
             if rid not in invalidated:
                 continue
             task = tasks.get(tid, {})
             status = task.get('status')
             if status == 'archived':
                 continue
-            reason = ('Invalidated requirement has a linked native task that is not archived'
-                      if status else 'Invalidated requirement linked task is unreadable')
+            reason = ('Invalidated request has a linked native task that is not archived'
+                      if status else 'Invalidated request linked task is unreadable')
             shown, truncated = preview(reason, 160)
             item = {
                 'task_id': tid,
                 'task_title': task.get('title'),
                 'task_status': status,
-                'requirement_id': rid,
-                'requirement_title': invalidated[rid]['title'],
+                'request_id': rid,
+                'request_title': invalidated[rid]['title'],
                 'reason_preview': shown,
             }
             if truncated:
@@ -373,23 +373,23 @@ class Host:
         notifications = NotificationOutbox.read_existing(self.store.path + '.notifications.db')
         delivered = {n['id'] for n in notifications
                      if n['state'] == 'sent' and n['kind'] == 'completion'}
-        pending_completion = {n['requirement_id'] for n in notifications
+        pending_completion = {n['request_id'] for n in notifications
                               if n['kind'] == 'completion'
                               and n.get('closed_at') is None
-                              and n.get('requirement_id')}
-        requirements = [r for r in data['requirements']
+                              and n.get('request_id')}
+        requests = [r for r in data['requests']
                         if r['status'] in {'active', 'paused', 'pending'}
                         or r.get('target_status') is not None or
                         (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)
                         or (r['status'] == 'awaiting_acceptance'
                             and r['id'] not in pending_completion)]
-        relevant = {r['id'] for r in requirements}
-        scoped = {**data, 'requirements': requirements}
+        relevant = {r['id'] for r in requests}
+        scoped = {**data, 'requests': requests}
         observation = self.scheduling.observation(scoped, self.tasks, notifications)
-        progression = {item['requirement_id']: item for item in observation['progression']}
-        titles = {r['id']: r['title'] for r in data['requirements']}
-        links = {link['task_id']: link['requirement_id'] for link in data['task_links']
-                 if link['requirement_id'] in relevant}
+        progression = {item['request_id']: item for item in observation['progression']}
+        titles = {r['id']: r['title'] for r in data['requests']}
+        links = {link['task_id']: link['request_id'] for link in data['task_links']
+                 if link['request_id'] in relevant}
         linked_tasks = [task for task in self.tasks if task['id'] in links]
         board = [task_ref(task, links[task['id']], titles.get(links[task['id']]))
                  for task in linked_tasks if not is_terminal_task(task)]
@@ -400,13 +400,13 @@ class Host:
             observation['progression'],
             condition_state if isinstance(condition_state, dict) else {})
         for condition in conditions:
-            condition['requirement_title'] = titles.get(condition['requirement_id'])
+            condition['request_title'] = titles.get(condition['request_id'])
         return {
-            'requirements': collection(
-                [requirement_ref(r, progression.get(r['id'])) for r in requirements]),
+            'requests': collection(
+                [request_ref(r, progression.get(r['id'])) for r in requests]),
             'invalidated_tasks': collection(self.invalidated_tasks(data)),
             'pending_coordination': collection(self.store.pending_coordination()),
-            'questions': collection([{'id': q['id'], 'requirement_id': q['requirement_id'],
+            'questions': collection([{'id': q['id'], 'request_id': q['request_id'],
                 'task_id': q['task_id'], 'revision': q['revision'], 'state': q['state']}
                 for q in self.store.questions() if q['state'] == 'open']),
             'conditions': collection(conditions),
@@ -419,7 +419,7 @@ class Host:
             'scheduled_wakes': observation['scheduled_wakes'],
             'progression': observation['progression'],
             'liveness': observation['liveness'],
-            'expand': 'Call ancor_get_context for requirement detail, or ancor_board show for one card.',
+            'expand': 'Call ancor_get_context for request detail, or ancor_board show for one card.',
         }
 
 

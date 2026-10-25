@@ -15,5 +15,5 @@ def test_title_is_required_single_line_and_copied_on_confirmation(tmp_path):
 
     draft = create(store, 'brief', title='  Stable label  ')
     assert draft['title'] == 'Stable label'
-    requirement = store.confirm(draft['id'], 'human:title')
-    assert requirement['title'] == 'Stable label'
+    request = store.confirm(draft['id'], 'human:title')
+    assert request['title'] == 'Stable label'

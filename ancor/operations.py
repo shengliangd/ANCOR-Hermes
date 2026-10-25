@@ -29,7 +29,7 @@ def render_card(contract):
     """Render one worker card. The card holds these parts and nothing else.
 
     Optional parts stay absent when empty: an empty section reads as a missing
-    requirement to a worker. The authorization boundary is a code-owned binding
+    request to a worker. The authorization boundary is a code-owned binding
     constraint, so it is injected here rather than trusted to the author.
     """
     def section(name, values):
@@ -38,7 +38,7 @@ def render_card(contract):
     values = {part: [value for value in contract.get(part) or () if value]
               for part in CARD_PARTS}
     values['binding_constraints'] = list(dict.fromkeys(
-        ['Do not change authorization or requirement version.',
+        ['Do not change authorization or request version.',
          *values['binding_constraints']]))
     parts = [f'<outcome>{contract["outcome"]}</outcome>']
     parts.extend(section(part, values[part]) for part in CARD_PARTS[1:] if values[part])
@@ -65,47 +65,47 @@ class Operations:
         # comments, attempt summaries, events and dependency context as well.
         return self.board._call('show', task_id)
 
-    def tasks(self, *, requirement_id=None, status=None, include_archived=False):
+    def tasks(self, *, request_id=None, status=None, include_archived=False):
         """Return compact linked-task summaries without loading each card history."""
         store = self.service.store
         snapshot = store.snapshot()
-        links = {link['task_id']: link['requirement_id']
+        links = {link['task_id']: link['request_id']
                  for link in snapshot['task_links']}
-        titles = {req['id']: req['title'] for req in snapshot['requirements']}
+        titles = {req['id']: req['title'] for req in snapshot['requests']}
         items = []
         for task in self.board.list():
-            linked_requirement = links.get(task['id'])
-            if linked_requirement is None:
+            linked_request = links.get(task['id'])
+            if linked_request is None:
                 continue
-            if requirement_id is not None and linked_requirement != requirement_id:
+            if request_id is not None and linked_request != request_id:
                 continue
             if status is not None and task.get('status') != status:
                 continue
             archived = bool(task.get('archived_at') or task.get('archived'))
             if archived and not include_archived:
                 continue
-            items.append(task_ref(task, linked_requirement,
-                                  titles.get(linked_requirement)))
+            items.append(task_ref(task, linked_request,
+                                  titles.get(linked_request)))
         items.sort(key=lambda task: (
             bool(task.get('archived_at') or task.get('archived')),
             _STATUS_ORDER.get(task.get('status'), 50),
             -_recency(task), task['id']))
         return items
 
-    def _receipt(self, detail, requirement_id, changed):
+    def _receipt(self, detail, request_id, changed):
         task = detail['task']
         try:
-            requirement_title = self.service.store.get_requirement(
-                requirement_id)['title']
+            request_title = self.service.store.get_request(
+                request_id)['title']
         except KeyError:
-            requirement_title = None
+            request_title = None
         return {
             'task_id': task['id'],
             'title': task.get('title'),
             'status': task.get('status'),
             'assignee': task.get('assignee'),
-            'requirement_id': requirement_id,
-            'requirement_title': requirement_title,
+            'request_id': request_id,
+            'request_title': request_title,
             'parents': list(detail.get('parents') or ()),
             'changed': list(changed),
         }
@@ -136,12 +136,12 @@ class Operations:
     def reconcile(self):
         """Recover durable native links; association protocol stays at revision 1."""
         store = self.service.store
-        requirements = {r['id']: r for r in store.snapshot()['requirements']}
+        requests = {r['id']: r for r in store.snapshot()['requests']}
         for task in self.board.list():
             link = self.board.link(task)
-            if link and link['revision'] == 1 and link['requirement_id'] in requirements:
-                store.link_task(link['requirement_id'], task['id'])
-        return requirements
+            if link and link['revision'] == 1 and link['request_id'] in requests:
+                store.link_task(link['request_id'], task['id'])
+        return requests
 
     @staticmethod
     def require_quiescence(detail):
@@ -150,18 +150,18 @@ class Operations:
         _require_quiescence(detail)
 
     @staticmethod
-    def _require_stable_active(requirement):
-        if requirement['status'] != 'active' or requirement.get('target_status') is not None:
-            raise ValueError('requirement is not stably active')
+    def _require_stable_active(request):
+        if request['status'] != 'active' or request.get('target_status') is not None:
+            raise ValueError('request is not stably active')
 
     @staticmethod
     def _allow_dispatch(store, rid, tid):
-        req = store.get_requirement(rid)
+        req = store.get_request(rid)
         if req['content_mode'] != 'points':
             return
         state = store.coordination(rid)
         if state['needs_review']:
-            raise RuntimeError('review current requirement changes before releasing work')
+            raise RuntimeError('review current request changes before releasing work')
         review = next((r for r in state['reviews'] if r['task_id'] == tid), None)
         basis = next((b for b in state['task_basis'] if b['task_id'] == tid), None)
         if review and (review['state'] != 'applied' or review['decision'] == 'retire'):
@@ -184,7 +184,7 @@ class Operations:
         if action not in {'list', 'show'}:
             self.reconcile()
         if action == 'create':
-            req = store.get_requirement(args['requirement_id'])
+            req = store.get_request(args['request_id'])
             self._require_stable_active(req)
             contract = self._contract(args.get('contract'))
             if 'body' in args:
@@ -196,11 +196,11 @@ class Operations:
                 raise ValueError('parent_ids must be a list of task IDs')
             if type(hold) is not bool:
                 raise ValueError('hold must be a boolean')
-            linked = {item['task_id']: item['requirement_id'] for item in store.snapshot()['task_links']}
+            linked = {item['task_id']: item['request_id'] for item in store.snapshot()['task_links']}
             for parent in parent_ids:
                 if parent not in linked:
                     raise ValueError('unlinked parent task')
-                self._require_stable_active(store.get_requirement(linked[parent]))
+                self._require_stable_active(store.get_request(linked[parent]))
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
             if req['content_mode'] == 'points':
                 versions = {p['version_id'] for items in store.content(req['id'])['fields'].values() for p in items}
@@ -221,7 +221,7 @@ class Operations:
                 store.bind_task(req['id'], task['id'], args['generation'], args['point_versions'])
             return self._receipt(actual, req['id'], ['create'])
         snapshot = store.snapshot()
-        links = {link['task_id']: link['requirement_id'] for link in snapshot['task_links']}
+        links = {link['task_id']: link['request_id'] for link in snapshot['task_links']}
         if action == 'list':
             limit = args.get('limit', 100)
             if type(limit) is not int or not 1 <= limit <= 200:
@@ -229,7 +229,7 @@ class Operations:
             include_archived = args.get('include_archived', False)
             if type(include_archived) is not bool:
                 raise ValueError('include_archived must be a boolean')
-            items = self.tasks(requirement_id=args.get('requirement_id'),
+            items = self.tasks(request_id=args.get('request_id'),
                                status=args.get('status'),
                                include_archived=include_archived)
             return collection(items[:limit], total=len(items))
@@ -238,9 +238,9 @@ class Operations:
             for tid in (parent, child):
                 if tid not in links:
                     raise ValueError('unlinked task')
-            self._require_stable_active(store.get_requirement(links[child]))
+            self._require_stable_active(store.get_request(links[child]))
             if action == 'link':
-                self._require_stable_active(store.get_requirement(links[parent]))
+                self._require_stable_active(store.get_request(links[parent]))
             # Native CLI owns cycle, running-child and run-ownership checks.
             actual = self.board.dependency(action, parent, child)
             return self._receipt(actual, links[child], [action])
@@ -249,9 +249,9 @@ class Operations:
             raise ValueError('unlinked task')
         detail = self.detail(tid)
         if action == 'show':
-            req = store.get_requirement(links[tid])
-            return task_detail(detail, requirement_id=links[tid],
-                               requirement_title=req['title'])
+            req = store.get_request(links[tid])
+            return task_detail(detail, request_id=links[tid],
+                               request_title=req['title'])
         if action == 'history':
             kind = args.get('kind')
             if kind not in {'comments', 'events', 'runs'}:
@@ -265,7 +265,7 @@ class Operations:
             return bounded_latest(detail.get(kind) or (), limit,
                                   before_id=before_id)
         if action == 'associate':
-            return store.associate_task(tid, args['requirement_id'], args['reason'])
+            return store.associate_task(tid, args['request_id'], args['reason'])
         if action == 'archive':
             self.board.archive(tid, store._text(args['reason']))
             actual = self.detail(tid)
@@ -273,13 +273,13 @@ class Operations:
         if action == 'revise':
             self._allow_dispatch(store, links[tid], tid)
             reason = store._text(args['reason'])
-            self._require_stable_active(store.get_requirement(links[tid]))
+            self._require_stable_active(store.get_request(links[tid]))
             if detail['task']['status'] != 'triage' or detail['task'].get('archived_at'):
                 raise ValueError('revise requires an unarchived triage task')
             self.require_quiescence(detail)
             return self._receipt(self.board.revise(tid, reason), links[tid], ['revise'])
         if action == 'edit':
-            req = store.get_requirement(links[tid])
+            req = store.get_request(links[tid])
             self._require_stable_active(req)
             if 'body' in args:
                 raise ValueError('body is not a card part; edit the contract instead')
@@ -298,7 +298,7 @@ class Operations:
                         raise ValueError('contract revision requires current generation and point_versions')
                 contract = self._contract(args['contract'])
                 metadata = self.board.link(detail['task'])
-                if not metadata or metadata['requirement_id'] != req['id'] or metadata['revision'] != 1:
+                if not metadata or metadata['request_id'] != req['id'] or metadata['revision'] != 1:
                     raise ValueError('native task association mismatch')
                 link_line = detail['task']['body'].split('\n', 1)[0]
                 fields['body'] = link_line + '\n' + render_card(contract)
@@ -312,7 +312,7 @@ class Operations:
         elif action == 'unblock':
             self._allow_dispatch(store, links[tid], tid)
             self.require_quiescence(detail)
-            self._require_stable_active(store.get_requirement(links[tid]))
+            self._require_stable_active(store.get_request(links[tid]))
             self.board._call('unblock', tid, '--reason', store._text(args['reason']), json_output=False)
         elif action == 'comment':
             text = store._text(args['body']).strip()

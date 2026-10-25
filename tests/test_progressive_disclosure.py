@@ -6,7 +6,7 @@ import ancor
 from ancor.notification import NotificationOutbox
 from ancor.operations import Operations
 from ancor.store import Store
-from ancor.views import requirement_progress, requirement_ref
+from ancor.views import request_progress, request_ref
 
 
 def task(body='FULL CONTRACT'):
@@ -16,14 +16,14 @@ def task(body='FULL CONTRACT'):
 
 
 def test_human_waiting_is_preserved_in_compact_projections():
-    requirement = {'id': 'r1', 'title': 'Parallel work', 'status': 'active'}
+    request = {'id': 'r1', 'title': 'Parallel work', 'status': 'active'}
     human_waiting = {'task_ids': ['blocked'], 'question_ids': ['q1', 'q2']}
     progression = {'state': 'active', 'reason': 'running_heartbeat',
                    'waiting_on': None, 'human_waiting': human_waiting,
                    'task_ids': ['running']}
-    reference = requirement_ref(requirement, progression)
+    reference = request_ref(request, progression)
     assert reference['progression']['human_waiting'] == human_waiting
-    assert requirement_progress(requirement, progression)['human_waiting'] == human_waiting
+    assert request_progress(request, progression)['human_waiting'] == human_waiting
 
 
 def test_board_list_is_compact_and_show_expands(tmp_path):
@@ -45,13 +45,13 @@ def test_board_list_is_compact_and_show_expands(tmp_path):
     operations = Operations(ctx, store, Board())
     listed = operations.call({'action': 'list'})
     assert listed['items'][0]['id'] == 't1'
-    assert listed['items'][0]['requirement_id'] == req['id']
+    assert listed['items'][0]['request_id'] == req['id']
     assert 'body' not in listed['items'][0]
     shown = operations.call({'action': 'show', 'task_id': 't1'})
     assert shown['body'].startswith('FULL CONTRACT')
 
 
-def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
+def test_context_is_compact_and_request_expands(tmp_path, monkeypatch):
     tools = {}
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
@@ -72,20 +72,20 @@ def test_context_is_compact_and_requirement_expands(tmp_path, monkeypatch):
     call = lambda args: json.loads(tools['ancor_get_context']['handler'](args))
 
     overview = call({})
-    requirement = overview['requirements']['items'][0]
-    assert requirement['id'] == req['id']
-    assert requirement['title'] == 'Test requirement'
-    assert 'brief' not in requirement
-    assert 'summary' not in requirement
+    request = overview['requests']['items'][0]
+    assert request['id'] == req['id']
+    assert request['title'] == 'Test request'
+    assert 'brief' not in request
+    assert 'summary' not in request
     assert 'body' not in overview['tasks']['items'][0]
     event = overview['pending_events']['items'][0]
     assert 'payload' not in event and event['payload_preview']
 
     full_event = call({'event_id': event['id']})
-    assert full_event['event']['payload']['requirement_id'] == req['id']
+    assert full_event['event']['payload']['request_id'] == req['id']
 
-    expanded = call({'requirement_id': req['id']})
-    assert expanded['requirement']['brief'] == brief
+    expanded = call({'request_id': req['id']})
+    assert expanded['request']['brief'] == brief
     assert expanded['tasks']['items'][0]['id'] == 't1'
     assert 'body' not in expanded['tasks']['items'][0]
 
@@ -111,14 +111,14 @@ def test_progress_only_returns_open_work_including_human_acceptance(tmp_path, mo
         'Paused brief', title='Paused work')['id'], 'fixture')
     accepted = store.confirm(store.create_draft(
         'Accepted brief', title='Closed work')['id'], 'fixture')
-    for requirement, task_id in ((active, 'active-open'),
+    for request, task_id in ((active, 'active-open'),
                                  (awaiting, 'awaiting-done'),
                                  (paused, 'paused-open'),
                                  (accepted, 'accepted-done')):
-        store.link_task(requirement['id'], task_id)
-    command = store.create_requirement_command(
+        store.link_task(request['id'], task_id)
+    command = store.create_request_command(
         'pause', paused['id'], 'User asked', 'Stop briefly')
-    store.confirm_requirement_command(command['id'], 'pause-confirmation')
+    store.confirm_request_command(command['id'], 'pause-confirmation')
     store.finalize_transition(paused['id'])
     store.submit_acceptance(awaiting['id'], 'awaiting verification evidence')
     store.submit_acceptance(accepted['id'], 'accepted verification evidence')
@@ -129,14 +129,14 @@ def test_progress_only_returns_open_work_including_human_acceptance(tmp_path, mo
                              target='test:destination')
     notice_id = 'accept:' + awaiting['id']
     box.enqueue(notice_id, 'completion', 'Verified delivery is ready for human acceptance.',
-                actor='ancor-coordinator', requirement_id=awaiting['id'])
+                actor='ancor-coordinator', request_id=awaiting['id'])
     assert box.claim_next()['id'] == notice_id
     box.mark_sent(notice_id, {'success': True})
     cards = [
         {'id': 'active-open', 'title': 'Active card', 'status': 'running'},
         {'id': 'awaiting-done', 'title': 'Awaiting card', 'status': 'done'},
         {'id': 'paused-open', 'title': 'Paused card', 'status': 'blocked',
-         'blocked_reason': 'Waiting for the paused requirement to resume'},
+         'blocked_reason': 'Waiting for the paused request to resume'},
         {'id': 'accepted-done', 'title': 'Closed card', 'status': 'done'},
     ]
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: cards)
@@ -144,7 +144,7 @@ def test_progress_only_returns_open_work_including_human_acceptance(tmp_path, mo
     call = lambda args: json.loads(tools['ancor_get_context']['handler'](args))
 
     progress = call({'progress_only': True})
-    rows = {row['id']: row for row in progress['requirements']['items']}
+    rows = {row['id']: row for row in progress['requests']['items']}
     assert set(rows) == {active['id'], paused['id']}
     assert rows[paused['id']]['state'] == 'paused'
     assert rows[paused['id']]['focus']['blocked_reason_preview'].startswith(
@@ -152,7 +152,7 @@ def test_progress_only_returns_open_work_including_human_acceptance(tmp_path, mo
     assert 'tasks' not in progress
     assert 'pending_events' not in progress
     assert 'notifications' not in progress
-    assert progress['counts']['open_requirements'] == 3
+    assert progress['counts']['open_requests'] == 3
     reviews = {row['id']: row for row in progress['awaiting_acceptance']['items']}
     assert set(reviews) == {awaiting['id']}
     assert reviews[awaiting['id']]['status'] == 'awaiting_acceptance'
@@ -168,7 +168,7 @@ def test_progress_only_returns_open_work_including_human_acceptance(tmp_path, mo
     store.confirm_human_decision(decision['id'], 'human:accept')
     after = call({'progress_only': True})
     assert after['awaiting_acceptance']['count'] == 0
-    assert after['counts']['open_requirements'] == 2
+    assert after['counts']['open_requests'] == 2
     assert len(json.dumps(progress, ensure_ascii=False)) < len(json.dumps(
         call({}), ensure_ascii=False))
 
@@ -192,7 +192,7 @@ def test_notification_list_is_compact_and_id_expands(tmp_path):
                              target='test:destination')
     message = 'Question ' + 'Q' * 1000
     box.enqueue('q1', 'question', message, actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='t1')
+                request_id=req['id'], task_id='t1')
     assert box.claim_next()['state'] == 'sending'
     box.mark_sent('q1', {'success': True})
     ancor.register(ctx)
@@ -203,9 +203,9 @@ def test_notification_list_is_compact_and_id_expands(tmp_path):
     assert row['id'] == 'q1' and row['answered'] is False
     assert 'message' not in row and row['message_truncated'] is True
     assert call({'action': 'list', 'open_only': True})['notifications']['count'] == 1
-    assert call({'action': 'list', 'requirement_id': req['id']})['notifications']['count'] == 1
+    assert call({'action': 'list', 'request_id': req['id']})['notifications']['count'] == 1
     assert call({'action': 'list', 'task_id': 't1'})['notifications']['count'] == 1
-    assert call({'action': 'list', 'requirement_id': 'other'})['notifications']['count'] == 0
+    assert call({'action': 'list', 'request_id': 'other'})['notifications']['count'] == 0
     full = call({'action': 'list', 'id': 'q1'})['notifications']['items'][0]
     assert full['message'] == message
 
@@ -254,7 +254,7 @@ def test_board_list_prioritizes_live_recent_tasks_before_truncation(tmp_path):
     assert with_archived['items'][-1]['id'] == 'archived'
 
 
-def test_requirement_expansion_keeps_archived_tasks_for_acceptance(tmp_path, monkeypatch):
+def test_request_expansion_keeps_archived_tasks_for_acceptance(tmp_path, monkeypatch):
     tools = {}
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
@@ -277,12 +277,12 @@ def test_requirement_expansion_keeps_archived_tasks_for_acceptance(tmp_path, mon
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: cards)
     ancor.register(ctx)
     expanded = json.loads(tools['ancor_get_context']['handler'](
-        {'requirement_id': req['id']}))
+        {'request_id': req['id']}))
     assert [task['id'] for task in expanded['tasks']['items']] == ['live', 'old']
     assert expanded['tasks']['count'] == 2
     assert expanded['archived_task_count'] == 1
     hidden = json.loads(tools['ancor_get_context']['handler'](
-        {'requirement_id': req['id'], 'include_done': False,
+        {'request_id': req['id'], 'include_done': False,
          'include_archived': False}))
     assert [task['id'] for task in hidden['tasks']['items']] == ['live']
     assert hidden['counts']['tasks']['terminal'] == 1
@@ -331,11 +331,11 @@ def test_context_separates_conditions_from_events_and_hides_history_by_default(t
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('q1', 'question', 'Open question', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='running')
+                request_id=req['id'], task_id='running')
     box.enqueue('q2', 'question', 'Closed question', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='done')
+                request_id=req['id'], task_id='done')
     box.close_questions({'q2': 'task_not_blocked'}, closed_by='host')
-    store.add_event('host.stalled', {'requirement_id': req['id']},
+    store.add_event('host.stalled', {'request_id': req['id']},
                     source_key='stalled:' + req['id'])
     native = store.add_event('native.completed', {'task_id': 'done'})
     ancor.register(ctx)

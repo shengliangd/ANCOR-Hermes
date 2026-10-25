@@ -23,18 +23,18 @@ def test_wake_packet_excludes_full_briefs_and_bodies_under_incident_fixture(tmp_
     store = Store(tmp_path / 'store.db')
     tasks = []
     for index in range(3):
-        requirement = store.confirm(store.create_draft(
+        request = store.confirm(store.create_draft(
             'FULL BRIEF ' * 3000,
-            title=f'Incident requirement {index}')['id'], f'human:{index}')
+            title=f'Incident request {index}')['id'], f'human:{index}')
         task_id = f'task-{index}'
-        store.link_task(requirement['id'], task_id)
+        store.link_task(request['id'], task_id)
         tasks.append({'id': task_id, 'title': f'Incident task {index}',
                       'status': 'running', 'assignee': 'ancor-worker',
                       'body': 'FULL TASK BODY ' * 3000,
                       'blocked_reason': 'FULL REASON ' * 2000})
     scheduler = Scheduling(store)
-    for requirement in store.snapshot()['requirements']:
-        scheduler.call({'action': 'schedule', 'requirement_id': requirement['id'],
+    for request in store.snapshot()['requests']:
+        scheduler.call({'action': 'schedule', 'request_id': request['id'],
                         'reason': 'FULL WAKE REASON ' * 2000,
                         'due_at': 4102444800})
     box = NotificationOutbox(str(tmp_path / 'store.db') + '.notifications.db',
@@ -43,7 +43,7 @@ def test_wake_packet_excludes_full_briefs_and_bodies_under_incident_fixture(tmp_
     for index in range(12):
         box.enqueue(f'n{index}', 'completion', f'FULL MESSAGE {index} ' * 2000,
                     actor='ancor-coordinator',
-                    requirement_id=store.snapshot()['requirements'][index % 3]['id'])
+                    request_id=store.snapshot()['requests'][index % 3]['id'])
     store.add_event('native.completed', {'result': 'FULL EVENT ' * 5000})
 
     host = Host(Context(tmp_path / 'store.db'), store=store,
@@ -71,7 +71,7 @@ def test_default_overview_is_bounded_under_history_heavy_fixture(tmp_path, monke
         register_hook=lambda *args: None,
         register_platform_handler=lambda *args: None)
     store = Store(config['store_path'])
-    requirement = store.confirm(store.create_draft(
+    request = store.confirm(store.create_draft(
         'BRIEF ' * 2000, title='Bounded overview')['id'],
         'human:overview')
     tasks = []
@@ -82,7 +82,7 @@ def test_default_overview_is_bounded_under_history_heavy_fixture(tmp_path, monke
         if index >= 80:
             task['archived_at'] = 100
             task['status'] = 'done'
-        store.link_task(requirement['id'], task['id'])
+        store.link_task(request['id'], task['id'])
         tasks.append(task)
     box = NotificationOutbox(str(store.path) + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
@@ -90,7 +90,7 @@ def test_default_overview_is_bounded_under_history_heavy_fixture(tmp_path, monke
     for index in range(20):
         box.enqueue(f'n{index}', 'question', 'Message ' * 200,
                     actor='ancor-coordinator',
-                    requirement_id=requirement['id'], task_id=f'question-task-{index}')
+                    request_id=request['id'], task_id=f'question-task-{index}')
         if index < 14:
             box.close_questions({f'n{index}': 'fixture history'}, closed_by='host')
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: tasks)
@@ -112,7 +112,7 @@ def test_default_overview_is_bounded_under_history_heavy_fixture(tmp_path, monke
     assert omitted[('tasks', 'archived')] == 10
 
 
-def test_requirement_expansion_scopes_every_nested_collection(tmp_path, monkeypatch):
+def test_request_expansion_scopes_every_nested_collection(tmp_path, monkeypatch):
     tools = {}
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
@@ -131,27 +131,27 @@ def test_requirement_expansion_scopes_every_nested_collection(tmp_path, monkeypa
     store.link_task(second['id'], 'second-task')
     store.ack_events([event['id'] for event in store.pending_events()])
     for index in range(25):
-        store.add_event('requirement.paused', {
-            'requirement_id': first['id'], 'command_id': f'first-{index}',
+        store.add_event('request.paused', {
+            'request_id': first['id'], 'command_id': f'first-{index}',
             'reason': f'first reason {index}'})
-    store.add_event('requirement.paused', {
-        'requirement_id': second['id'], 'command_id': 'second', 'reason': 'second'})
+    store.add_event('request.paused', {
+        'request_id': second['id'], 'command_id': 'second', 'reason': 'second'})
     store.ack_events([event['id'] for event in store.pending_events()])
     first_event = store.add_event(
-        'native.completed', {'requirement_id': first['id'], 'task_id': 'first-task'})
+        'native.completed', {'request_id': first['id'], 'task_id': 'first-task'})
     store.add_event(
-        'native.completed', {'requirement_id': second['id'], 'task_id': 'second-task'})
+        'native.completed', {'request_id': second['id'], 'task_id': 'second-task'})
     scheduler = Scheduling(store)
-    for requirement, label in ((first, 'first'), (second, 'second')):
-        scheduler.call({'action': 'schedule', 'requirement_id': requirement['id'],
+    for request, label in ((first, 'first'), (second, 'second')):
+        scheduler.call({'action': 'schedule', 'request_id': request['id'],
                         'reason': label, 'due_at': 4102444800})
     box = NotificationOutbox(str(store_path) + '.notifications.db',
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('first-question', 'question', 'first', actor='ancor-coordinator',
-                requirement_id=first['id'], task_id='first-task')
+                request_id=first['id'], task_id='first-task')
     box.enqueue('second-question', 'question', 'second', actor='ancor-coordinator',
-                requirement_id=second['id'], task_id='second-task')
+                request_id=second['id'], task_id='second-task')
     tasks = [
         {'id': 'first-task', 'title': 'First task', 'status': 'running'},
         {'id': 'second-task', 'title': 'Second task', 'status': 'running'},
@@ -160,26 +160,26 @@ def test_requirement_expansion_scopes_every_nested_collection(tmp_path, monkeypa
     ancor.register(ctx)
 
     result = json.loads(tools['ancor_get_context']['handler'](
-        {'requirement_id': first['id']}))
-    assert result['requirement']['id'] == first['id']
+        {'request_id': first['id']}))
+    assert result['request']['id'] == first['id']
     assert [task['id'] for task in result['tasks']['items']] == ['first-task']
     assert [row['id'] for row in result['notifications']['items']] == ['first-question']
-    assert [wake['requirement_id'] for wake in result['scheduled_wakes']['items']] == [first['id']]
-    assert [item['requirement_id'] for item in result['progression']] == [first['id']]
+    assert [wake['request_id'] for wake in result['scheduled_wakes']['items']] == [first['id']]
+    assert [item['request_id'] for item in result['progression']] == [first['id']]
     assert [event['id'] for event in result['pending_events']['items']] == [first_event['id']]
     assert result['transitions']['count'] == 26
     assert result['transitions']['returned'] == 20
     assert result['transitions']['truncated'] is True
-    assert {item['requirement_id'] for item in result['transitions']['items']} == {first['id']}
+    assert {item['request_id'] for item in result['transitions']['items']} == {first['id']}
 
 
 def test_scheduled_wake_observation_is_bounded(tmp_path):
     store = Store(tmp_path / 'store.db')
-    requirement = store.confirm(store.create_draft('wakes', title='Wakes')['id'],
+    request = store.confirm(store.create_draft('wakes', title='Wakes')['id'],
                                 'human:wake')
     scheduler = Scheduling(store)
     for index in range(55):
-        scheduler.call({'action': 'schedule', 'requirement_id': requirement['id'],
+        scheduler.call({'action': 'schedule', 'request_id': request['id'],
                         'reason': f'wake {index}', 'due_at': 4102444800 + index})
 
     observation = scheduler.observation(store.snapshot())

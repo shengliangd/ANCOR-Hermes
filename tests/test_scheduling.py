@@ -10,13 +10,13 @@ from ancor.runtime import Coordinator
 
 def test_usage_simulation(tmp_path):
     now = [1000.0]
-    store = Store(tmp_path / 'requirements.db')
+    store = Store(tmp_path / 'requests.db')
     scheduler = Scheduling(store, lambda: now[0])
     req = store.confirm(store.create_draft('long wait')['id'], 'test')
     store.ack_events([e['id'] for e in store.pending_events()])
     scheduler.scan()
     assert scheduler.observation(store.snapshot())['progression'][0]['state'] == 'stalled'
-    wake = scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='external release tomorrow', due_at=90000))
+    wake = scheduler.call(dict(action='schedule', request_id=req['id'], reason='external release tomorrow', due_at=90000))
     assert not store.pending_events()
     stalled = scheduler.observation(store.snapshot())['progression'][0]
     assert stalled['state'] == 'stalled' and stalled['timers']
@@ -51,7 +51,7 @@ def test_usage_simulation(tmp_path):
     replacement = scheduler.call(dict(action='replace', wake_id=wake['id'], reason='release delayed', due_at=100000))
     assert not [e for e in store.pending_events() if e['kind'] == 'wake.due']
     scheduler.call(dict(action='cancel', wake_id=replacement['id']))
-    pending = scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='recheck', due_at=100000))
+    pending = scheduler.call(dict(action='schedule', request_id=req['id'], reason='recheck', due_at=100000))
     store.submit_acceptance(req['id'], 'verified offline')
     store.accept(req['id'], 'test:human')
     scheduler.scan()
@@ -71,8 +71,8 @@ def test_invalidation_and_validation(tmp_path):
     req = store.confirm(store.create_draft('a')['id'], 'yes')
     for due in [100, 99, float('nan'), float('inf'), True]:
         with pytest.raises(ValueError):
-            scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='x', due_at=due))
-    scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='x', due_at=101))
+            scheduler.call(dict(action='schedule', request_id=req['id'], reason='x', due_at=due))
+    scheduler.call(dict(action='schedule', request_id=req['id'], reason='x', due_at=101))
     store.confirm(store.create_draft('new', req['id'])['id'], 'yes')
     scheduler.scan()
     listed = scheduler.call({'action': 'list', 'state': 'suppressed'})['items']
@@ -82,8 +82,8 @@ def test_invalidation_and_validation(tmp_path):
 def test_wake_list_defaults_to_pending_and_reports_bounds(tmp_path):
     store = Store(tmp_path / 'db')
     scheduler = Scheduling(store, lambda: 100)
-    requirement = store.confirm(store.create_draft('wake list')['id'], 'yes')
-    wakes = [scheduler.call({'action': 'schedule', 'requirement_id': requirement['id'],
+    request = store.confirm(store.create_draft('wake list')['id'], 'yes')
+    wakes = [scheduler.call({'action': 'schedule', 'request_id': request['id'],
                              'reason': str(index), 'due_at': 1000 + index})
              for index in range(3)]
 
@@ -126,7 +126,7 @@ def test_health_distinguishes_triage_blocked_wait_and_stale_heartbeat(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')
     data = store.snapshot()
-    question = {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+    question = {'id': 'q1', 'kind': 'question', 'request_id': req['id'],
                 'task_id': 'task', 'state': 'sent', 'answer': None}
     assert scheduler.health(data, [{'id': 'task', 'status': 'triage'}], [question])[0]['state'] == 'stalled'
     assert scheduler.health(data, [{'id': 'task', 'status': 'blocked'}], [question])[0]['state'] == 'waiting_on_human'
@@ -142,9 +142,9 @@ def test_human_waiting_is_observable_while_other_work_is_active(tmp_path):
     store.link_task(req['id'], 'running')
     store.link_task(req['id'], 'blocked')
     questions = [
-        {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+        {'id': 'q1', 'kind': 'question', 'request_id': req['id'],
          'task_id': 'blocked', 'state': 'sent', 'answer': None},
-        {'id': 'q2', 'kind': 'question', 'requirement_id': req['id'],
+        {'id': 'q2', 'kind': 'question', 'request_id': req['id'],
          'task_id': 'blocked', 'state': 'sent', 'answer': None},
     ]
     result = scheduler.health(
@@ -162,7 +162,7 @@ def test_human_waiting_is_observable_while_other_work_is_active(tmp_path):
 def test_answered_uncertain_question_is_progress_not_delivery_failure(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')
-    question = {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+    question = {'id': 'q1', 'kind': 'question', 'request_id': req['id'],
                 'task_id': 'task', 'state': 'uncertain', 'answer': 'Use quarterly'}
     result = scheduler.health(store.snapshot(), [{'id': 'task', 'status': 'blocked'}], [question])[0]
     assert result['state'] == 'stalled'
@@ -172,9 +172,9 @@ def test_answered_uncertain_question_is_progress_not_delivery_failure(tmp_path):
 def test_new_open_question_is_not_masked_by_older_answered_question(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')
-    answered = {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+    answered = {'id': 'q1', 'kind': 'question', 'request_id': req['id'],
                 'task_id': 'task', 'state': 'sent', 'answer': 'Earlier answer'}
-    open_question = {'id': 'q2', 'kind': 'question', 'requirement_id': req['id'],
+    open_question = {'id': 'q2', 'kind': 'question', 'request_id': req['id'],
                      'task_id': 'task', 'state': 'sent', 'answer': None}
     result = scheduler.health(
         store.snapshot(), [{'id': 'task', 'status': 'blocked'}],
@@ -186,7 +186,7 @@ def test_new_open_question_is_not_masked_by_older_answered_question(tmp_path):
 def test_question_delivery_grace_and_stale_question(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')
-    base = {'id': 'q1', 'kind': 'question', 'requirement_id': req['id'],
+    base = {'id': 'q1', 'kind': 'question', 'request_id': req['id'],
             'task_id': 'task', 'answer': None}
     pending = {**base, 'state': 'pending', 'queued_at': 9_990}
     result = scheduler.health(store.snapshot(), [{'id': 'task', 'status': 'blocked'}], [pending])[0]
@@ -201,7 +201,7 @@ def test_question_delivery_grace_and_stale_question(tmp_path):
 
 def test_wake_is_a_timer_not_a_progress_source(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
-    scheduler.call(dict(action='schedule', requirement_id=req['id'], reason='later', due_at=20_000))
+    scheduler.call(dict(action='schedule', request_id=req['id'], reason='later', due_at=20_000))
     result = scheduler.observation(store.snapshot())['progression'][0]
     assert result['state'] == 'stalled' and result['reason'] == 'no_work'
     assert len(result['timers']) == 1
@@ -220,20 +220,20 @@ def test_stalled_event_lifecycle_follows_recovery(tmp_path):
     assert len([e for e in store.pending_events() if e['kind'] == 'host.stalled']) == 1
 
 
-def test_paused_requirement_is_not_stalled_and_suppresses_wakes(tmp_path):
+def test_paused_request_is_not_stalled_and_suppresses_wakes(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')
-    wake = scheduler.call(dict(action='schedule', requirement_id=req['id'],
+    wake = scheduler.call(dict(action='schedule', request_id=req['id'],
                                reason='later', due_at=20_000))
-    pause = store.create_requirement_command('pause', req['id'], 'user asked', 'Stop briefly')
-    store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+    pause = store.create_request_command('pause', req['id'], 'user asked', 'Stop briefly')
+    store.confirm_request_command(pause['id'], 'pause-confirmation')
     store.finalize_transition(req['id'])
     data = store.snapshot()
 
     health = scheduler.health(
         data, [{'id': 'task', 'status': 'running', 'last_heartbeat_at': 1}], [])[0]
     assert health['state'] == 'paused'
-    assert health['reason'] == 'requirement_paused'
+    assert health['reason'] == 'request_paused'
     scheduler.sync_health(data, [{'id': 'task', 'status': 'running',
                                   'last_heartbeat_at': 1}], [])
     assert not [e for e in store.pending_events() if e['kind'] == 'host.stalled']
@@ -245,6 +245,6 @@ def test_paused_requirement_is_not_stalled_and_suppresses_wakes(tmp_path):
     assert next(item for item in scheduler.call({'action': 'list', 'state': 'suppressed'})['items']
                 if item['id'] == wake['id'])['state'] == 'suppressed'
 
-    resume = store.create_requirement_command('resume', req['id'], 'user ready', 'Continue')
-    store.confirm_requirement_command(resume['id'], 'resume-confirmation')
+    resume = store.create_request_command('resume', req['id'], 'user ready', 'Continue')
+    store.confirm_request_command(resume['id'], 'resume-confirmation')
     assert scheduler.observation(store.snapshot(), [], [])['liveness']['due_at'] is not None

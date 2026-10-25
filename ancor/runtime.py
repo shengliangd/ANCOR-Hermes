@@ -63,7 +63,7 @@ class Coordinator:
                 return 'idle'
             snapshot = await asyncio.to_thread(self.snapshot)
             prompt = ('Process these ANCOR events; inspect the compact snapshot, expand only '
-                      'needed requirements or tasks, and explicitly acknowledge only handled event IDs.\n'
+                      'needed requests or tasks, and explicitly acknowledge only handled event IDs.\n'
                       + json.dumps({'events': event_summaries(events, self.batch_size),
                                     'snapshot': snapshot},
                                    separators=(',', ':'), ensure_ascii=False))

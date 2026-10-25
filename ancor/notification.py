@@ -117,12 +117,12 @@ class NotificationOutbox:
                 id TEXT PRIMARY KEY, kind TEXT NOT NULL, message TEXT NOT NULL,
                 target TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT,
                 error TEXT, answer TEXT, answer_reference TEXT,
-                requirement_id TEXT, task_id TEXT, queued_at REAL,
+                request_id TEXT, task_id TEXT, queued_at REAL,
                 delivery_started_at REAL, next_attempt_at REAL,
                 closed_at REAL, closed_by TEXT, close_reason TEXT)''')
             columns = {row[1] for row in db.execute('PRAGMA table_info(human_notifications)')}
             additions = {
-                'requirement_id': 'TEXT', 'task_id': 'TEXT', 'queued_at': 'REAL',
+                'request_id': 'TEXT', 'task_id': 'TEXT', 'queued_at': 'REAL',
                 'delivery_started_at': 'REAL', 'next_attempt_at': 'REAL',
                 'closed_at': 'REAL', 'closed_by': 'TEXT', 'close_reason': 'TEXT',
             }
@@ -134,7 +134,7 @@ class NotificationOutbox:
             db.execute('''CREATE TABLE IF NOT EXISTS response_proposals (
                 id TEXT PRIMARY KEY, notification_id TEXT NOT NULL,
                 answer TEXT NOT NULL, message TEXT NOT NULL,
-                requirement_id TEXT, task_id TEXT,
+                request_id TEXT, task_id TEXT,
                 superseded INTEGER NOT NULL DEFAULT 0,
                 confirmed INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL)''')
@@ -163,7 +163,7 @@ class NotificationOutbox:
         if row is None:
             raise KeyError(identifier)
         result = dict(row)
-        for column in ('requirement_id', 'task_id', 'queued_at', 'delivery_started_at',
+        for column in ('request_id', 'task_id', 'queued_at', 'delivery_started_at',
                        'next_attempt_at', 'closed_at', 'closed_by', 'close_reason'):
             result.setdefault(column, None)
         result['receipt'] = json.loads(result['receipt']) if result['receipt'] else None
@@ -205,7 +205,7 @@ class NotificationOutbox:
         finally:
             db.close()
 
-    def enqueue(self, identifier, kind, message, *, actor, requirement_id=None, task_id=None):
+    def enqueue(self, identifier, kind, message, *, actor, request_id=None, task_id=None):
         self._coordinator(actor)
         if not isinstance(self.target, str) or ':' not in self.target:
             raise ValueError('human_target is required to enqueue notifications')
@@ -219,21 +219,21 @@ class NotificationOutbox:
             duplicate = db.execute(
                 'SELECT id,state,closed_at FROM human_notifications '
                 'WHERE id<>? AND kind=? AND message=? AND target=? '
-                'AND requirement_id IS ? AND task_id IS ? LIMIT 1',
-                (identifier, kind, message, self.target, requirement_id, task_id)).fetchone()
+                'AND request_id IS ? AND task_id IS ? LIMIT 1',
+                (identifier, kind, message, self.target, request_id, task_id)).fetchone()
             if duplicate is not None and kind == 'question':
                 state = 'closed' if duplicate['closed_at'] is not None else duplicate['state']
                 raise ValueError(
                     f'identical notification already exists as {duplicate["id"]} ({state}); '
                     'reuse its stable ID or change the question materially')
             db.execute('INSERT OR IGNORE INTO human_notifications '
-                       '(id, kind, message, target, state, requirement_id, task_id, queued_at) '
+                       '(id, kind, message, target, state, request_id, task_id, queued_at) '
                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                        (identifier, kind, message, self.target, 'pending',
-                        requirement_id, task_id, self.clock()))
+                        request_id, task_id, self.clock()))
             row = self._row(db, identifier)
-            if (row['kind'], row['message'], row['target'], row['requirement_id'], row['task_id']) != (
-                    kind, message, self.target, requirement_id, task_id):
+            if (row['kind'], row['message'], row['target'], row['request_id'], row['task_id']) != (
+                    kind, message, self.target, request_id, task_id):
                 raise ValueError('notification identifier already has different content')
             return row
 
@@ -384,11 +384,11 @@ class NotificationOutbox:
                        'WHERE notification_id=? AND id<>? AND confirmed=0',
                        (identifier, proposal_id))
             db.execute('INSERT OR IGNORE INTO response_proposals('
-                       'id, notification_id, answer, message, requirement_id, '
+                       'id, notification_id, answer, message, request_id, '
                        'task_id, superseded, confirmed, created_at) '
                        'VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)',
                        (proposal_id, identifier, answer, row['message'],
-                        row.get('requirement_id'), row.get('task_id'), self.clock()))
+                        row.get('request_id'), row.get('task_id'), self.clock()))
             db.execute('UPDATE response_proposals SET superseded=0 '
                        'WHERE id=? AND confirmed=0', (proposal_id,))
             return self._proposal(db, proposal_id)
@@ -432,17 +432,17 @@ class NotificationOutbox:
         self._coordinator(actor)
         return self.close_question(identifier, closed_by=actor, reason=reason)
 
-    def close_completions(self, requirement_id, *, closed_by, reason, now=None):
+    def close_completions(self, request_id, *, closed_by, reason, now=None):
         """Close every outstanding completion notice after a human decision."""
         if not all(isinstance(value, str) and value.strip()
-                   for value in (requirement_id, closed_by, reason)):
-            raise ValueError('requirement, actor and close reason required')
+                   for value in (request_id, closed_by, reason)):
+            raise ValueError('request, actor and close reason required')
         now = self.clock() if now is None else now
         with self._db() as db:
             rows = [self._row(db, row[0]) for row in db.execute(
                 "SELECT id FROM human_notifications WHERE kind='completion' "
-                'AND requirement_id=? AND closed_at IS NULL ORDER BY rowid',
-                (requirement_id,))]
+                'AND request_id=? AND closed_at IS NULL ORDER BY rowid',
+                (request_id,))]
             for row in rows:
                 db.execute(
                     'UPDATE human_notifications SET closed_at=?, closed_by=?, close_reason=?, '
@@ -455,11 +455,11 @@ class NotificationOutbox:
 class NotificationDispatcher:
     """One Gateway-owned delivery loop; transport-neutral and non-blocking."""
 
-    def __init__(self, outbox, sender, *, resolve_requirement, resolve_task,
+    def __init__(self, outbox, sender, *, resolve_request, resolve_task,
                  retry_seconds=30.0, timeout=180.0, clock=time.time):
         self.outbox = outbox
         self.sender = sender
-        self.resolve_requirement = resolve_requirement
+        self.resolve_request = resolve_request
         self.resolve_task = resolve_task
         self.retry_seconds = max(1.0, float(retry_seconds))
         self.timeout = timeout
@@ -468,37 +468,37 @@ class NotificationDispatcher:
     def _gate(self, row):
         if row['kind'] == 'completion':
             try:
-                requirement = self.resolve_requirement(row['requirement_id'])
+                request = self.resolve_request(row['request_id'])
             except KeyError:
-                return 'close', 'requirement_missing'
-            target = requirement.get('target_status')
+                return 'close', 'request_missing'
+            target = request.get('target_status')
             if target is not None:
                 return 'close', 'completion_no_longer_pending'
-            if requirement.get('status') != 'awaiting_acceptance':
+            if request.get('status') != 'awaiting_acceptance':
                 return 'close', 'completion_no_longer_pending'
-            if requirement.get('content_mode') == 'points':
+            if request.get('content_mode') == 'points':
                 from .views import completion_id
-                if row['id'] != completion_id(requirement):
+                if row['id'] != completion_id(request):
                     return 'close', 'verification_superseded'
             return 'send', None
         if row['kind'] != 'question':
             return 'send', None
         try:
-            requirement = self.resolve_requirement(row['requirement_id'])
+            request = self.resolve_request(row['request_id'])
         except KeyError:
-            return 'close', 'requirement_missing'
-        target = requirement.get('target_status')
+            return 'close', 'request_missing'
+        target = request.get('target_status')
         if target in {'cancelled', 'invalidated'}:
-            return 'close', 'requirement_' + target
+            return 'close', 'request_' + target
         if target is not None:
-            return 'defer', 'requirement_transition_pending'
-        status = requirement.get('status')
+            return 'defer', 'request_transition_pending'
+        status = request.get('status')
         if status == 'paused':
-            return 'defer', 'requirement_paused'
+            return 'defer', 'request_paused'
         if status in {'cancelled', 'invalidated', 'accepted'}:
-            return 'close', 'requirement_' + status
+            return 'close', 'request_' + status
         if status != 'active':
-            return 'close', 'requirement_not_active'
+            return 'close', 'request_not_active'
         task = self.resolve_task(row.get('task_id'))
         if task is not None and task.get('status') != 'blocked':
             return 'close', 'task_not_blocked'

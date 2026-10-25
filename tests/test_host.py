@@ -65,7 +65,7 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     store = Store(ctx.config['store_path'])
     req = store.confirm(store.create_draft('deliver')['id'], 'human:1')
     store.ack_events([e['id'] for e in store.pending_events()])
-    metadata = {'requirement_id': req['id'], 'revision': 1, 'key': 'worker'}
+    metadata = {'request_id': req['id'], 'revision': 1, 'key': 'worker'}
     board = Board({'id': 't1', 'title': 'execution', 'body': 'ANCOR-LINK:' + json.dumps(metadata), 'status': 'done'})
     board.history = [{'id': 17, 'task_id': 't1', 'kind': kind, 'payload': {'reason': 'attention'}}]
     host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
@@ -89,7 +89,7 @@ def test_native_signal_reaches_coordinator_and_recovers_link(tmp_path, monkeypat
     assert event['task_id'] == 't1'
     assert payload['snapshot']['board']['items'] == []
     assert payload['snapshot']['board_counts']['by_status']['done'] == 1
-    assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': 't1'}]
+    assert store.snapshot()['task_links'] == [{'request_id': req['id'], 'task_id': 't1'}]
     assert store.pending_events()  # successful exit is NOT an ack
     restarted = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
     restarted.scan()
@@ -112,7 +112,7 @@ def test_replacement_transition_wakes_coordinator_without_automatic_guard(tmp_pa
     old = store.confirm(store.create_draft('old')['id'], 'human:old')
     store.ack_events([e['id'] for e in store.pending_events()])
     new = store.confirm(store.create_draft('new', old['id'])['id'], 'human:new')
-    metadata = {'requirement_id': old['id'], 'revision': 1, 'key': 'worker'}
+    metadata = {'request_id': old['id'], 'revision': 1, 'key': 'worker'}
     board = Board({'id': 'old-worker', 'status': 'running',
                    'body': 'ANCOR-LINK:' + json.dumps(metadata)})
     # A fresh Store/Host must recover the durable event, not depend on memory.
@@ -132,17 +132,17 @@ def test_replacement_transition_wakes_coordinator_without_automatic_guard(tmp_pa
     assert asyncio.run(host.coordinator.tick()) == 'ran'
     payload = json.loads(calls[0][-1].split('\n', 1)[1])
     requested = [e for e in payload['events']
-                 if e['kind'] == 'requirement.transition_requested']
+                 if e['kind'] == 'request.transition_requested']
     assert len(requested) == 1
-    assert requested[0]['requirement_id'] == old['id']
+    assert requested[0]['request_id'] == old['id']
     assert new['id'] in requested[0]['payload_preview']
     assert board.guards == []
     assert board.tasks[0]['status'] == 'running'
     assert payload['snapshot']['invalidated_tasks']['items'] == []
     assert requested[0]['id'] in [e['id'] for e in store.pending_events()]
-    requirements = host.wake_packet()['requirements']['items']
-    assert [r['id'] for r in requirements] == [old['id'], new['id']]
-    assert [r['target_status'] for r in requirements] == ['invalidated', 'active']
+    requests = host.wake_packet()['requests']['items']
+    assert [r['id'] for r in requests] == [old['id'], new['id']]
+    assert [r['target_status'] for r in requests] == ['invalidated', 'active']
 
 
 def test_retry_budget_durable_bounded_and_recovers(tmp_path):
@@ -214,7 +214,7 @@ def test_notification_dispatcher_reads_fresh_task_state(tmp_path):
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('q1', 'question', 'Which value?', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='task')
+                request_id=req['id'], task_id='task')
     stale = {'id': 'task', 'status': 'triage'}
     live = {'id': 'task', 'status': 'blocked'}
     board = Board(stale)
@@ -240,7 +240,7 @@ def test_notification_dispatcher_defers_when_task_state_unavailable(tmp_path):
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('q1', 'question', 'Which value?', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='task')
+                request_id=req['id'], task_id='task')
     board = Board({'id': 'task', 'status': 'blocked'})
     def unavailable(task_id):
         raise RuntimeError('native read failed')
@@ -259,7 +259,7 @@ def test_notification_dispatcher_defers_when_task_state_unavailable(tmp_path):
     assert calls == []
 
 
-def test_host_closes_questions_for_terminal_requirement(tmp_path):
+def test_host_closes_questions_for_terminal_request(tmp_path):
     from ancor.notification import NotificationOutbox
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
@@ -269,14 +269,14 @@ def test_host_closes_questions_for_terminal_requirement(tmp_path):
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('q1', 'question', 'Which value?', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='task')
+                request_id=req['id'], task_id='task')
     store.cancel([req['id']], 'user withdrew it')
     host = Host(ctx, store=store, board=Board({'id': 'task', 'status': 'blocked'}),
                 db_path=tmp_path / 'native.db')
     host.scan()
     row = box.get('q1')
     assert row['closed'] is True
-    assert row['close_reason'] == 'requirement_cancelled'
+    assert row['close_reason'] == 'request_cancelled'
     assert row['answer'] is None
 
 
@@ -292,7 +292,7 @@ def test_host_closes_question_when_task_is_no_longer_blocked(tmp_path):
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('q1', 'question', 'Which value?', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='task')
+                request_id=req['id'], task_id='task')
     host = Host(ctx, store=store, board=Board(task), db_path=tmp_path / 'native.db')
     host.scan()
     assert box.get('q1')['closed'] is False
@@ -336,18 +336,18 @@ def test_idle_never_spawns(tmp_path, monkeypatch):
     assert asyncio.run(host.coordinator.tick()) == 'idle'
 
 
-def test_paused_requirement_remains_visible_without_liveness(tmp_path):
+def test_paused_request_remains_visible_without_liveness(tmp_path):
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
     req = store.confirm(store.create_draft('pause me')['id'], 'human:1')
     store.link_task(req['id'], 'task')
-    pause = store.create_requirement_command('pause', req['id'], 'user asked', 'Stop briefly')
-    store.confirm_requirement_command(pause['id'], 'pause-confirmation')
+    pause = store.create_request_command('pause', req['id'], 'user asked', 'Stop briefly')
+    store.confirm_request_command(pause['id'], 'pause-confirmation')
     store.finalize_transition(req['id'])
     host = Host(ctx, store=store, board=Board({'id': 'task', 'status': 'blocked'}))
     snapshot = host.wake_packet()
-    assert [item['id'] for item in snapshot['requirements']['items']] == [req['id']]
-    assert snapshot['requirements']['items'][0]['status'] == 'paused'
+    assert [item['id'] for item in snapshot['requests']['items']] == [req['id']]
+    assert snapshot['requests']['items'][0]['status'] == 'paused'
     assert snapshot['progression'][0]['state'] == 'paused'
     assert snapshot['liveness']['due_at'] is None
 
@@ -356,15 +356,15 @@ def test_stalled_condition_backs_off_for_one_hour_and_rearms_on_reason_change(tm
     now = [1000]
     ctx = Context(tmp_path / 'store.db')
     store = Store(ctx.config['store_path'])
-    requirement = store.confirm(store.create_draft('wait')['id'], 'human:1')
-    store.link_task(requirement['id'], 'task')
+    request = store.confirm(store.create_draft('wait')['id'], 'human:1')
+    store.link_task(request['id'], 'task')
     store.ack_events([event['id'] for event in store.pending_events()])
     task = {'id': 'task', 'status': 'blocked'}
     host = Host(ctx, store=store, board=Board(task), db_path=tmp_path / 'native.db',
                 clock=lambda: now[0])
     host.startup = False
     host.scan()
-    key = 'stalled:' + requirement['id']
+    key = 'stalled:' + request['id']
     condition = host.state()['conditions'][key]
     assert condition == {'reason': 'blocked_without_wait', 'since': 1000,
                          'generation': 1, 'last_woken_at': None}

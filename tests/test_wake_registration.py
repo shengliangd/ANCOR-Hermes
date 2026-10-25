@@ -40,7 +40,7 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     assert schema['properties']['due_at']['type'] == 'number'
     assert not schema['additionalProperties']
     call = lambda name, args: json.loads(tools[name]['handler'](args))
-    args = dict(action='schedule', requirement_id=req['id'], reason='external release', due_at=time.time() + 1000)
+    args = dict(action='schedule', request_id=req['id'], reason='external release', due_at=time.time() + 1000)
     assert call('ancor_wake', {'action': 'list'})['items'] == []
     context = call('ancor_get_context', {})
     assert context['progression'][0]['state'] == 'active'
@@ -51,7 +51,7 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     host.tasks = [{'id': 'task', 'status': 'running', 'last_heartbeat_at': heartbeat}]
     assert host.wake_packet()['progression'] == context['progression']
     assert 'error' not in call('ancor_wake', args)
-    wake = call('ancor_wake', dict(action='schedule', requirement_id=req['id'], reason='external release 2', due_at=time.time() + 2000))
+    wake = call('ancor_wake', dict(action='schedule', request_id=req['id'], reason='external release 2', due_at=time.time() + 2000))
     first = call('ancor_get_context', {})['liveness']
     assert first['last_started'] is not None
     assert call('ancor_get_context', {})['liveness']['generation'] == first['generation'] == 1
@@ -101,7 +101,7 @@ def test_ack_events_is_atomic_idempotent_and_readable_after_ack(tmp_path, monkey
     assert read['event']['id'] == first['id']
     assert read['event']['acknowledged'] is True
 
-    stalled = store.add_event('host.stalled', {'requirement_id': req['id']},
+    stalled = store.add_event('host.stalled', {'request_id': req['id']},
                               source_key='stalled:' + req['id'])
     third = store.add_event('native.completed', {'task_id': 'task'},
                             source_key='native:test:ack-3')
@@ -132,7 +132,7 @@ def test_ack_does_not_depend_on_question_delivery(tmp_path, monkeypatch):
                              coordinator_profile='ancor-coordinator',
                              target='test:destination')
     box.enqueue('label-question', 'question', 'Which label?', actor='ancor-coordinator',
-                requirement_id=req['id'], task_id='task')
+                request_id=req['id'], task_id='task')
     assert box.claim_next()['state'] == 'sending'
     assert box.mark_uncertain('label-question', SenderError('timeout'))['state'] == 'uncertain'
 
@@ -147,15 +147,15 @@ def test_ack_does_not_depend_on_question_delivery(tmp_path, monkeypatch):
     assert any(e['kind'] == 'host.stalled' for e in store.pending_events())
 
 
-def test_ack_allows_blocked_task_from_invalidated_requirement(tmp_path, monkeypatch):
+def test_ack_allows_blocked_task_from_invalidated_request(tmp_path, monkeypatch):
     ctx, tools, store, req = registered(tmp_path, monkeypatch)
     call = lambda name, args: json.loads(tools[name]['handler'](args))
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: [
         {'id': 'task', 'status': 'blocked'}])
     replacement = store.confirm(store.create_draft('replacement', req['id'])['id'], 'fixture')
     store.finalize_transition(req['id'])
-    assert store.get_requirement(replacement['id'])['status'] == 'active'
-    assert store.get_requirement(req['id'])['status'] == 'invalidated'
+    assert store.get_request(replacement['id'])['status'] == 'active'
+    assert store.get_request(req['id'])['status'] == 'invalidated'
     blocked = store.add_event('native.blocked', {'task_id': 'task'},
                               source_key='native:test:obsolete')
     assert 'error' not in call('ancor_get_context', {'ack_event_ids': [blocked['id']]})
@@ -187,7 +187,7 @@ def test_human_and_external_wait_durable_without_task(tmp_path):
     store.ack_events([e['id'] for e in store.pending_events()])
     scheduler = Scheduling(store, lambda: 100)
     for reason in ['Human reply follow-up if unanswered', 'External release publication check']:
-        scheduler.call(dict(action='schedule', requirement_id=req['id'], reason=reason, due_at=1000))
+        scheduler.call(dict(action='schedule', request_id=req['id'], reason=reason, due_at=1000))
     restarted = Scheduling(Store(store.path), lambda: 999)
     health = restarted.observation(store.snapshot())['progression'][0]
     assert health['state'] == 'stalled' and health['reason'] == 'no_work'

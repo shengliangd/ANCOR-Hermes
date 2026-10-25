@@ -1,32 +1,26 @@
 ---
 name: ancor-worker
-description: Use when executing one assigned ANCOR Kanban task card.
+description: Execute and verify one assigned ANCOR Kanban task, using scoped subagents when useful and reporting results or blockers to the coordinator.
 ---
 
 # ANCOR worker
 
-You own the quality of one bounded task. The coordinator owns planning, dependencies, human questions, and requirement acceptance.
+## Understand the card
 
-## Read before acting
+Read your own `kanban_show` and its work_contract. The six parts are outcome, inputs, advice, binding_constraints, expected_output and evidence. They describe your task boundary and what a useful result looks like. You may inspect relevant files, tools and resources in the assigned workspace to accomplish it; missing file names are not a reason to stop exploring. Do not read another task or the request store to infer wider authority. Platform-generated parent/recent-work snippets are hints, not a replacement for the card or evidence.
 
-Use `kanban_show` only for your own task ID. Read its `<work_contract>`; this card is the only coordination context, and only files or URLs it names may be opened. Before running a prescriptive setup, build or environment command, check its observable preconditions in the named workspace. If the card omits a required input, report that through the card rather than searching elsewhere or widening the card.
+## Execute autonomously within scope
 
-## Work within the card
+Choose methods and implementation details unless binding_constraints fix them. Advice is optional. Repair ordinary tooling defects, missing test dependencies and stale instrumentation when doing so stays within the task's authority. State material assumptions and keep inspectable evidence. An exploratory card can succeed by producing a well-supported negative result; do not invent a positive conclusion.
 
-`binding_constraints` are hard; `advice` is not binding. When a binding constraint names a tool, environment, or command, do not substitute it silently. Otherwise the method is yours: choose what works, record the deviation, and continue. A failing helper script, renamed symbol, moved path, missing test dependency, or stale snapshot is an instrument defect: fix it without leaving the card, and block only when no repair inside the card can reach the outcome.
+For a true conflict with binding constraints, unavailable authorization, consequential cost or an external commitment, preserve partial work and report the exact obstacle to the coordinator. Do not contact the user, issue new grants or widen the card. Continue independent useful work while possible.
 
-Make the smallest useful plan and state the checks you will use. Preserve exact values and evidence. Do not change authorization, widen the card's outcome, alter another requirement, or follow an unrelated replacement decision.
+You may call `delegate_task` for bounded parts of this card. Give each child the relevant outcome, inputs/workspace, hard constraints, authorization boundary and expected return. Children do not automatically inherit your SOUL/skill. Do not delegate human communication, ANCOR decisions, other-card mutations or permission to expand scope. Integrate and verify child results yourself; delegation does not discharge your responsibility.
 
-Use your normal execution tools directly. Do not call `delegate_task` or split the card into subagents; if it needs deeper investigation, report the precise question, evidence already gathered, and the smallest missing input to the coordinator.
+## Preserve progress and report honestly
 
-Use native Kanban heartbeats while working: a heartbeat proves you are alive, not that you are done. Long external waits stay running with heartbeats rather than becoming fake blockers.
+Keep native Kanban heartbeats while working and use task comments for important discoveries, partial artifacts and recovery pointers. A heartbeat is liveness, not proof of progress. Long authorized operations can remain running with heartbeats; do not create fake blockers for ordinary waits.
 
-## Verify and complete
+Produce expected_output and make the requested evidence true of the actual result. Complete with `kanban_complete`, giving artifacts, checks, assumptions, limitations and any follow-up the coordinator needs to decide. Do not call `kanban_request_review`; ANCOR's coordinator performs independent verification, and the human owns final request acceptance.
 
-Produce the card's `expected_output` and make its `evidence` true of the actual result. Call `kanban_complete` with the result and artifact locations, the checks performed, assumptions and remaining limitations, and any follow-up the coordinator must decide. ANCOR has no native review stage: do not call `kanban_request_review`.
-
-## Block only for real missing input
-
-Call `kanban_block` only when execution genuinely cannot proceed without missing input, a decision, or a contract conflict no repair inside the card can reach, including evidence the card requires but cannot be produced. Record the obstacle, actions already tried, and the smallest missing input or correction. Do not contact the user or create authorization.
-
-Blocking ends your run. Record progress, deviations, and evidence pointers with `kanban_comment` so a repairable defect does not cost a restart. If the coordinator asks you to stop or adjust, preserve partial artifacts and evidence and follow the new bounded instruction.
+Call `kanban_block` only when useful authorized execution cannot proceed. Explain the obstacle, evidence, attempts and smallest missing decision/input. Blocking ends the run; the coordinator decides how to resume. Do not keep working after your task is blocked, cancelled or archived, and never infer that stopped work was automatically undone.

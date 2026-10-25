@@ -40,12 +40,12 @@ class Service:
                     'coordinator_profile', 'ancor-coordinator'))
         return self.board
 
-    def requirement(self, args):
+    def request(self, args):
         action = args['action']
         if action in {'pause', 'resume', 'cancel', 'accept', 'request_changes'}:
-            ids = args.get('requirement_ids', [args.get('requirement_id')])
-            if len(ids) == 1 and ids[0] and self.store.get_requirement(ids[0])['content_mode'] == 'points':
-                req = self.store.get_requirement(ids[0])
+            ids = args.get('request_ids', [args.get('request_id')])
+            if len(ids) == 1 and ids[0] and self.store.get_request(ids[0])['content_mode'] == 'points':
+                req = self.store.get_request(ids[0])
                 op = {'op': action}
                 if action == 'accept':
                     verification = self.store.latest_verification(ids[0])
@@ -56,7 +56,7 @@ class Service:
                     op['feedback'] = args['feedback']
                 else:
                     op['reason'] = args.get('reason') or action
-                return self.change({'action': 'propose', 'requirement_id': ids[0], 'base': req,
+                return self.change({'action': 'propose', 'request_id': ids[0], 'base': req,
                                     'input': args.get('feedback') or args.get('reason') or action, 'operations': [op]})
         if action == 'draft':
             summary = self.store._optional_text(args.get('summary'))
@@ -69,22 +69,22 @@ class Service:
         if action == 'cancel':
             summary = self.store._optional_text(args.get('summary'))
             cancellation = self.store.create_cancellation(
-                args['requirement_ids'], args.get('reason'), summary)
+                args['request_ids'], args.get('reason'), summary)
             return self.cancellation_presentation(cancellation)
         if action in {'pause', 'resume'}:
             summary = self.store._optional_text(args.get('summary'))
-            command = self.store.create_requirement_command(
-                action, args['requirement_id'], args['reason'], summary)
+            command = self.store.create_request_command(
+                action, args['request_id'], args['reason'], summary)
             return self.command_presentation(command)
         if action == 'advance':
-            from .transitions import advance_requirement
-            return advance_requirement(self.store, self.native_board,
-                                       args['requirement_id'])
+            from .transitions import advance_request
+            return advance_request(self.store, self.native_board,
+                                       args['request_id'])
         if action in {'accept', 'request_changes'}:
             command = self.store.create_human_decision(
-                args['requirement_id'], action, args.get('feedback'))
+                args['request_id'], action, args.get('feedback'))
             return self.command_presentation(command)
-        raise ValueError('unknown requirement action')
+        raise ValueError('unknown request action')
 
     def change(self, args):
         action = args['action']
@@ -92,7 +92,7 @@ class Service:
             # Actor/source identity comes from this adapter, never a model argument.
             actor = getattr(self.ctx, 'profile_name', 'ancor-interactor')
             proposal = self.store.propose_change(
-                args.get('requirement_id'), args['operations'], actor=actor,
+                args.get('request_id'), args['operations'], actor=actor,
                 source={'kind': 'interactor_proposal', 'human_identity': None,
                         'input': args['input']}, base=args.get('base'))
             return self.change_presentation(proposal)
@@ -102,7 +102,7 @@ class Service:
                 raise PermissionError('coordinator notes are private')
             return self.change_presentation(proposal)
         if action == 'history':
-            return self.store.list_changes(args['requirement_id'], before=args.get('before'),
+            return self.store.list_changes(args['request_id'], before=args.get('before'),
                                            limit=args.get('limit', 50),
                 include_notes=getattr(self.ctx, 'profile_name', '') == self.ctx.get_config('coordinator_profile', 'ancor-coordinator'))
         raise ValueError('unknown change action')
@@ -118,7 +118,7 @@ class Service:
                                  'Do not expose internal IDs, base versions, or operation JSON as the user-facing explanation. '
                                  'Only exact native confirmation commits this proposal.'}
         # Pending proposals from older releases retain their exact original presentation.
-        text = (f"ANCOR change {identifier}\nRequirement: {proposal['requirement_id']}\n"
+        text = (f"ANCOR change {identifier}\nRequest: {proposal['request_id']}\n"
                 + 'Base versions: ' + json.dumps(proposal['base'], ensure_ascii=False, sort_keys=True)
                 + '\nOriginal input:\n' + str(proposal['source'].get('input', ''))
                 + '\nExact operations:\n' + json.dumps(proposal['operations'], ensure_ascii=False, indent=2))
@@ -151,12 +151,12 @@ class Service:
         text = (f"ANCOR draft {draft['id']}\n"
                 f"Title: {draft['title']}\n"
                 f"High-level summary:\n{summary}\n\n"
-                f"Exact requirement to be stored:\n"
+                f"Exact request to be stored:\n"
                 f"Replacement of: {draft['replacement_of'] or 'none'}\n"
-                f"Requirement:\n{draft['brief']}")
+                f"Request:\n{draft['brief']}")
         path = self._write_presentation(draft['id'], text)
-        question = (text + f"\n\nConfirm ANCOR requirement {draft['id']}? "
-                    'This confirms the requirement, not deployment or payment.')
+        question = (text + f"\n\nConfirm ANCOR request {draft['id']}? "
+                    'This confirms the request, not deployment or payment.')
         return {**draft, 'draft_file': path, 'clarify_args': {'questions': [{
             'question': question,
             'choices': [f"Do not confirm {draft['id']}", f"Confirm ANCOR draft {draft['id']}"],
@@ -165,53 +165,53 @@ class Service:
 
     def cancellation_presentation(self, cancellation):
         """Offer an immutable cancellation proposal without changing state."""
-        requirements = [self.store.get_requirement(i) for i in cancellation['requirement_ids']]
+        requests = [self.store.get_request(i) for i in cancellation['request_ids']]
         blocks = []
-        for requirement in requirements:
+        for request in requests:
             blocks.append(
-                f"- {requirement['id']}\n"
-                f"  Title: {requirement['title']}")
+                f"- {request['id']}\n"
+                f"  Title: {request['title']}")
         summary = cancellation['summary'] or 'No high-level summary was provided.'
         text = (f"ANCOR cancellation {cancellation['id']}\n"
                 f"High-level summary:\n{summary}\n\n"
                 f"Exact cancellation to be stored:\n"
                 f"Reason: {cancellation['reason'] or 'not provided'}\n\n"
-                f"Requirements to cancel ({len(requirements)}):\n" + '\n'.join(blocks))
+                f"Requests to cancel ({len(requests)}):\n" + '\n'.join(blocks))
         path = self._write_presentation(cancellation['id'], text)
-        question = (text + f"\n\nConfirm cancellation of ANCOR requirements {cancellation['id']}? "
-                    'This stops coordination; requirement history remains.')
+        question = (text + f"\n\nConfirm cancellation of ANCOR requests {cancellation['id']}? "
+                    'This stops coordination; request history remains.')
         return {**cancellation, 'draft_file': path, 'clarify_args': {'questions': [{
             'question': question,
-            'choices': [f"Keep ANCOR requirements {cancellation['id']}",
-                        f"Cancel ANCOR requirements {cancellation['id']}"],
+            'choices': [f"Keep ANCOR requests {cancellation['id']}",
+                        f"Cancel ANCOR requests {cancellation['id']}"],
             'multi_select': False}]},
             'next_step': 'Call native clarify as an actual agent tool with clarify_args unchanged. Then read ancor_get_context.'}
 
     def command_presentation(self, command):
         """Offer an immutable transition or human-acceptance proposal."""
-        requirement = self.store.get_requirement(command['requirement_id'])
+        request = self.store.get_request(command['request_id'])
         action = command['action']
         if action in {'human_accept', 'human_request_changes'}:
-            verification = self.store.latest_verification(requirement['id'])
+            verification = self.store.latest_verification(request['id'])
             evidence = (verification['payload'].get('evidence')
                         if verification is not None else None)
             decision = 'accept' if action == 'human_accept' else 'request_changes'
             text = (f"ANCOR human acceptance {command['id']}\n"
                     f"Decision: {decision}\n"
-                    f"Requirement: {requirement['id']}\n"
-                    f"Title: {requirement['title']}\n"
-                    f"Requirement text:\n{requirement['brief']}\n\n"
+                    f"Request: {request['id']}\n"
+                    f"Title: {request['title']}\n"
+                    f"Request text:\n{request['brief']}\n\n"
                     f"Coordinator verification evidence:\n{evidence or 'not recorded'}")
             if action == 'human_request_changes':
                 text += f"\n\nExact feedback to be stored:\n{command['reason']}"
             path = self._write_presentation(command['id'], text)
-            keep = f"Leave ANCOR requirement {requirement['id']} awaiting acceptance"
-            confirm = (f"Accept ANCOR requirement {requirement['id']}"
+            keep = f"Leave ANCOR request {request['id']} awaiting acceptance"
+            confirm = (f"Accept ANCOR request {request['id']}"
                        if action == 'human_accept' else
-                       f"Request changes to ANCOR requirement {requirement['id']}")
-            prompt = (f"Confirm final acceptance of ANCOR requirement {requirement['id']}?"
+                       f"Request changes to ANCOR request {request['id']}")
+            prompt = (f"Confirm final acceptance of ANCOR request {request['id']}?"
                       if action == 'human_accept' else
-                      f"Confirm requesting changes to ANCOR requirement {requirement['id']}?")
+                      f"Confirm requesting changes to ANCOR request {request['id']}?")
             return {**command, 'draft_file': path, 'clarify_args': {'questions': [{
                 'question': text + f"\n\n{prompt}",
                 'choices': [keep, confirm], 'multi_select': False}]},
@@ -221,19 +221,19 @@ class Service:
         text = (f"ANCOR {verb} {command['id']}\n"
                 f"High-level summary:\n{summary}\n\n"
                 f"Exact {verb} to be stored:\n"
-                f"Requirement: {requirement['id']}\n"
-                f"Title: {requirement['title']}\n"
-                f"Requirement text:\n{requirement['brief']}\n\n"
+                f"Request: {request['id']}\n"
+                f"Title: {request['title']}\n"
+                f"Request text:\n{request['brief']}\n\n"
                 f"Reason: {command['reason']}")
         path = self._write_presentation(command['id'], text)
         if action == 'pause':
-            keep = f"Keep ANCOR requirement {requirement['id']} running"
-            confirm = f"Pause ANCOR requirement {requirement['id']}"
-            prompt = f"Confirm pause of ANCOR requirement {requirement['id']}?"
+            keep = f"Keep ANCOR request {request['id']} running"
+            confirm = f"Pause ANCOR request {request['id']}"
+            prompt = f"Confirm pause of ANCOR request {request['id']}?"
         else:
-            keep = f"Keep ANCOR requirement {requirement['id']} paused"
-            confirm = f"Resume ANCOR requirement {requirement['id']}"
-            prompt = f"Confirm resume of ANCOR requirement {requirement['id']}?"
+            keep = f"Keep ANCOR request {request['id']} paused"
+            confirm = f"Resume ANCOR request {request['id']}"
+            prompt = f"Confirm resume of ANCOR request {request['id']}?"
         return {**command, 'draft_file': path, 'clarify_args': {'questions': [{
             'question': text + f"\n\n{prompt}",
             'choices': [keep, confirm], 'multi_select': False}]},
@@ -251,10 +251,10 @@ class Service:
 
     def response_presentation(self, proposal):
         """Offer one exact human reply for native confirmation."""
-        requirement = self.store.get_requirement(proposal['requirement_id'])
+        request = self.store.get_request(proposal['request_id'])
         text = (f"ANCOR response {proposal['id']}\n"
-                f"Requirement: {requirement['id']}\n"
-                f"Title: {requirement['title']}\n"
+                f"Request: {request['id']}\n"
+                f"Title: {request['title']}\n"
                 f"Task: {proposal.get('task_id') or 'not specified'}\n"
                 f"Question asked:\n{proposal['message']}\n\n"
                 f"Exact human reply to be recorded:\n{proposal['answer']}")
@@ -354,7 +354,7 @@ class Service:
                 expected = self.change_presentation(self.store.get_change(target))['clarify_args']
             elif kind == 'human_decision':
                 expected = self.command_presentation(
-                    self.store.get_requirement_command(target))['clarify_args']
+                    self.store.get_request_command(target))['clarify_args']
             elif kind == 'draft':
                 expected = self.presentation(self.store.get_draft(target))['clarify_args']
             elif kind == 'cancellation':
@@ -365,7 +365,7 @@ class Service:
                 expected = self.response_presentation(proposal)['clarify_args']
             else:
                 expected = self.command_presentation(
-                    self.store.get_requirement_command(target))['clarify_args']
+                    self.store.get_request_command(target))['clarify_args']
             if args != expected:
                 raise ValueError('native clarify arguments must match the complete immutable proposal exactly')
             with self._confirmations() as db:
@@ -413,24 +413,24 @@ class Service:
                 elif kind == 'cancellation':
                     question = self.cancellation_presentation(
                         self.store.get_cancellation(target))['clarify_args']['questions'][0]
-                    answer = f'Cancel ANCOR requirements {target}'
+                    answer = f'Cancel ANCOR requests {target}'
                 elif kind == 'response':
                     proposal = self._notification_outbox().get_response_proposal(target)
                     question = self.response_presentation(proposal)['clarify_args']['questions'][0]
                     answer = f'Confirm ANCOR response {target}'
                 elif kind == 'human_decision':
-                    command = self.store.get_requirement_command(target)
-                    requirement = self.store.get_requirement(command['requirement_id'])
+                    command = self.store.get_request_command(target)
+                    request = self.store.get_request(command['request_id'])
                     question = self.command_presentation(command)['clarify_args']['questions'][0]
-                    answer = (f"Accept ANCOR requirement {requirement['id']}"
+                    answer = (f"Accept ANCOR request {request['id']}"
                               if command['action'] == 'human_accept' else
-                              f"Request changes to ANCOR requirement {requirement['id']}")
+                              f"Request changes to ANCOR request {request['id']}")
                 else:
-                    command = self.store.get_requirement_command(target)
-                    requirement = self.store.get_requirement(command['requirement_id'])
+                    command = self.store.get_request_command(target)
+                    request = self.store.get_request(command['request_id'])
                     question = self.command_presentation(command)['clarify_args']['questions'][0]
-                    answer = (f"Pause ANCOR requirement {requirement['id']}" if kind == 'pause'
-                              else f"Resume ANCOR requirement {requirement['id']}")
+                    answer = (f"Pause ANCOR request {request['id']}" if kind == 'pause'
+                              else f"Resume ANCOR request {request['id']}")
                 mismatch = self._confirmation_mismatch(payload, question, answer)
             except Exception as exc:
                 self._finish_confirmation(db, session_id, tool_call_id, 'error', exc)
@@ -454,19 +454,19 @@ class Service:
                 elif kind == 'response':
                     self._notification_outbox().confirm_response(target, reference)
                 elif kind == 'human_decision':
-                    requirement = self.store.confirm_human_decision(target, reference)
+                    request = self.store.confirm_human_decision(target, reference)
                     try:
                         box = self._notification_outbox()
                         box.close_completions(
-                            requirement['id'], closed_by='ancor-interactor',
+                            request['id'], closed_by='ancor-interactor',
                             reason=('accepted_by_human'
-                                    if requirement['status'] == 'accepted'
+                                    if request['status'] == 'accepted'
                                     else 'changes_requested_by_human'))
                     except Exception:
                         log.exception('ANCOR completion notice close failed for %s',
-                                      requirement['id'])
+                                      request['id'])
                 else:
-                    self.store.confirm_requirement_command(target, reference)
+                    self.store.confirm_request_command(target, reference)
             except Exception as exc:
                 self._finish_confirmation(db, session_id, tool_call_id, 'error', exc)
                 log.exception('ANCOR confirmation commit failed for %s', target)
@@ -482,51 +482,51 @@ class Service:
 
     def note(self, args):
         action = {'append': 'add', 'replace': 'update', 'invalidate': 'delete'}.get(args['action'], args['action'])
-        requirement_id = args['requirement_id']
+        request_id = args['request_id']
         actor = getattr(self.ctx, 'profile_name', 'ancor-coordinator')
         if args['action'] in {'replace', 'invalidate'} and type(args.get('expected_revision')) is not int:
             raise ValueError('expected_revision required for note replace/invalidate')
         if action == 'history':
-            return self.store.note_history(requirement_id, args['note_id'])
+            return self.store.note_history(request_id, args['note_id'])
         if action == 'list':
             result = self.store.list_notes(
-                requirement_id, limit=args.get('limit', 50),
+                request_id, limit=args.get('limit', 50),
                 include_deleted=args.get('include_deleted', False))
             return collection([note_summary(note) for note in result['items']],
                               total=result['count'])
         if action == 'get':
-            return note_detail(self.store.get_note(requirement_id, args['note_id']))
+            return note_detail(self.store.get_note(request_id, args['note_id']))
         if action == 'add':
-            return note_detail(self.store.add_note(requirement_id, args['body'], actor=actor))
+            return note_detail(self.store.add_note(request_id, args['body'], actor=actor))
         if action == 'update':
             return note_detail(self.store.update_note(
-                requirement_id, args['note_id'], args['body'], expected_revision=args.get('expected_revision'), actor=actor))
+                request_id, args['note_id'], args['body'], expected_revision=args.get('expected_revision'), actor=actor))
         if action == 'delete':
-            return note_detail(self.store.delete_note(requirement_id, args['note_id'], expected_revision=args.get('expected_revision'), actor=actor))
+            return note_detail(self.store.delete_note(request_id, args['note_id'], expected_revision=args.get('expected_revision'), actor=actor))
         raise ValueError('unknown note action')
 
     def acceptance(self, args):
-        requirement = self.store.get_requirement(args['requirement_id'])
-        if requirement['status'] != 'active' or requirement['target_status'] is not None:
-            raise ValueError('requirement is not stably active')
+        request = self.store.get_request(args['request_id'])
+        if request['status'] != 'active' or request['target_status'] is not None:
+            raise ValueError('request is not stably active')
         if args['action'] == 'reject':
-            return self.store.reject(requirement['id'], args['reason'])
+            return self.store.reject(request['id'], args['reason'])
         if args['action'] not in {'accept', 'verify'}:
             raise ValueError('unknown acceptance action')
         evidence = args.get('evidence')
         if not isinstance(evidence, dict):
             raise ValueError('evidence object required')
-        if requirement['content_mode'] == 'points':
+        if request['content_mode'] == 'points':
             with self.store._transaction() as db:
-                self.store._check_verification(db, requirement, json.dumps(evidence))
-        elif evidence.get('brief') != requirement['brief']:
+                self.store._check_verification(db, request, json.dumps(evidence))
+        elif evidence.get('brief') != request['brief']:
             raise ValueError('evidence must bind the exact stored brief')
         for field in ('verification', 'artifacts', 'task_ids'):
             values = evidence.get(field)
             if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v.strip() for v in values):
                 raise ValueError(f'evidence requires nonempty {field}')
         links = {x['task_id'] for x in self.store.snapshot()['task_links']
-                 if x['requirement_id'] == requirement['id']}
+                 if x['request_id'] == request['id']}
         if not set(evidence['task_ids']) <= links:
             raise ValueError('evidence references unlinked tasks')
         if not links:
@@ -543,8 +543,8 @@ class Service:
                 raise ValueError('all linked native tasks must be done before acceptance')
             actual = self.native_board.archive(
                 task_id,
-                f'ANCOR requirement {requirement["id"]} accepted; archive verified work.')
+                f'ANCOR request {request["id"]} accepted; archive verified work.')
             if actual.get('status') != 'archived':
                 raise RuntimeError('native archive verification failed')
         return self.store.submit_acceptance(
-            requirement['id'], json.dumps(evidence, ensure_ascii=False), generation=requirement['generation'])
+            request['id'], json.dumps(evidence, ensure_ascii=False), generation=request['generation'])

@@ -1,4 +1,4 @@
-"""Durable one-shot wakes and global liveness, using the requirement transaction."""
+"""Durable one-shot wakes and global liveness, using the request transaction."""
 import math
 import time
 from uuid import uuid4
@@ -17,7 +17,7 @@ class Scheduling:
         with store._transaction() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS scheduled_wakes (
-                    id TEXT PRIMARY KEY, requirement_id TEXT NOT NULL,
+                    id TEXT PRIMARY KEY, request_id TEXT NOT NULL,
                     reason TEXT NOT NULL, due_at REAL NOT NULL, state TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS coordination_clock (
                     id INTEGER PRIMARY KEY CHECK(id=1), active_since REAL,
@@ -40,12 +40,12 @@ class Scheduling:
                 if old['state'] not in {'scheduled', 'queued'}:
                     raise ValueError('wake is no longer pending')
             if action != 'cancel':
-                rid = args.get('requirement_id', old['requirement_id'] if old else None)
-                if old and rid != old['requirement_id']:
-                    raise ValueError('replacement must retain requirement')
-                requirement = self.store._get(db, 'requirements', rid)
-                if requirement['status'] != 'active' or requirement['target_status'] is not None:
-                    raise ValueError('requirement is not stably active')
+                rid = args.get('request_id', old['request_id'] if old else None)
+                if old and rid != old['request_id']:
+                    raise ValueError('replacement must retain request')
+                request = self.store._get(db, 'requests', rid)
+                if request['status'] != 'active' or request['target_status'] is not None:
+                    raise ValueError('request is not stably active')
                 reason = self.store._text(args['reason'])
                 due = args['due_at']
                 if isinstance(due, bool) or not isinstance(due, (int, float)) or not math.isfinite(due) or due <= now:
@@ -60,7 +60,7 @@ class Scheduling:
             return self.store._get(db, 'scheduled_wakes', identifier)
 
     def _list(self, db, args):
-        requirement_id = args.get('requirement_id')
+        request_id = args.get('request_id')
         state = args.get('state')
         limit = args.get('limit', 50)
         if type(limit) is not int or not 1 <= limit <= 200:
@@ -73,21 +73,21 @@ class Scheduling:
         else:
             raise ValueError('state must be one of: ' + ', '.join(sorted(allowed_states)))
         rows = [dict(row) for row in db.execute(
-            'SELECT * FROM scheduled_wakes WHERE (? IS NULL OR requirement_id=?) '
-            'ORDER BY due_at,id', (requirement_id, requirement_id))]
+            'SELECT * FROM scheduled_wakes WHERE (? IS NULL OR request_id=?) '
+            'ORDER BY due_at,id', (request_id, request_id))]
         rows = [row for row in rows if row['state'] in states]
         return collection([wake_ref(row) for row in rows[:limit]], total=len(rows))
 
-    def pending_wakes(self, requirement_id=None):
+    def pending_wakes(self, request_id=None):
         with self.store._transaction() as db:
             self._suppress(db)
             return [dict(row) for row in db.execute(
                 "SELECT * FROM scheduled_wakes WHERE state IN ('scheduled','queued') "
-                "AND (? IS NULL OR requirement_id=?) ORDER BY due_at,id",
-                (requirement_id, requirement_id))]
+                "AND (? IS NULL OR request_id=?) ORDER BY due_at,id",
+                (request_id, request_id))]
 
     def _suppress(self, db):
-        db.execute("UPDATE scheduled_wakes SET state='suppressed' WHERE state IN ('scheduled','queued') AND requirement_id IN (SELECT id FROM requirements WHERE status!='active' OR target_status IS NOT NULL)")
+        db.execute("UPDATE scheduled_wakes SET state='suppressed' WHERE state IN ('scheduled','queued') AND request_id IN (SELECT id FROM requests WHERE status!='active' OR target_status IS NOT NULL)")
         db.execute("UPDATE events SET acknowledged=1 WHERE source_key IN (SELECT 'wake:' || id FROM scheduled_wakes WHERE state IN ('suppressed','cancelled'))")
         db.execute("UPDATE scheduled_wakes SET state='handled' WHERE state='queued' AND EXISTS (SELECT 1 FROM events WHERE source_key='wake:' || scheduled_wakes.id AND acknowledged=1)")
 
@@ -98,7 +98,7 @@ class Scheduling:
             for row in db.execute("SELECT * FROM scheduled_wakes WHERE state='scheduled' AND due_at<=?", (now,)).fetchall():
                 self.store._add_event(db, 'wake.due', dict(row), 'wake:' + row['id'])
                 db.execute("UPDATE scheduled_wakes SET state='queued' WHERE id=?", (row['id'],))
-            active = db.execute("SELECT 1 FROM requirements WHERE status='active' "
+            active = db.execute("SELECT 1 FROM requests WHERE status='active' "
                                 "OR target_status IS NOT NULL LIMIT 1").fetchone()
             state = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
             if not active:
@@ -125,16 +125,16 @@ class Scheduling:
         return isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) and now - timestamp <= seconds
 
     @staticmethod
-    def _question(notifications, requirement_id, task_id, *, open_only=False):
+    def _question(notifications, request_id, task_id, *, open_only=False):
         return [row for row in notifications or ()
                 if row.get('kind') == 'question'
-                and row.get('requirement_id') == requirement_id
+                and row.get('request_id') == request_id
                 and row.get('task_id') == task_id
                 and (not open_only or (row.get('answer') is None
                                        and row.get('closed_at') is None))]
 
-    def _blocked_wait(self, notifications, requirement_id, task_id, now):
-        questions = self._question(notifications, requirement_id, task_id)
+    def _blocked_wait(self, notifications, request_id, task_id, now):
+        questions = self._question(notifications, request_id, task_id)
         # Current unanswered questions govern health; an older answered question
         # must not mask a newer question that is still waiting for the human.
         open_questions = [row for row in questions
@@ -160,23 +160,23 @@ class Scheduling:
         return 'stalled', 'blocked_without_wait'
 
     def health(self, data, tasks, notifications, now=None):
-        """One requirement health result: active, waiting_on_human, or stalled."""
+        """One request health result: active, waiting_on_human, or stalled."""
         now = self.clock() if now is None else now
         tasks = list(tasks or ())
         by_id = {task['id']: task for task in tasks}
         linked = {}
         for link in data['task_links']:
-            linked.setdefault(link['requirement_id'], []).append(by_id.get(link['task_id'], {'id': link['task_id']}))
+            linked.setdefault(link['request_id'], []).append(by_id.get(link['task_id'], {'id': link['task_id']}))
         wakes = self.pending_wakes()
-        scope = {r['id'] for r in data['requirements']}
-        wakes = [wake for wake in wakes if wake['requirement_id'] in scope]
+        scope = {r['id'] for r in data['requests']}
+        wakes = [wake for wake in wakes if wake['request_id'] in scope]
         results = []
-        for requirement in data['requirements']:
-            rid = requirement['id']
+        for request in data['requests']:
+            rid = request['id']
             items = linked.get(rid, [])
             timers = [{'kind': 'scheduled_wake', **wake_ref(wake)} for wake in wakes
-                      if wake['requirement_id'] == rid and wake['state'] in {'scheduled', 'queued'}]
-            base = {'requirement_id': rid, 'tasks': [
+                      if wake['request_id'] == rid and wake['state'] in {'scheduled', 'queued'}]
+            base = {'request_id': rid, 'tasks': [
                 {key: task[key] for key in ('id', 'status', 'last_heartbeat_at',
                                             'block_kind', 'block_recurrences') if key in task}
                 for task in items], 'timers': timers}
@@ -197,23 +197,23 @@ class Scheduling:
                     'task_ids': [task['id'] for task, _ in waiting],
                     'question_ids': [row['id'] for row in questions],
                 }
-            if requirement.get('target_status') is not None:
+            if request.get('target_status') is not None:
                 results.append({**base, 'state': 'stalled', 'reason': 'transition_pending',
-                                'waiting_on': {'target_status': requirement['target_status']},
+                                'waiting_on': {'target_status': request['target_status']},
                                 'task_ids': [task['id'] for task in items]})
                 continue
-            if requirement['status'] == 'paused':
-                results.append({**base, 'state': 'paused', 'reason': 'requirement_paused',
+            if request['status'] == 'paused':
+                results.append({**base, 'state': 'paused', 'reason': 'request_paused',
                                 'waiting_on': None,
                                 'task_ids': [task['id'] for task in items]})
                 continue
-            if requirement['status'] == 'awaiting_acceptance':
+            if request['status'] == 'awaiting_acceptance':
                 results.append({**base, 'state': 'awaiting_human_acceptance',
                                 'reason': 'human_acceptance_pending',
                                 'waiting_on': None,
                                 'task_ids': [task['id'] for task in items]})
                 continue
-            if requirement['status'] != 'active':
+            if request['status'] != 'active':
                 continue
             triage = [task for task in items if task.get('status') == 'triage']
             if triage:
@@ -253,7 +253,7 @@ class Scheduling:
                                 'waiting_on': {'question_ids': [row['id'] for row in questions]},
                                 'task_ids': [task['id'] for task, _ in waiting]})
                 continue
-            # Requirement-scoped questions can precede task creation. Independent
+            # Request-scoped questions can precede task creation. Independent
             # ready/running work above remains executable while a question is open.
             scoped_questions = self._question(notifications, rid, None, open_only=True)
             if scoped_questions:
@@ -280,12 +280,12 @@ class Scheduling:
         return results
 
     def sync_health(self, data, tasks, notifications):
-        """Publish one host.stalled condition event per active requirement."""
+        """Publish one host.stalled condition event per active request."""
         states = self.health(data, tasks, notifications)
-        stalled = {item['requirement_id'] for item in states if item['state'] == 'stalled'}
+        stalled = {item['request_id'] for item in states if item['state'] == 'stalled'}
         with self.store._transaction() as db:
             for rid in stalled:
-                event = self.store._add_event(db, 'host.stalled', {'requirement_id': rid}, 'stalled:' + rid)
+                event = self.store._add_event(db, 'host.stalled', {'request_id': rid}, 'stalled:' + rid)
                 db.execute('UPDATE events SET acknowledged=0 WHERE id=?', (event['id'],))
             for row in db.execute("SELECT id, source_key FROM events "
                                   "WHERE kind='host.stalled' AND acknowledged=0").fetchall():
@@ -295,23 +295,23 @@ class Scheduling:
 
     def observation(self, data, tasks=(), notifications=None):
         wakes = self.pending_wakes()
-        scope_ids = {r['id'] for r in data['requirements']}
-        wakes = [wake for wake in wakes if wake['requirement_id'] in scope_ids]
+        scope_ids = {r['id'] for r in data['requests']}
+        wakes = [wake for wake in wakes if wake['request_id'] in scope_ids]
         visible_wakes = wakes[:WAKE_LIMIT]
         with self.store._transaction() as db:
             state = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
-        active = [r for r in data['requirements']
+        active = [r for r in data['requests']
                   if r['status'] == 'active' or r.get('target_status') is not None]
         anchor = max(state['active_since'] if state['active_since'] is not None else self.clock(), state['last_started'] or 0)
         deadline = anchor + self.INTERVAL if active else None
         if tasks is None:
-            tracked = [r for r in data['requirements']
+            tracked = [r for r in data['requests']
                        if r['status'] in {'active', 'paused', 'pending', 'awaiting_acceptance'}
                        or r.get('target_status') is not None]
-            progression = [{'requirement_id': req['id'], 'state': 'unknown', 'reason': 'board_unavailable',
+            progression = [{'request_id': req['id'], 'state': 'unknown', 'reason': 'board_unavailable',
                             'waiting_on': None, 'task_ids': [],
                             'timers': [{'kind': 'scheduled_wake', **wake_ref(wake)} for wake in visible_wakes
-                                       if wake['requirement_id'] == req['id'] and wake['state'] in {'scheduled', 'queued'}]}
+                                       if wake['request_id'] == req['id'] and wake['state'] in {'scheduled', 'queued'}]}
                            for req in tracked]
         else:
             progression = self.health(data, tasks, notifications)

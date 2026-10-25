@@ -9,9 +9,9 @@ from ancor.store import Store
 
 
 
-def finalize_acceptance(store, requirement_id, evidence='evidence'):
-    store.submit_acceptance(requirement_id, evidence)
-    return store.accept(requirement_id, 'test:human')
+def finalize_acceptance(store, request_id, evidence='evidence'):
+    store.submit_acceptance(request_id, evidence)
+    return store.accept(request_id, 'test:human')
 
 class Board:
     link = staticmethod(NativeBoard.link)
@@ -34,9 +34,9 @@ class Board:
     def show(self, task_id):
         return self.tasks[task_id]['task'].copy()
 
-    def create(self, requirement_id, revision, key, **kwargs):
+    def create(self, request_id, revision, key, **kwargs):
         self.calls.append(('create', kwargs.copy()))
-        link = dict(requirement_id=requirement_id, revision=revision, key=key)
+        link = dict(request_id=request_id, revision=revision, key=key)
         for value in self.tasks.values():
             if self.link(value['task']) == link:
                 return value['task'].copy()
@@ -108,7 +108,7 @@ def contract(**extra):
 
 
 def create_args(req, **extra):
-    value = dict(action='create', requirement_id=req['id'], key='first', title='Implement',
+    value = dict(action='create', request_id=req['id'], key='first', title='Implement',
                  contract=contract())
     value.update(extra)
     return value
@@ -133,7 +133,7 @@ def test_create_rejects_invalid_planning_inputs(setup, extra):
     assert not setup[2].tasks
 
 
-def test_create_links_readback_and_replays_without_requirement_card(setup):
+def test_create_links_readback_and_replays_without_request_card(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     result = op.call(create_args(req))
@@ -144,8 +144,8 @@ def test_create_links_readback_and_replays_without_requirement_card(setup):
     assert 'acceptance_criteria' not in shown['body']
     assert op.call(create_args(req))['task_id'] == result['task_id']
     assert len(board.tasks) == 1
-    assert store.snapshot()['task_links'] == [{'requirement_id': req['id'], 'task_id': result['task_id']}]
-    assert store.get_requirement(req['id'])['status'] == 'active'
+    assert store.snapshot()['task_links'] == [{'request_id': req['id'], 'task_id': result['task_id']}]
+    assert store.get_request(req['id'])['status'] == 'active'
 
 
 def test_create_rejects_body_outside_the_six_parts(setup):
@@ -197,7 +197,7 @@ def test_render_card_omits_empty_optional_parts_and_injects_authorization():
                         'evidence': ['check']})
     assert body.startswith('<work_contract>\n<outcome>Outcome</outcome>')
     assert '<inputs>' not in body and '<advice>' not in body
-    assert body.count('Do not change authorization or requirement version.') == 1
+    assert body.count('Do not change authorization or request version.') == 1
     assert (body.index('<binding_constraints>') < body.index('<expected_output>')
             < body.index('<evidence>'))
 
@@ -207,11 +207,11 @@ def test_render_card_keeps_one_authorization_boundary():
     body = render_card({'outcome': 'Outcome', 'expected_output': ['out.txt'],
                         'evidence': ['check'],
                         'binding_constraints':
-                            ['Do not change authorization or requirement version.']})
-    assert body.count('Do not change authorization or requirement version.') == 1
+                            ['Do not change authorization or request version.']})
+    assert body.count('Do not change authorization or request version.') == 1
 
 
-def test_scoped_dependencies_across_active_requirements(setup):
+def test_scoped_dependencies_across_active_requests(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     parent = op.call(create_args(req))['task_id']
@@ -291,7 +291,7 @@ def test_promote_is_not_exposed(setup):
         operations(setup).call(dict(action='promote', task_id='unused', reason='Reviewed'))
 
 
-def test_edit_keeps_requirement_context_and_association(setup):
+def test_edit_keeps_request_context_and_association(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     created = op.call(create_args(req))
@@ -415,7 +415,7 @@ def test_show_and_history_bound_large_task_sections(setup):
     assert [row['id'] for row in older['items']] == [16, 17, 18, 19, 20]
 
 
-def test_create_requires_active_requirement_and_coordinator(setup):
+def test_create_requires_active_request_and_coordinator(setup):
     ctx, store, board, req = setup
     op = operations(setup)
     ctx.profile_name = 'ancor-worker'
@@ -431,7 +431,7 @@ def test_create_requires_active_requirement_and_coordinator(setup):
 @pytest.mark.parametrize('target', ['replacement', 'independent'])
 def test_invalidated_worker_is_archived_before_new_work(setup, monkeypatch, target):
     import os
-    from ancor.transitions import advance_requirement
+    from ancor.transitions import advance_request
     ctx, store, board, req = setup
     op = operations(setup)
     tid = op.call(create_args(req))['task_id']
@@ -440,7 +440,7 @@ def test_invalidated_worker_is_archived_before_new_work(setup, monkeypatch, targ
     if target == 'independent':
         replacement = store.confirm(store.create_draft('Independent')['id'], 'test-human-3')
     monkeypatch.setattr(os, 'kill', lambda pid, signal: None)
-    result = advance_requirement(store, board, req['id'])
+    result = advance_request(store, board, req['id'])
     assert result['outcome'] == 'completed'
     assert op.call(create_args(replacement))['task_id'] != tid
     assert board.show(tid)['status'] == 'archived'

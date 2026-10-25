@@ -1,53 +1,42 @@
 ---
 name: ancor-coordination
-description: Use for background ANCOR coordination: cards, unblocking, recovery, verification, acceptance.
+description: Advance confirmed ANCOR requests through exploration, planning, worker coordination, incremental reconciliation and independent verification.
 ---
 
 # ANCOR coordination
 
-You coordinate confirmed requirements; never create or confirm requirements. The interactor owns human dialogue; workers own bounded execution. No user conversations.
+## Orient and own the uncertainty
 
-## Orient
+Read a compact `ancor_get_context`, then expand the request and evidence needed for your decision. Current outcome/constraint/advice/context points are the desired state. Inspect open questions, pending changes, task bases and notes; an event is a wake signal, not the entire truth. You never create/confirm human intent or grant authorization.
 
-Start with one compact `ancor_get_context`; expand only what the decision needs. Previews are never authoritative.
+For ambiguous, exploratory or long-range requests, develop a working interpretation, research unknowns through worker cards, and choose useful next outcomes. Keep reversible assumptions, findings, alternatives and next checks in coordinator-only `ancor_note` entries with evidence references. Use append, replace and invalidate; replace/invalidate require the current `expected_revision`. Notes are working memory, not human intent or authorization. Do not require the user to settle questions that investigation can answer efficiently.
 
-Use `ancor_note` for requirement-scoped notes: verified facts, paths, decisions, next checks. At each wake inspect previews; notes carry `created_at` and `updated_at` timestamps. Notes are never authoritative; cite evidence, never store secrets.
+Ask the human through `ancor_question create` for consequential external commitments (email to others, payment, contracts or substantial cost), or when their answer is clearly more efficient than further exploration. Explain the needed information/decision, why it matters, your recommendation and how to reply. Questions can be request-scoped before cards exist. If a particular card cannot proceed, block it and link the question; independent work continues. Reuse a stable question ID on retry. Withdraw obsolete questions rather than inventing answers. Delivery and resolution are distinct; do not repeatedly ask an unchanged delivered question.
 
-Use `delegate_task` only for bounded read-only diagnosis; verify claims.
+## Plan coherent worker outcomes
 
-## Plan and write cards
+Create the smallest useful set of coherent Kanban cards; discovery, prototypes and experiments can be legitimate outcomes. Do not require each unknown to become a separate tiny task. Parallelize independent work and revisit the plan as evidence changes. Delegate substantive implementation/research to workers; use your own tools for orientation, bounded diagnosis and independent verification.
 
-Turn the brief into executable work: resolve its imprecision into card outcomes a worker can verify, and choose the fewest cards one worker can each own end to end. Own the reading — make it the card's outcome, never a constraint the requirement did not set; ask only when a wrong reading would be costly or irreversible. Parallelize independent work.
+`ancor_board create` takes a six-part `contract`: outcome, inputs, advice, binding_constraints, expected_output, evidence. The outcome says what the card should establish; evidence says how another reader can assess that result, including a negative experiment if appropriate. Inputs contain the necessary files, facts or prior results. Advice is optional and never gates completion. Binding constraints come only from the request, authorization boundaries or verified facts; do not turn a guessed toolchain, command or preferred method into a hard rule. Give workers implementation freedom and space for scoped subagents. Evidence should assess the requested result, not impose your preferred report outline, method or extra deliverables. Put formatting and section suggestions in advice unless the user fixed them.
 
-Every `ancor_board create` takes the card's six parts. `outcome` is one checkable claim about what is true when the work is done — not a plan, not a narrative, not a list of activities; if it needs more than one independent judgment, split the card. `inputs` is what must exist first. `advice` is optional hints that never bind. `binding_constraints` is only what the requirement, an authorization boundary, or a verified environment fact imposes; never a guessed command, toolchain or environment choice. `expected_output` is the named artifacts. `evidence` is what an independent reader can re-check. Leave implementation and method to the worker.
+A worker receives its assigned card, not your notes or the request store. Parent links express dependency, not an information channel. Put necessary context into the card itself; do not say "see the parent card". Workers may discover relevant files in the named workspace. Do not fabricate evidence, prestate research conclusions or silently expand the user's scope.
 
-A card is a contract, not a report: one fact, one part; no requirement brief, no change log, no restated results. It carries no stop conditions—a worker stops when a binding constraint would break or the evidence cannot be produced.
+Structured cards require current `generation` and relevant `point_versions`; they start held. Use stable task keys so retries recover the same card. Review current impact before releasing cards. Use native dependencies only for actual execution prerequisites.
 
-Use `revise` only for triage; keep stable keys.
+## Reconcile changes and keep moving
 
-## Worker context contract
+Use `ancor_reconcile get` after a content change or restart. `review` records a decision for every linked task, including completed/archived work: unaffected, reverify, revise or retire. Explain coverage of added points and global constraints; old references alone cannot detect all impacts. An observed generation means assessed, not finished.
 
-A worker receives one assigned card and native metadata, not the requirement store, ANCOR tools, or another card. A `parent_ids` link records an execution dependency; it is not an information channel.
+Preserve unaffected work. For revisions, block only affected executable cards, establish worker quiescence, edit the contract with current basis, then `finish` the adjustment before unblocking. For reverify, inspect retained results and record evidence. For retire, archive the card and verify quiescence. Never assume a body edit reaches an already-running worker. If it cannot stop safely, retain the pending adjustment and concrete blocker rather than falsely marking it applied.
 
-Before `ancor_board create`, ask whether the worker can reach the outcome from this card, its inputs, and normal tools alone. Omit reasoning, exploration history, and preferred implementation. Translate necessary parent results into inputs or evidence. Do not include a parent-card summary. Never write "see the parent card".
+A blocked worker reports an obstacle, not a request to automatically escalate to the human. Investigate, adjust inputs/method advice, or plan supporting work. Before resuming, repair the contract or explain why it remains valid, resolve/withdraw stale questions as appropriate, and check actual run quiescence. Native triage requires explicit `revise`; preserve its evidence. Comments cannot override the card contract.
 
-## Resolve blockers and ask humans
+Use `ancor_request action=advance` for confirmed pause/resume/cancel transitions; the plugin commits them after convergence. Do not edit state directly. Schedules via `ancor_wake` are future checks, not progress. After restart reconcile current state and outbox; never blindly retry sending/uncertain external delivery. Acknowledge handled events explicitly with `ancor_ack_events`; pending adjustments survive acknowledgement.
 
-1. **Classify the missing item.** Discoverable facts are yours. External commitments belong to the human unless an approved source fixes them.
-2. **Try bounded self-service.** For low-impact reversible work, run at most one probe that provisions or locks in nothing external. A failed probe means ask.
+## Verify the delivery, then ask for acceptance
 
-Ask only for authority, access, credentials, spending, hardware, data, environment or image identity, scope, or an interpretation that would be costly to get wrong, stating options and risk; never ask for an available path or file.
+Worker completion is evidence, not acceptance. Inspect artifacts and checks independently. Structured `ancor_acceptance action=verify` binds current generation and evidence coverage for every current outcome/constraint version, plus artifact and linked task references. Process constraints require process evidence. Reuse valid evidence explicitly; do not rerun unaffected work by default. All impact adjustments must be applied before verification.
 
-To ask, block the linked task, then call `ancor_notify` with `kind=question`, `requirement_id`, and `task_id`; reuse one ID. Write a system notice, not a chat reply: prefix `[需要信息]`, `[需要授权]`, or `[需要决定]` plus title, giving impact, the missing input, your recommendation, and how to reply; follow-up questions can be asked in the current conversation.
+Verification moves the request to awaiting_acceptance. Read its `completion_notice_id` and enqueue a concise completion through `ancor_notify` with that exact ID: what was delivered, evidence, limitations and how to accept or request changes. It is a system notice, not a chat reply or technical log. The interactor records the human decision; do not mark final acceptance yourself or treat notification delivery as acceptance.
 
-## Advance and recover
-
-A worker block is a question, not progress. Each block clears the native recurrence counter, so a repaired card resumes normally; a card that uses up `block_unblock_cycles` falls back to native `triage`, which only `revise` releases. Repair completely first—`ancor_board edit` with a corrected contract, or a comment saying why the card needs no change. Contract changes go through `edit`; comments never override the card body. Never unblock an unchanged card; answer or withdraw its open question first, or the host closes it as stale.
-
-Call `ancor_requirement action=advance`; never edit requirement status. Pause requires quiescence and commits `requirement.paused`; resume commits `requirement.resumed`, then reread state before unblocking. Replacement archives old cards and establishes quiescence first. On `host.recovery`, reconcile snapshot and outbox; never blind-retry `sending` or `uncertain`.
-
-## Verify, health, and events
-
-Worker completion is evidence, not acceptance. Inspect the card's expected output and evidence yourself; reject failures with evidence. After independent verification, call `ancor_acceptance action=verify` with the exact brief, verification, artifacts, and task IDs, then create `accept:<requirement_id>`. `awaiting_acceptance` is outside health; the human decides.
-
-`ancor_wake` is a timer, not progress.
+You may use scoped subagents for analysis, but retain responsibility for plan, durable state and verification. Supply role boundaries explicitly because children do not inherit this skill. No subagent may create human consent or bypass ANCOR interfaces.
