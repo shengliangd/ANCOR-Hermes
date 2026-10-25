@@ -563,11 +563,17 @@ def acceptance_ref(request, tasks=(), acceptance=None):
         status = 'awaiting_human'
     elif event_kind == 'request.changes_requested':
         status = 'changes_requested'
+    elif (event_kind == 'request.verified'
+          and acceptance.get('payload', {}).get('generation', 1) != request.get('generation', 1)):
+        status = 'verification_outdated'
     elif tasks and done == len(tasks):
-        status = 'pending'
+        status = 'pending_verification'
     else:
         status = 'not_ready'
-    return {'status': status, 'tasks_done': done, 'tasks_total': len(tasks)}
+    return {'status': status, 'tasks_done': done, 'tasks_total': len(tasks),
+            'human_acceptance_available': request.get('status') == 'awaiting_acceptance',
+            'waiting_for': ('human_decision' if status == 'awaiting_human' else
+                            'none' if status == 'accepted' else 'coordinator_verification')}
 
 
 def notification_summary(row, *, exact_via=False):

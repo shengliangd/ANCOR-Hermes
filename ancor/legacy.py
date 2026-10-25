@@ -157,6 +157,25 @@ def migrate_native_copy(path):
         if 'tasks' not in tables(db):
             raise ValueError('native source has no tasks table')
         columns = {r['name'] for r in db.execute('PRAGMA table_info(tasks)')}
+        for task in db.execute('SELECT * FROM tasks'):
+            if (('status' in columns and task['status'] == 'running')
+                    or any(task[c] is not None for c in ('worker_pid', 'claim_lock', 'current_run_id') if c in columns)):
+                raise ValueError('native snapshot has active execution identities; stop and reconcile workers before migration')
+        # A new instance must never inherit authority to signal an old instance's
+        # retained executor PID, even on an already finished historical run.
+        if 'task_runs' in tables(db):
+            run_columns = {r['name'] for r in db.execute('PRAGMA table_info(task_runs)')}
+            identity_columns = [c for c in ('worker_pid', 'worker_started_at') if c in run_columns]
+            if identity_columns:
+                db.execute('CREATE TABLE IF NOT EXISTS migration_executor_history ('
+                           'run_id INTEGER PRIMARY KEY, identity TEXT NOT NULL)')
+                for run in list(db.execute('SELECT * FROM task_runs')):
+                    identity = {c: run[c] for c in identity_columns}
+                    if any(v is not None for v in identity.values()):
+                        db.execute('INSERT OR IGNORE INTO migration_executor_history VALUES(?,?)',
+                                   (run['id'], json.dumps(identity)))
+                        db.execute('UPDATE task_runs SET ' + ','.join(quote(c) + '=NULL' for c in identity_columns)
+                                   + ' WHERE id=?', (run['id'],))
         for row in list(db.execute('SELECT * FROM tasks')):
             body = translate_native_link(row['body'])
             if body == row['body']:

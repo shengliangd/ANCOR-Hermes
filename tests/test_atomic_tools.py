@@ -162,3 +162,17 @@ def test_public_vocabulary_has_no_legacy_aliases(tmp_path, monkeypatch):
     result = json.loads(human['ancor_get_context']['handler']({'requirement_id': 'old-name'}))
     assert result['code'] == 'invalid_request'
     assert 'unsupported arguments' in result['error']
+
+
+def test_structured_question_has_one_creation_and_delivery_path(tmp_path, monkeypatch):
+    ctx, human, hooks, board = registered(tmp_path, monkeypatch)
+    rid = create_request(human, hooks)
+    _, coordinator, _, _ = registered(tmp_path, monkeypatch, 'ancor-coordinator', board)
+    call(coordinator, 'ancor_question', {'action': 'create', 'id': 'length',
+         'request_id': rid, 'body': 'How long?', 'reason': 'User chooses length'})
+    result = json.loads(coordinator['ancor_notify']['handler']({'action': 'send',
+         'id': 'duplicate-length', 'kind': 'question', 'request_id': rid, 'task_id': 'unused',
+         'message': 'How long?'}))
+    assert 'ancor_question create' in result['error']
+    store = Store(ctx.get_config('store_path'))
+    assert [q['id'] for q in store.questions(rid)] == ['length']

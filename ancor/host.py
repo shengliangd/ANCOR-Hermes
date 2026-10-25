@@ -160,7 +160,16 @@ class Host:
                 # heartbeats and scheduling bookkeeping must not self-wake.
                 # Native auto_blocked is a DispatchResult field; its durable
                 # circuit-breaker event is gave_up (not auto_blocked).
-                if event['kind'] in {
+                details = event.get('payload') or {}
+                if isinstance(details, str):
+                    try:
+                        details = json.loads(details)
+                    except ValueError:
+                        details = {}
+                initial_hold = (event['kind'] == 'blocked' and isinstance(details, dict)
+                                and details.get('reason') == 'initial_status'
+                                and details.get('status') == 'blocked')
+                if not initial_hold and event['kind'] in {
                     'completed', 'blocked', 'review_requested', 'dependency_wait',
                     'gave_up', 'timed_out', 'spawn_failed', 'crashed', 'stale',
                     'rate_limited', 'block_loop_detected', 'protocol_violation',

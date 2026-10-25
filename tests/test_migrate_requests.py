@@ -97,3 +97,26 @@ def test_native_ancor_metadata_and_idempotency_are_migrated_in_a_copy(tmp_path):
         assert body.endswith('\nOriginal contract')
         assert token == 'ancor:' + hashlib.sha256(json.dumps(link, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         assert db.execute("SELECT body FROM tasks WHERE id='other'").fetchone()[0] == 'Unmanaged task'
+
+
+def test_native_copy_refuses_active_claims_and_detaches_historical_executors(tmp_path):
+    import json
+    from ancor.legacy import migrate_native_copy
+    path = tmp_path / 'native.db'
+    with sqlite3.connect(path) as db:
+        db.executescript('''
+            CREATE TABLE tasks(id TEXT PRIMARY KEY,body TEXT,status TEXT,worker_pid INTEGER);
+            CREATE TABLE task_runs(id INTEGER PRIMARY KEY,worker_pid INTEGER,worker_started_at TEXT);
+            INSERT INTO tasks VALUES('t','Unmanaged','running',123);
+            INSERT INTO task_runs VALUES(1,123,'old-instance-fingerprint');
+        ''')
+    with pytest.raises(ValueError, match='active execution'):
+        migrate_native_copy(path)
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT worker_pid FROM task_runs').fetchone()[0] == 123
+        db.execute("UPDATE tasks SET status='done',worker_pid=NULL")
+    migrate_native_copy(path)
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT worker_pid,worker_started_at FROM task_runs').fetchone() == (None, None)
+        identity = json.loads(db.execute('SELECT identity FROM migration_executor_history').fetchone()[0])
+        assert identity == {'worker_pid': 123, 'worker_started_at': 'old-instance-fingerprint'}

@@ -119,3 +119,15 @@ def test_current_human_acceptance_is_not_reopened(tmp_path):
     store.accept(req['id'], 'native:human-accept')
     reopened = Store(store.path)
     assert reopened.get_request(req['id'])['status'] == 'accepted'
+
+
+def test_completed_cards_do_not_offer_human_acceptance():
+    from ancor.views import acceptance_ref
+    status = acceptance_ref({'status': 'active', 'generation': 3}, [{'status': 'done'}])
+    assert status['status'] == 'pending_verification'
+    assert status['human_acceptance_available'] is False
+    assert status['waiting_for'] == 'coordinator_verification'
+    status = acceptance_ref({'status': 'active', 'generation': 3}, [{'status': 'archived'}],
+                            {'kind': 'request.verified', 'payload': {'generation': 2}})
+    assert status['status'] == 'verification_outdated'
+    assert status['human_acceptance_available'] is False

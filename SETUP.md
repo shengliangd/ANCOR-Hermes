@@ -14,6 +14,11 @@ python scripts/isolated_trial.py prepare \
 python scripts/isolated_trial.py turn \
   --root /absolute/path/to/new-trial \
   --message '17×19 等于多少？'
+python scripts/isolated_trial.py pump --root /absolute/path/to/new-trial --cycles 2
+# After updating source plugin/role instructions:
+python scripts/isolated_trial.py sync --root /absolute/path/to/new-trial
+python scripts/isolated_trial.py turn --root /absolute/path/to/new-trial --fresh \
+  --message '查看当前请求进展'
 ```
 
 The root contains private owner/role configs, plugin snapshots, SOUL/skills, workspaces, request and Kanban databases, local notification records, forms and turn logs. The native models and tool execution are real; the trial callback simulates a human selecting an exact confirmation. It never fabricates an answer to an unexpected clarification. Use `--response reject` or `--response timeout` for negative confirmation cases. No model outputs or task completion results are scripted.
@@ -103,9 +108,9 @@ python -m ancor.migrate_requests /path/to/old.db \
 
 The source database and sidecars are read-only. The command copies request state, notifications, confirmations, host state and immutable presentation files; translates machine-owned identifiers; and retains human-authored text verbatim. Request IDs, task links, committed events and note history remain. Pending proposals are archived under `retired_confirmations` and require fresh confirmation. Historical consent is not silently transferred across renamed protocols.
 
-Optional native migration writes only `/path/to/migrated/requests.db.kanban.db`: ANCOR link metadata and its idempotency keys are translated; unmanaged tasks and original card contracts are preserved. Neither native source nor live board is modified. Select the migrated request store and matching native board copy together when provisioning the new instance.
+Optional native migration writes only `/path/to/migrated/requests.db.kanban.db`: ANCOR link metadata and its idempotency keys are translated; unmanaged tasks and original card contracts are preserved. Active execution claims are rejected; retained executor identities in completed-run history are archived and detached in the copy so the new instance cannot signal an old instance’s process. Neither native source nor live board is modified. Select the migrated request store and matching native board copy together when provisioning the new instance.
 
-Prose-only briefs remain authoritative until the user explicitly confirms a `convert` operation. Do not automatically classify or strengthen their content. Older schemas missing titles require the explicit title-mapping migration; never derive missing titles silently. Existing notes whose older bodies were overwritten can only retain their current version with a missing-history marker.
+Prose-only briefs remain authoritative until the user explicitly confirms a `convert` operation. Do not automatically classify or strengthen their content. The copy migrator supports title-bearing source schemas. For an earlier source missing titles, first use that release’s explicit title-mapping migration on an offline copy, then run this copy migrator. The current title tool targets request-named tables and is not a direct upgrader for old-named tables; never derive missing titles silently. Existing notes whose older bodies were overwritten can only retain their current version with a missing-history marker.
 
 ## Verification gates
 

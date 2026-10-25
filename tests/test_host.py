@@ -489,3 +489,23 @@ def test_owner_only(tmp_path):
     ctx.profile_name = 'ancor-coordinator'
     with pytest.raises(PermissionError):
         asyncio.run(scan_runner(ctx, SimpleNamespace(is_connected=True)))
+
+
+@pytest.mark.parametrize('encoded', [False, True])
+def test_creation_hold_is_bookkeeping_not_a_worker_block_signal(tmp_path, encoded):
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver')['id'], 'human')
+    store.link_task(req['id'], 't')
+    store.ack_events([e['id'] for e in store.pending_events()])
+    board = Board({'id': 't', 'status': 'running', 'last_heartbeat_at': time.time()})
+    payload = {'reason': 'initial_status', 'status': 'blocked', 'actor': 'ancor-coordinator'}
+    board.history = [{'id': 17, 'task_id': 't', 'kind': 'blocked',
+                      'payload': json.dumps(payload) if encoded else payload}]
+    host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
+    host.scan()
+    assert pending_native(store) == []
+    assert host.state()['task_cursors']['t'] == 17
+    board.history.append({'id': 18, 'task_id': 't', 'kind': 'blocked', 'payload': {'reason': 'missing authorization'}})
+    host.scan()
+    assert [e['payload']['id'] for e in pending_native(store)] == [18]

@@ -68,3 +68,5 @@ env -u PYTHONPATH python -m pytest tests -q
 ```
 
 Real model trials use `scripts/isolated_trial.py` to provision separate homes, role configs, skills, databases, Kanban and notification targets. The model and native tools are real; only the simulated human confirmation callback and local notification endpoint are test fixtures. Test reports must distinguish deterministic tests, native lifecycle probes and real model runs. Do not update a running installation until its isolated workflow has passed.
+
+本次真实模型试用、修复与验证边界见 [隔离试用记录](docs/isolated-trial-report.md)。

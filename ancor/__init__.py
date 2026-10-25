@@ -600,6 +600,9 @@ def register(ctx, *, scan_runner=None):
                 if identifier != completion_id(req):
                     raise ValueError('completion id must be ' + completion_id(req))
             if args['kind'] == 'question':
+                req = service.store.get_request(request_id)
+                if req['content_mode'] == 'points':
+                    raise ValueError('Use ancor_question create; it durably requests delivery without a separate ancor_notify send')
                 if not task_id:
                     raise ValueError('question requires request_id and task_id')
                 req = service.store.get_request(request_id)
@@ -621,9 +624,6 @@ def register(ctx, *, scan_runner=None):
                         raise RuntimeError(
                             f'question requires a blocked task; {task_id} is '
                             f'{task.get("status")}')
-            if args['kind'] == 'question' and req['content_mode'] == 'points':
-                service.store.create_question(req['id'], identifier=identifier, body=args['message'],
-                    reason=args.get('reason') or 'Coordinator question', actor=ctx.profile_name, task_id=task_id)
             box.enqueue(identifier, args['kind'], args['message'], actor=ctx.profile_name,
                         request_id=request_id, task_id=task_id)
             return notification_detail(box.get(identifier))
@@ -777,7 +777,7 @@ def register(ctx, *, scan_runner=None):
                                                       'cancelled', 'handled']},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
             'ancor_notify': (
-                'Durably enqueue a neutral question or accepted completion, list compact notifications, or withdraw an unanswered question that later information made obsolete. Enqueue returns pending; Gateway delivery is asynchronous. A question requires an active request and a linked blocked task; multiple distinct questions may remain open for the same request or task. Completion requires an accepted request and id accept:<request_id>. Filter by request_id, task_id, state or open_only; only id expands one full notification. Reuse a stable ID for the same question; pending is not delivery, and uncertain requires operator reconciliation.',
+                'Durably enqueue a completion notice, list compact notifications, or withdraw an obsolete unanswered question. For point-based requests, create questions only through ancor_question; creation already requests delivery. The question send path is only for migrated legacy briefs. Enqueue returns pending; Gateway delivery is asynchronous. A question requires an active request and a linked blocked task; multiple distinct questions may remain open for the same request or task. Completion requires awaiting_acceptance and the exact completion_notice_id returned by verification. Filter by request_id, task_id, state or open_only; only id expands one full notification. Reuse a stable ID for the same question; pending is not delivery, and uncertain requires operator reconciliation.',
                 {'action': {'type': 'string', 'enum': ['send', 'list', 'withdraw']},
                  'id': {'type': 'string'},
                  'kind': {'type': 'string', 'enum': ['question', 'completion']},
