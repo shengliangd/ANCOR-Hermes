@@ -5,6 +5,7 @@ import json
 import logging
 
 from .atomic_tools import question_ref
+from .notification import COMPLETION_MAX_CHARS
 from .views import completion_id
 
 from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
@@ -599,6 +600,9 @@ def register(ctx, *, scan_runner=None):
                     raise ValueError('completion requires a request awaiting human acceptance')
                 if identifier != completion_id(req):
                     raise ValueError('completion id must be ' + completion_id(req))
+                if existing is None and len(args['message']) > COMPLETION_MAX_CHARS:
+                    raise ValueError(f'completion message exceeds {COMPLETION_MAX_CHARS} characters; '
+                                     'send result, artifact, essential limitation and next action; keep detailed evidence in the verification record')
             if args['kind'] == 'question':
                 req = service.store.get_request(request_id)
                 if req['content_mode'] == 'points':
@@ -781,7 +785,7 @@ def register(ctx, *, scan_runner=None):
                 {'action': {'type': 'string', 'enum': ['send', 'list', 'withdraw']},
                  'id': {'type': 'string'},
                  'kind': {'type': 'string', 'enum': ['question', 'completion']},
-                 'message': {'type': 'string'}, 'reason': {'type': 'string'},
+                 'message': {'type': 'string', 'description': f'Completion notices have a {COMPLETION_MAX_CHARS}-character limit; full checks belong in verification evidence.'}, 'reason': {'type': 'string'},
                  'request_id': {'type': 'string'}, 'task_id': {'type': 'string'},
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
@@ -795,8 +799,8 @@ def register(ctx, *, scan_runner=None):
                  'priority': {'type': 'integer'},
                  'parent_ids': {'type': 'array', 'items': {'type': 'string'}},
                  'hold': {'type': 'boolean'},
-                 'generation': {'type': 'integer', 'minimum': 1},
-                 'point_versions': {'type': 'array', 'items': {'type': 'string'}},
+                 'generation': {'type': 'integer', 'minimum': 1, 'description': 'For point requests, create/contract edit requires the current content generation.'},
+                 'point_versions': {'type': 'array', 'items': {'type': 'string'}, 'description': 'For point requests, select relevant content.fields points by their version_id, not id.'},
                  'status': {'type': 'string'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
                  'include_archived': {'type': 'boolean'},
@@ -896,7 +900,12 @@ def register(ctx, *, scan_runner=None):
                         'not_found' if isinstance(exc, KeyError) else
                         'invalid_request' if isinstance(exc, ValueError) else
                         'state_conflict' if isinstance(exc, RuntimeError) else 'internal')
-                return json.dumps({'error': str(exc), 'code': code}, ensure_ascii=False)
+                result = {'error': str(exc), 'code': code}
+                from .operations import TaskBasisError
+                if isinstance(exc, TaskBasisError):
+                    result.update(current_basis=exc.current_basis,
+                                  next_step='Select relevant point_versions from current_basis and retry with its generation; this rejected operation created or edited no card.')
+                return json.dumps(result, ensure_ascii=False)
         ctx.register_tool(name=name, toolset='ancor',
                           schema={'name': name, 'description': description, 'parameters': {
                               'type': 'object', 'properties': properties, 'required': required,

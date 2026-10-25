@@ -45,6 +45,12 @@ def render_card(contract):
     return '<work_contract>\n' + '\n'.join(parts) + '\n</work_contract>'
 
 
+class TaskBasisError(ValueError):
+    def __init__(self, generation, versions):
+        super().__init__('Task basis must use the current generation and point version_id values, not point IDs')
+        self.current_basis = {'generation': generation, 'point_versions': sorted(versions)}
+
+
 class Operations:
     def __init__(self, ctx, store=None, board=None):
         self.ctx = ctx
@@ -59,6 +65,14 @@ class Operations:
                 raise ValueError('configure ANCOR board')
             self._board = NativeBoard(name, profile=self.ctx.get_config('coordinator_profile', 'ancor-coordinator'))
         return self._board
+
+    def _require_task_basis(self, request, args):
+        versions = {point['version_id'] for points in self.service.store.content(request['id'])['fields'].values()
+                    for point in points}
+        supplied = args.get('point_versions')
+        if (args.get('generation') != request['generation'] or not isinstance(supplied, list)
+                or not supplied or any(not isinstance(v, str) or v not in versions for v in supplied)):
+            raise TaskBasisError(request['generation'], versions)
 
     def detail(self, task_id):
         # NativeBoard.show intentionally returns only the task; coordination needs
@@ -165,7 +179,8 @@ class Operations:
         review = next((r for r in state['reviews'] if r['task_id'] == tid), None)
         basis = next((b for b in state['task_basis'] if b['task_id'] == tid), None)
         if review and (review['state'] != 'applied' or review['decision'] == 'retire'):
-            raise RuntimeError('apply the task impact decision before releasing work')
+            raise RuntimeError('apply the task impact decision before releasing work; after adjusting the stopped card, '
+                               'use ancor_reconcile action=finish with this request_id, generation and task_id, then unblock')
         if not basis or (basis['generation'] != req['generation'] and not (review and review['decision'] == 'unaffected')):
             raise RuntimeError('task requires current basis or explicit unaffected review')
 
@@ -203,9 +218,7 @@ class Operations:
                 self._require_stable_active(store.get_request(linked[parent]))
             worker_profile = self.ctx.get_config('worker_profile', 'ancor-worker')
             if req['content_mode'] == 'points':
-                versions = {p['version_id'] for items in store.content(req['id'])['fields'].values() for p in items}
-                if args.get('generation') != req['generation'] or not args.get('point_versions') or not set(args['point_versions']) <= versions:
-                    raise ValueError('structured tasks require current generation and point_versions')
+                self._require_task_basis(req, args)
             body = render_card(contract)
             task = self.board.create(req['id'], 1, args['key'], title=args['title'],
                                      body=body,
@@ -278,6 +291,12 @@ class Operations:
                 raise ValueError('revise requires an unarchived triage task')
             self.require_quiescence(detail)
             return self._receipt(self.board.revise(tid, reason), links[tid], ['revise'])
+        if action == 'unblock':
+            self._require_stable_active(store.get_request(links[tid]))
+        terminal = detail['task'].get('archived_at') or detail['task']['status'] in {'done', 'archived', 'cancelled'}
+        if terminal and (action in {'block', 'unblock'} or (action == 'edit' and 'contract' in args)):
+            raise RuntimeError('completed or archived cards cannot be restarted or have their contract rewritten; '
+                               'preserve the result, create a follow-up card, and retire obsolete work through reconciliation')
         if action == 'edit':
             req = store.get_request(links[tid])
             self._require_stable_active(req)
@@ -293,9 +312,7 @@ class Operations:
                     if detail['task']['status'] in {'running', 'ready'}:
                         raise ValueError('block the affected task before revising its contract')
                     self.require_quiescence(detail)
-                    active = {p['version_id'] for items in store.content(req['id'])['fields'].values() for p in items}
-                    if args.get('generation') != req['generation'] or not args.get('point_versions') or not set(args['point_versions']) <= active:
-                        raise ValueError('contract revision requires current generation and point_versions')
+                    self._require_task_basis(req, args)
                 contract = self._contract(args['contract'])
                 metadata = self.board.link(detail['task'])
                 if not metadata or metadata['request_id'] != req['id'] or metadata['revision'] != 1:

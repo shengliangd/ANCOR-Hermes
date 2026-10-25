@@ -44,7 +44,7 @@ Worker completion is evidence. Coordinator verification binds the current genera
 | `ancor_reconcile` | Persist impact decisions and unfinished adjustments |
 | `ancor_note` | Coordinator-only append/replace/invalidate/history |
 | `ancor_acceptance` | Independent coordinator verification |
-| `ancor_notify` | Durable local outbox for human questions/completion notices |
+| `ancor_notify` | Durable outbox; new completion summaries are limited to 400 characters, with full checks in verification evidence |
 | `ancor_wake`, `ancor_ack_events` | Future checks and handled event acknowledgement |
 
 Workers receive native task lifecycle tools and normal work tools, including bounded delegation, but no ANCOR business tools. The worker card is its execution contract; it may investigate relevant resources in its assigned workspace.
@@ -70,3 +70,5 @@ env -u PYTHONPATH python -m pytest tests -q
 Real model trials use `scripts/isolated_trial.py` to provision separate homes, role configs, skills, databases, Kanban and notification targets. The model and native tools are real; only the simulated human confirmation callback and local notification endpoint are test fixtures. Test reports must distinguish deterministic tests, native lifecycle probes and real model runs. Do not update a running installation until its isolated workflow has passed.
 
 本次真实模型试用、修复与验证边界见 [隔离试用记录](docs/isolated-trial-report.md)。
+
+角色精简、技术与非技术场景的迭代复测见 [复测记录](docs/concise-role-trials.md)。

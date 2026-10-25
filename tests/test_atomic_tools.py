@@ -176,3 +176,75 @@ def test_structured_question_has_one_creation_and_delivery_path(tmp_path, monkey
     assert 'ancor_question create' in result['error']
     store = Store(ctx.get_config('store_path'))
     assert [q['id'] for q in store.questions(rid)] == ['length']
+
+
+@pytest.mark.parametrize('bad_basis', [{}, {'generation': 0, 'point_versions': ['stale']},
+                                      {'generation': 1, 'point_versions': [{'id': 'invalid'}]}])
+def test_invalid_task_basis_can_be_recovered_without_probe_cards(tmp_path, monkeypatch, bad_basis):
+    ctx, human, hooks, board = registered(tmp_path, monkeypatch)
+    rid = create_request(human, hooks)
+    _, coordinator, _, _ = registered(tmp_path, monkeypatch, 'ancor-coordinator', board)
+    args = {'action': 'create', 'request_id': rid, 'key': 'work', 'title': 'Work', 'contract': contract()}
+    result = json.loads(coordinator['ancor_board']['handler']({**args, **bad_basis}))
+    assert result['code'] == 'invalid_request'
+    assert not board.tasks
+    basis = result['current_basis']
+    store = Store(ctx.get_config('store_path'))
+    expected = {p['version_id'] for ps in store.content(rid)['fields'].values() for p in ps}
+    assert set(basis['point_versions']) == expected
+    task = call(coordinator, 'ancor_board', {**args, **basis})
+    assert board.show(task['task_id'])['status'] == 'blocked'
+    assert len(board.tasks) == 1
+
+
+def test_completion_requires_a_summary_without_losing_verification(tmp_path, monkeypatch):
+    from ancor.notification import NotificationOutbox, COMPLETION_MAX_CHARS
+    ctx, human, hooks, board = registered(tmp_path, monkeypatch)
+    rid = create_request(human, hooks)
+    _, coordinator, _, _ = registered(tmp_path, monkeypatch, 'ancor-coordinator', board)
+    store = Store(ctx.get_config('store_path'))
+    versions = [p['version_id'] for ps in store.content(rid)['fields'].values() for p in ps]
+    task = call(coordinator, 'ancor_board', {'action': 'create', 'request_id': rid, 'key': 'report',
+                'title': 'Report', 'contract': contract(), 'generation': 1, 'point_versions': versions})
+    tid = task['task_id']
+    board.tasks[tid]['task']['status'] = 'done'
+    call(coordinator, 'ancor_reconcile', {'action': 'review', 'request_id': rid, 'generation': 1,
+         'decisions': [{'task_id': tid, 'decision': 'unaffected', 'reason': 'verified completed work'}],
+         'coverage_reason': 'Report covers all requested outcomes and constraints'})
+    call(coordinator, 'ancor_acceptance', {'action': 'verify', 'request_id': rid, 'evidence': {
+         'generation': 1, 'coverage': [{'version_id': v, 'evidence': 'Checked report and privacy'} for v in versions],
+         'verification': ['Independent check'], 'artifacts': ['report.md'], 'task_ids': [tid]}})
+    identifier = call(coordinator, 'ancor_get_context', {'request_id': rid})['request']['completion_notice_id']
+    args = {'action': 'send', 'kind': 'completion', 'id': identifier, 'request_id': rid}
+    result = json.loads(coordinator['ancor_notify']['handler']({**args, 'message': '详' * (COMPLETION_MAX_CHARS+1)}))
+    assert result['code'] == 'invalid_request'
+    assert not NotificationOutbox.read_existing(store.path + '.notifications.db')
+    short = 'Report ready: report.md. Verified; no personal data. Accept or request changes.'
+    receipt = call(coordinator, 'ancor_notify', {**args, 'message': short})
+    assert receipt['message'] == short
+    assert store.get_request(rid)['status'] == 'awaiting_acceptance'
+
+
+@pytest.mark.parametrize('status', ['done', 'archived', 'cancelled'])
+def test_terminal_card_contract_and_basis_survive_rework_attempt(tmp_path, monkeypatch, status):
+    ctx, human, hooks, board = registered(tmp_path, monkeypatch)
+    rid = create_request(human, hooks)
+    _, coordinator, _, _ = registered(tmp_path, monkeypatch, 'ancor-coordinator', board)
+    store = Store(ctx.get_config('store_path'))
+    versions = [p['version_id'] for ps in store.content(rid)['fields'].values() for p in ps]
+    task = call(coordinator, 'ancor_board', {'action': 'create', 'request_id': rid, 'key': 'first',
+         'title': 'First', 'contract': contract(), 'generation': 1, 'point_versions': versions})
+    tid = task['task_id']
+    board.tasks[tid]['task']['status'] = status
+    original = board.show(tid)['body']
+    basis = store.coordination(rid)['task_basis']
+    for args in ({'action': 'edit', 'contract': contract(outcome='Changed'), 'generation': 1, 'point_versions': versions},
+                 {'action': 'unblock', 'reason': 'Rework'}, {'action': 'block', 'reason': 'Change contract'}):
+        result = json.loads(coordinator['ancor_board']['handler']({'task_id': tid, **args}))
+        assert result['code'] == 'state_conflict'
+        assert 'follow-up card' in result['error']
+        assert board.show(tid)['body'] == original
+        assert store.coordination(rid)['task_basis'] == basis
+    followup = call(coordinator, 'ancor_board', {'action': 'create', 'request_id': rid, 'key': 'followup',
+         'title': 'Follow-up', 'contract': contract(outcome='Changed'), 'generation': 1, 'point_versions': versions})
+    assert followup['task_id'] != tid

@@ -15,6 +15,8 @@ import logging
 import sqlite3
 import time
 
+COMPLETION_MAX_CHARS = 400
+
 log = logging.getLogger(__name__)
 
 
