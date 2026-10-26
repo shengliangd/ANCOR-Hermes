@@ -139,7 +139,8 @@ def main() -> int:
             raise SystemExit(f"prompt verification failed: {installed}")
 
     if not args.no_restart:
-        run([hermes, "gateway", "restart"], dry_run=args.dry_run)
+        run([hermes, "-p", args.owner_profile, "gateway", "restart"],
+            dry_run=args.dry_run)
     print(f"ANCOR {ref} installed into {', '.join(profiles)}")
     if not args.dry_run:
         print(f"Backup and release manifest: {backup}")
