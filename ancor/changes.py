@@ -331,6 +331,8 @@ class Changes:
                         or verification['id'] != op['verification_id']
                         or verification['payload'].get('generation', 1) != req['generation']):
                     raise RuntimeError('acceptance must bind the current verification and generation')
+                if req['content_mode'] == 'points':
+                    self._check_verification(db, req, verification['payload']['evidence'])
                 db.execute("UPDATE requests SET status='accepted' WHERE id=?", (rid,))
                 self._add_event(db, 'request.accepted', {
                     'request_id': rid, 'change_id': cid, 'generation': req['generation'],
@@ -537,13 +539,20 @@ class Changes:
         if db.execute("SELECT 1 FROM impact_reviews WHERE request_id=? AND generation=? AND state='pending'",
                       (req['id'], req['generation'])).fetchone():
             raise RuntimeError('impact adjustments are still pending')
-        required = {p['version_id'] for p in self._points(db, req['id']) if p['field'] in {'outcome', 'constraint'}}
+        required_points = {p['version_id']: p for p in self._points(db, req['id'])
+                           if p['field'] in {'outcome', 'constraint'}}
+        required = set(required_points)
         coverage = data.get('coverage')
         if (not isinstance(coverage, list) or any(not isinstance(c, dict) for c in coverage)
                 or len(coverage) != len(required) or {c.get('version_id') for c in coverage} != required):
             raise ValueError('verification must cover every current outcome and constraint version')
         for item in coverage:
             self._text(item.get('evidence'))
+        unmet = [p for p in required_points.values() if next(
+            item for item in coverage if item['version_id'] == p['version_id']).get('satisfied') is not True]
+        if unmet:
+            labels = ', '.join(f"{p['field']}: {p['body']}" for p in unmet)
+            raise ValueError('verification has unsatisfied current outcomes or constraints: ' + labels)
 
     def sync_questions(self, box):
         """Recover legacy questions and bridge durable delivery intents idempotently.

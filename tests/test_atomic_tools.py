@@ -80,7 +80,8 @@ def test_public_structured_journey_and_local_revision(tmp_path, monkeypatch):
          'task_id': tid, 'evidence': 'Contract now specifies Markdown'})
     call(coordinator, 'ancor_board', {'action': 'unblock', 'task_id': tid, 'reason': 'updated'})
     board.tasks[tid]['task']['status'] = 'done'
-    evidence = {'generation': 2, 'coverage': [{'version_id': v, 'evidence': 'checked report'} for v in versions],
+    evidence = {'generation': 2, 'coverage': [{'version_id': v, 'satisfied': True,
+                                                'evidence': 'checked report'} for v in versions],
                 'verification': ['independent read'], 'artifacts': ['report.md'], 'task_ids': [tid]}
     call(coordinator, 'ancor_acceptance', {'action': 'verify', 'request_id': rid, 'evidence': evidence})
     p = call(human, 'ancor_request', {'action': 'accept', 'request_id': rid})
@@ -212,7 +213,8 @@ def test_completion_requires_a_summary_without_losing_verification(tmp_path, mon
          'decisions': [{'task_id': tid, 'decision': 'unaffected', 'reason': 'verified completed work'}],
          'coverage_reason': 'Report covers all requested outcomes and constraints'})
     call(coordinator, 'ancor_acceptance', {'action': 'verify', 'request_id': rid, 'evidence': {
-         'generation': 1, 'coverage': [{'version_id': v, 'evidence': 'Checked report and privacy'} for v in versions],
+         'generation': 1, 'coverage': [{'version_id': v, 'satisfied': True,
+                                         'evidence': 'Checked report and privacy'} for v in versions],
          'verification': ['Independent check'], 'artifacts': ['report.md'], 'task_ids': [tid]}})
     identifier = call(coordinator, 'ancor_get_context', {'request_id': rid})['request']['completion_notice_id']
     args = {'action': 'send', 'kind': 'completion', 'id': identifier, 'request_id': rid}

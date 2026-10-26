@@ -207,6 +207,16 @@ def test_wake_is_a_timer_not_a_progress_source(tmp_path):
     assert len(result['timers']) == 1
 
 
+def test_request_scoped_question_waits_without_a_placeholder_card(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    question = {'id': 'q1', 'kind': 'question', 'request_id': req['id'],
+                'task_id': None, 'state': 'sent', 'answer': None}
+    result = scheduler.health(store.snapshot(), [], [question])[0]
+    assert result['state'] == 'waiting_on_human'
+    assert result['reason'] == 'blocked_waiting_human'
+    assert result['task_ids'] == []
+
+
 def test_stalled_event_lifecycle_follows_recovery(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')

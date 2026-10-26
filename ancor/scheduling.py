@@ -259,7 +259,8 @@ class Scheduling:
             if scoped_questions:
                 state, reason = self._blocked_wait(notifications, rid, None, now)
                 results.append({**base, 'state': 'waiting_on_human' if state == 'waiting' else state,
-                                'reason': reason, 'task_ids': [],
+                                'reason': 'blocked_waiting_human' if state == 'waiting' else reason,
+                                'task_ids': [],
                                 'waiting_on': {'question_ids': [q['id'] for q in scoped_questions]}})
                 continue
             done = [task for task in items if task.get('status') == 'done']

@@ -836,8 +836,10 @@ def register(ctx, *, scan_runner=None):
                          'brief': {'type': 'string', 'description': 'Exact stored legacy brief; structured requests use generation and coverage.'},
                          'generation': {'type': 'integer', 'minimum': 1},
                          'coverage': {'type': 'array', 'items': {'type': 'object', 'properties': {
-                             'version_id': {'type': 'string'}, 'evidence': {'type': 'string'}},
-                             'required': ['version_id', 'evidence'], 'additionalProperties': False}},
+                             'version_id': {'type': 'string'},
+                             'satisfied': {'type': 'boolean', 'description': 'True only when this outcome or constraint is actually satisfied; pending, blocked and failed work is false.'},
+                             'evidence': {'type': 'string'}},
+                             'required': ['version_id', 'satisfied', 'evidence'], 'additionalProperties': False}},
                          **{field: {'type': 'array', 'minItems': 1,
                                     'items': {'type': 'string', 'pattern': r'\S'}}
                             for field in ('verification', 'artifacts', 'task_ids')}},

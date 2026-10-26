@@ -147,7 +147,8 @@ def test_delivery_intent_recovers_and_is_idempotent(atomic, tmp_path):
 def evidence(store, rid):
     return {'generation': store.get_request(rid)['generation'],
             'verification': ['independent check'], 'artifacts': ['report.md'], 'task_ids': ['t'],
-            'coverage': [{'version_id': p['version_id'], 'evidence': 'checked in artifact'}
+            'coverage': [{'version_id': p['version_id'], 'satisfied': True,
+                          'evidence': 'checked in artifact'}
                          for p in points(store, rid) if p['field'] in {'outcome', 'constraint'}]}
 
 
@@ -164,6 +165,36 @@ def test_verification_cannot_use_old_generation(atomic):
     apply(store, rid, [{'op': 'append', 'field': 'constraint', 'body': 'Offline only'}])
     with pytest.raises(RuntimeError):
         store.submit_acceptance(rid, json.dumps(old), generation=1)
+
+
+def test_verification_rejects_unsatisfied_current_content(atomic):
+    store, rid = atomic
+    store.link_task(rid, 't')
+    report = evidence(store, rid)
+    report['coverage'][0]['satisfied'] = False
+    store.review_impact(rid, 1, [{'task_id': 't', 'decision': 'unaffected',
+                                  'reason': 'new card'}], 'All current content covered')
+    with pytest.raises(ValueError, match='unsatisfied current outcomes or constraints'):
+        store.submit_acceptance(rid, json.dumps(report), generation=1)
+    assert store.get_request(rid)['status'] == 'active'
+    assert store.latest_verification(rid) is None
+
+
+def test_human_acceptance_rechecks_structured_coverage(atomic):
+    store, rid = atomic
+    store.link_task(rid, 't')
+    verify(store, rid)
+    verification = store.latest_verification(rid)
+    payload = dict(verification['payload'])
+    evidence_value = json.loads(payload['evidence'])
+    evidence_value['coverage'][0]['satisfied'] = False
+    payload['evidence'] = json.dumps(evidence_value)
+    with store._transaction() as db:
+        db.execute('UPDATE events SET payload=? WHERE id=?',
+                   (json.dumps(payload), verification['id']))
+    with pytest.raises(ValueError, match='unsatisfied current outcomes or constraints'):
+        store.accept(rid, 'human-confirmed')
+    assert store.get_request(rid)['status'] == 'awaiting_acceptance'
 
 
 def test_reconciliation_requires_all_tasks_and_survives_ack(atomic):

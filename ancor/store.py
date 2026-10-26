@@ -774,6 +774,8 @@ class Store(Changes):
             verification = self._latest_verification(db, request_id)
             if verification is None:
                 raise ValueError('coordinator verification evidence is missing')
+            if request['content_mode'] == 'points':
+                self._check_verification(db, request, verification['payload']['evidence'])
             db.execute("UPDATE requests SET status='accepted', target_status=NULL,control_version=control_version+1 "
                        'WHERE id=?', (request_id,))
             self._add_event(
