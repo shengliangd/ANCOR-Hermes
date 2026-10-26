@@ -2,6 +2,9 @@
 import json
 
 LABELS = {'outcome': '目标', 'constraint': '约束', 'advice': '建议', 'context': '背景'}
+# Start with the desired result, then provide context and optional guidance;
+# close with the binding boundaries that the reader must keep in mind.
+FIELD_ORDER = ('outcome', 'context', 'advice', 'constraint')
 
 
 def change_confirmation(store, db, rid, operations, identifier):
@@ -20,6 +23,18 @@ def change_confirmation(store, db, rid, operations, identifier):
         lines.append(label)
         lines.extend('    ' + line for line in text.split('\n'))
 
+    def field_group(field, bodies):
+        """Render a field once, with its points as a readable list."""
+        bodies = list(bodies)
+        if not bodies:
+            return
+        lines.append(LABELS[field])
+        for body in bodies:
+            parts = body.split('\n')
+            lines.append('  - ' + parts[0])
+            lines.extend('    ' + line for line in parts[1:])
+        lines.append('')
+
     content_changed = False
     for op in operations:
         kind = op['op']
@@ -27,9 +42,8 @@ def change_confirmation(store, db, rid, operations, identifier):
             if kind == 'convert':
                 value('将原请求正文整理为条目。原文：', request['brief'])
                 lines.append('整理后的完整要求：')
-            for field, label in LABELS.items():
-                for body in op['fields'].get(field, []):
-                    value(f'• {label}', body)
+            for field in FIELD_ORDER:
+                field_group(field, op['fields'].get(field, []))
             content_changed = True
         elif kind == 'append':
             value(f"• 新增{LABELS[op['field']]}", op['body'])
@@ -91,7 +105,8 @@ def change_confirmation(store, db, rid, operations, identifier):
             value('  适用范围：', grant['scope'])
         else:
             raise ValueError('unsupported confirmation operation')
-        lines.append('')
+        if lines[-1] != '':
+            lines.append('')
     if content_changed:
         lines.append('确认后，协调者会评估这些要求，并据此安排或调整工作。')
     lines.extend(['请确认以上内容。', f'确认单：{identifier[:12]}'])
