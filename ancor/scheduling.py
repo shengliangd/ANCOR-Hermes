@@ -98,16 +98,10 @@ class Scheduling:
             for row in db.execute("SELECT * FROM scheduled_wakes WHERE state='scheduled' AND due_at<=?", (now,)).fetchall():
                 self.store._add_event(db, 'wake.due', dict(row), 'wake:' + row['id'])
                 db.execute("UPDATE scheduled_wakes SET state='queued' WHERE id=?", (row['id'],))
-            active = db.execute("SELECT 1 FROM requests WHERE status='active' "
-                                "OR target_status IS NOT NULL LIMIT 1").fetchone()
             state = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
-            if not active:
-                db.execute('UPDATE coordination_clock SET active_since=NULL')
+            if state['active_since'] is None:
                 db.execute("UPDATE events SET acknowledged=1 WHERE kind='host.liveness'")
                 return
-            if state['active_since'] is None:
-                db.execute('UPDATE coordination_clock SET active_since=?', (now,))
-                state['active_since'] = now
             anchor = max(state['active_since'], state['last_started'] or state['active_since'])
             if now >= anchor + self.INTERVAL:
                 event = self.store._add_event(db, 'host.liveness', {'reason': 'Active work has no successful coordinator start within two hours', 'due_at': anchor + self.INTERVAL}, 'liveness:' + str(state['generation']))
@@ -281,9 +275,14 @@ class Scheduling:
         return results
 
     def sync_health(self, data, tasks, notifications):
-        """Publish one host.stalled condition event per active request."""
+        """Publish stalled conditions and maintain one global actionable clock."""
         states = self.health(data, tasks, notifications)
         stalled = {item['request_id'] for item in states if item['state'] == 'stalled'}
+        actionable = any(
+            item['state'] == 'stalled'
+            or (item['state'] == 'active'
+                and item.get('reason') != 'question_delivery_in_progress')
+            for item in states)
         with self.store._transaction() as db:
             for rid in stalled:
                 event = self.store._add_event(db, 'host.stalled', {'request_id': rid}, 'stalled:' + rid)
@@ -292,6 +291,12 @@ class Scheduling:
                                   "WHERE kind='host.stalled' AND acknowledged=0").fetchall():
                 if row['source_key'] not in {'stalled:' + rid for rid in stalled}:
                     db.execute('UPDATE events SET acknowledged=1 WHERE id=?', (row['id'],))
+            clock = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
+            if actionable and clock['active_since'] is None:
+                db.execute('UPDATE coordination_clock SET active_since=?', (self.clock(),))
+            elif not actionable:
+                db.execute('UPDATE coordination_clock SET active_since=NULL')
+                db.execute("UPDATE events SET acknowledged=1 WHERE kind='host.liveness'")
         return states
 
     def observation(self, data, tasks=(), notifications=None):
@@ -301,10 +306,9 @@ class Scheduling:
         visible_wakes = wakes[:WAKE_LIMIT]
         with self.store._transaction() as db:
             state = dict(db.execute('SELECT * FROM coordination_clock').fetchone())
-        active = [r for r in data['requests']
-                  if r['status'] == 'active' or r.get('target_status') is not None]
-        anchor = max(state['active_since'] if state['active_since'] is not None else self.clock(), state['last_started'] or 0)
-        deadline = anchor + self.INTERVAL if active else None
+        anchor = (max(state['active_since'], state['last_started'] or 0)
+                  if state['active_since'] is not None else None)
+        deadline = anchor + self.INTERVAL if anchor is not None else None
         if tasks is None:
             tracked = [r for r in data['requests']
                        if r['status'] in {'active', 'paused', 'pending', 'awaiting_acceptance'}

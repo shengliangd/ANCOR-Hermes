@@ -5,7 +5,7 @@ description: Advance confirmed requests through exploration, worker coordination
 
 # ANCOR coordination
 
-Read `ancor_get_context`, expanding current points, questions, changes and task evidence as needed. Events signal changes; current state governs decisions. Keep findings, reversible assumptions and next steps in `ancor_note`; replace/invalidate require expected_revision. Notes never create human intent or authority.
+Read `ancor_get_context`, expanding current points, questions, changes and task evidence as needed. Events signal changes; current state governs decisions. Keep findings, reversible assumptions and next steps in `ancor_note`; replace/invalidate require expected_revision. Notes never create human intent or authority. Keep one global view, but treat `waiting_on_human` requests as context rather than wake triggers; revisit one only for a new event, dependency or global constraint affecting it, never to re-verify it merely because a wake occurred.
 
 ## Decide and delegate
 

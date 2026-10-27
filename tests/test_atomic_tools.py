@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import ancor
+from ancor.notification import NotificationOutbox
 from ancor.store import Store
 from ancor.service import Service
 from ancor.operations import Operations
@@ -107,6 +108,34 @@ def test_tools_enforce_role_boundary_and_note_versions(tmp_path, monkeypatch):
     history = call(coordinator, 'ancor_note', {'action': 'history', 'request_id': rid, 'note_id': note['id']})
     assert [v['body'] for v in history['items']] == ['hypothesis', 'verified observation']
     assert Store(ctx.get_config('store_path')).get_request(rid)['generation'] == 1
+
+
+def test_verification_waits_while_a_request_question_is_open(tmp_path, monkeypatch):
+    ctx, human, hooks, board = registered(tmp_path, monkeypatch)
+    rid = create_request(human, hooks)
+    _, coordinator, _, _ = registered(tmp_path, monkeypatch, 'ancor-coordinator', board)
+    call(coordinator, 'ancor_question', {
+        'action': 'create', 'request_id': rid, 'id': 'arrival',
+        'body': 'Has the hardware arrived?', 'reason': 'external dependency'})
+    store = Store(ctx.get_config('store_path'))
+    box = NotificationOutbox(
+        store.path + '.notifications.db', coordinator_profile='ancor-coordinator',
+        target='test:user')
+    store.sync_questions(box)
+    box.claim_next()
+    box.mark_sent('arrival', {'success': True})
+    context = call(coordinator, 'ancor_get_context', {})
+    assert context['requests']['items'][0]['progression']['state'] == 'waiting_on_human'
+    assert context['open_question_count'] == 1
+    assert not any(item.get('why_code') == 'open_question'
+                   for item in context['attention'])
+    result = json.loads(coordinator['ancor_acceptance']['handler']({
+        'action': 'verify', 'request_id': rid, 'evidence': {
+            'brief': 'Report', 'verification': ['checked'],
+            'artifacts': ['report.md'], 'task_ids': ['task']}}))
+    assert result['code'] == 'invalid_request'
+    assert 'open questions' in result['error']
+    assert store.get_request(rid)['status'] == 'active'
 
 
 def test_public_question_answer_persists_in_current_context(tmp_path, monkeypatch):

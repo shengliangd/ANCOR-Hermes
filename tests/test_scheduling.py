@@ -14,6 +14,8 @@ def test_usage_simulation(tmp_path):
     scheduler = Scheduling(store, lambda: now[0])
     req = store.confirm(store.create_draft('long wait')['id'], 'test')
     store.ack_events([e['id'] for e in store.pending_events()])
+    scheduler.sync_health(store.snapshot(), [], [])
+    store.ack_events([e['id'] for e in store.pending_events()])
     scheduler.scan()
     assert scheduler.observation(store.snapshot())['progression'][0]['state'] == 'stalled'
     wake = scheduler.call(dict(action='schedule', request_id=req['id'], reason='external release tomorrow', due_at=90000))
@@ -54,6 +56,7 @@ def test_usage_simulation(tmp_path):
     pending = scheduler.call(dict(action='schedule', request_id=req['id'], reason='recheck', due_at=100000))
     store.submit_acceptance(req['id'], 'verified offline')
     store.accept(req['id'], 'test:human')
+    scheduler.sync_health(store.snapshot(), [], [])
     scheduler.scan()
     listed = scheduler.call({'action': 'list', 'state': 'suppressed'})['items']
     assert next(w for w in listed if w['id'] == pending['id'])['state'] == 'suppressed'
@@ -102,6 +105,7 @@ def test_running_coordinator_never_overlaps(tmp_path):
     now = [100]
     scheduler = Scheduling(store, lambda: now[0])
     store.confirm(store.create_draft('a')['id'], 'yes')
+    scheduler.sync_health(store.snapshot(), [], [])
     scheduler.scan()
     scheduler.started()
     now[0] = 7400
@@ -217,6 +221,34 @@ def test_request_scoped_question_waits_without_a_placeholder_card(tmp_path):
     assert result['task_ids'] == []
 
 
+def test_waiting_request_does_not_maintain_global_liveness(tmp_path):
+    store, scheduler, req = health_fixture(tmp_path)
+    question = {'id': 'q1', 'kind': 'question', 'request_id': req['id'],
+                'task_id': None, 'state': 'sent', 'answer': None}
+    scheduler.sync_health(store.snapshot(), [], [question])
+    scheduler.clock = lambda: 12_000
+    scheduler.scan()
+    assert not [event for event in store.pending_events()
+                if event['kind'] == 'host.liveness']
+    assert scheduler.observation(store.snapshot(), [], [question])['liveness']['due_at'] is None
+
+
+def test_other_actionable_work_keeps_the_global_liveness_clock(tmp_path):
+    store, scheduler, waiting = health_fixture(tmp_path)
+    active = store.confirm(store.create_draft('active')['id'], 'fixture')
+    store.link_task(waiting['id'], 'waiting')
+    store.link_task(active['id'], 'ready')
+    question = {'id': 'q1', 'kind': 'question', 'request_id': waiting['id'],
+                'task_id': 'waiting', 'state': 'sent', 'answer': None}
+    tasks = [{'id': 'waiting', 'status': 'blocked'},
+             {'id': 'ready', 'status': 'ready'}]
+    scheduler.sync_health(store.snapshot(), tasks, [question])
+    scheduler.clock = lambda: 17_201
+    scheduler.scan()
+    assert len([event for event in store.pending_events()
+                if event['kind'] == 'host.liveness']) == 1
+
+
 def test_stalled_event_lifecycle_follows_recovery(tmp_path):
     store, scheduler, req = health_fixture(tmp_path)
     store.link_task(req['id'], 'task')
@@ -257,4 +289,5 @@ def test_paused_request_is_not_stalled_and_suppresses_wakes(tmp_path):
 
     resume = store.create_request_command('resume', req['id'], 'user ready', 'Continue')
     store.confirm_request_command(resume['id'], 'resume-confirmation')
+    scheduler.sync_health(store.snapshot(), [], [])
     assert scheduler.observation(store.snapshot(), [], [])['liveness']['due_at'] is not None

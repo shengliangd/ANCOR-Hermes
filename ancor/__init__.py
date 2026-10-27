@@ -522,7 +522,8 @@ def register(ctx, *, scan_runner=None):
             'awaiting_acceptance': collection(reviews),
             'attention': attention_items(
                 observation['progression'], tasks=all_tasks,
-                notifications=actionable_notifications(notification_rows),
+                notifications=([] if coordinator else
+                               actionable_notifications(notification_rows)),
                 events=ordinary_events, limit=attention_limit),
             'omitted': omitted_groups(all_tasks or [], notification_rows),
             'conditions': conditions,

@@ -513,6 +513,10 @@ class Service:
             return self.store.reject(request['id'], args['reason'])
         if args['action'] not in {'accept', 'verify'}:
             raise ValueError('unknown acceptance action')
+        open_questions = [q for q in self.store.questions(request['id'])
+                          if q['state'] == 'open']
+        if open_questions:
+            raise ValueError('request has open questions; answer or resolve them before verification')
         evidence = args.get('evidence')
         if not isinstance(evidence, dict):
             raise ValueError('evidence object required')
