@@ -855,11 +855,9 @@ def register(ctx, *, scan_runner=None):
         definitions.update(atomic_definitions)
         methods.update(atomic_methods)
 
-    coordination_observed = False
     for name, (description, properties, required) in definitions.items():
         method = methods[name.removeprefix('ancor_')]
         def handle(args, _method=method, _name=name, _properties=properties, **kwargs):
-            nonlocal coordination_observed
             try:
                 if worker:
                     if args:
@@ -891,10 +889,9 @@ def register(ctx, *, scan_runner=None):
                 unknown = set(args) - set(_properties)
                 if unknown:
                     raise ValueError('unsupported arguments: ' + ', '.join(sorted(unknown)))
-                if not coordination_observed and coordinator:
+                if coordinator:
                     from .scheduling import Scheduling
                     Scheduling(service.store).started()
-                    coordination_observed = True
                 result = _method(args, **kwargs)
                 return json.dumps(result, ensure_ascii=False)
             except Exception as exc:

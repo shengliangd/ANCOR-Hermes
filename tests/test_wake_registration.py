@@ -54,7 +54,7 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     wake = call('ancor_wake', dict(action='schedule', request_id=req['id'], reason='external release 2', due_at=time.time() + 2000))
     first = call('ancor_get_context', {})['liveness']
     assert first['last_started'] is not None
-    assert call('ancor_get_context', {})['liveness']['generation'] == first['generation'] == 1
+    assert call('ancor_get_context', {})['liveness']['generation'] > first['generation']
     replacement = call('ancor_wake', dict(action='replace', wake_id=wake['id'], reason='human still unavailable', due_at=time.time() + 2000))
     assert replacement['id'] != wake['id']
     assert call('ancor_wake', dict(action='cancel', wake_id=replacement['id']))['state'] == 'cancelled'
@@ -195,3 +195,16 @@ def test_human_and_external_wait_durable_without_task(tmp_path):
     assert not store.pending_events()
     Scheduling(Store(store.path), lambda: 1000).scan()
     assert len([e for e in store.pending_events() if e['kind'] == 'wake.due']) == 2
+
+
+def test_later_coordinator_turn_refreshes_liveness(tmp_path, monkeypatch):
+    _, tools, store, _ = registered(tmp_path, monkeypatch)
+    call = tools['ancor_wake']['handler']
+    call({'action': 'list'}, session_id='same-session')
+    with store._transaction() as db:
+        db.execute('UPDATE coordination_clock SET last_started=1000')
+    event = store.add_event('host.liveness', {'reason': 'test'}, source_key='liveness:test')
+    call({'action': 'list'}, session_id='same-session')
+    clock = Scheduling(store).observation(store.snapshot())['liveness']
+    assert clock['last_started'] > 1000
+    assert not any(e['id'] == event['id'] for e in store.pending_events())

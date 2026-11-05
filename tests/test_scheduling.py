@@ -291,3 +291,24 @@ def test_paused_request_is_not_stalled_and_suppresses_wakes(tmp_path):
     store.confirm_request_command(resume['id'], 'resume-confirmation')
     scheduler.sync_health(store.snapshot(), [], [])
     assert scheduler.observation(store.snapshot(), [], [])['liveness']['due_at'] is not None
+
+
+def test_scheduled_work_waits_until_its_wake_without_hiding_stalls(tmp_path):
+    now = [1000]
+    store = Store(tmp_path / 'requests.db')
+    scheduler = Scheduling(store, lambda: now[0])
+    req = store.confirm(store.create_draft('wait', title='Wait')['id'], 'test')
+    store.link_task(req['id'], 'task')
+    store.link_task(req['id'], 'dependent')
+    tasks = [{'id': 'task', 'status': 'scheduled'}, {'id': 'dependent', 'status': 'todo'}]
+    wake = scheduler.call(dict(action='schedule', request_id=req['id'], reason='check later', due_at=2000))
+    result = scheduler.sync_health(store.snapshot(), tasks, [])[0]
+    assert result['state'] == 'waiting_on_timer'
+    assert scheduler.observation(store.snapshot(), tasks)['liveness']['due_at'] is None
+    tasks[1]['status'] = 'triage'
+    assert scheduler.health(store.snapshot(), tasks, [])[0]['reason'] == 'triage'
+    tasks[1]['status'] = 'todo'
+    now[0] = 2000
+    assert scheduler.health(store.snapshot(), tasks, [])[0]['state'] == 'stalled'
+    scheduler.scan()
+    assert any(e['kind'] == 'wake.due' and e['payload']['id'] == wake['id'] for e in store.pending_events())

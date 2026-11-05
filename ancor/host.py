@@ -2,11 +2,10 @@
 
 Native boundary: adapter.is_connected, NativeBoard CLI, and read-only native
 list_events/kanban_db_path. No native SQL or guard overrides. Retry budget is
-persisted beside the store: three attempts per identical batch, then a one-hour
-cooldown (not an acknowledgement). New batches can run immediately.
+persisted beside the store: three attempts per event, then a one-hour
+cooldown (not an acknowledgement). New events can run immediately.
 """
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -308,6 +307,25 @@ class Host:
         stalled_events = [event for event in pending if event['kind'] == 'host.stalled']
         ordinary = [event for event in pending if event['kind'] != 'host.stalled']
         now = self.clock()
+        # Each event keeps its budget when another event joins or leaves the batch.
+        retries = state.setdefault('event_retries', {})
+        pending_ids = {str(event['id']) for event in ordinary}
+        for key in list(retries):
+            if key not in pending_ids:
+                del retries[key]
+        for key in ('batch', 'attempts', 'retry_at'):
+            state.pop(key, None)
+        eligible = []
+        for event in ordinary:
+            retry = retries.setdefault(str(event['id']), {'attempts': 0, 'retry_at': 0})
+            if now < retry['retry_at']:
+                continue
+            if retry['attempts'] >= 3:
+                retry.update(attempts=0, retry_at=now + 3600)
+                log.warning('ANCOR pending event %s exhausted three attempts; retry in one hour', event['id'])
+                continue
+            eligible.append(event)
+        ordinary = eligible
         due_conditions = []
         for event in stalled_events:
             key = event.get('source_key')
@@ -322,26 +340,15 @@ class Host:
         # Reserve slots for due stalled conditions and liveness even behind a
         # large input backlog. A recovering condition simply disappears.
         reserved = due_conditions + [
-            next((row for row in pending if row['kind'] == 'host.liveness'), None)]
+            next((row for row in ordinary if row['kind'] == 'host.liveness'), None)]
         reserved = [event for event in reserved if event is not None]
         missing = [event for event in reserved if event not in events]
         if missing:
             events = events[:max(0, limit - len(missing))] + missing
             events = events[:limit]
-        if not events:
-            return []
-        signature = hashlib.sha256(json.dumps([e['id'] for e in events]).encode()).hexdigest()
-        if state.get('batch') != signature:
-            state.update(batch=signature, attempts=0, retry_at=0)
-        if self.clock() < state.get('retry_at', 0):
-            return []
-        if state.get('attempts', 0) >= 3:
-            log.error('ANCOR unchanged pending batch exhausted three attempts; retry in one hour')
-            state.update(attempts=0, retry_at=self.clock() + 3600)
-            self.save(state)
-            return []
-        state['attempts'] = state.get('attempts', 0) + 1
         for event in events:
+            if event['kind'] != 'host.stalled':
+                retries[str(event['id'])]['attempts'] += 1
             if event['kind'] == 'host.stalled' and event.get('source_key') in conditions:
                 conditions[event['source_key']]['last_woken_at'] = now
         self.save(state)

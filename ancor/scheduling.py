@@ -104,11 +104,11 @@ class Scheduling:
                 return
             anchor = max(state['active_since'], state['last_started'] or state['active_since'])
             if now >= anchor + self.INTERVAL:
-                event = self.store._add_event(db, 'host.liveness', {'reason': 'Active work has no successful coordinator start within two hours', 'due_at': anchor + self.INTERVAL}, 'liveness:' + str(state['generation']))
+                event = self.store._add_event(db, 'host.liveness', {'reason': 'Active work has no coordinator tool activity within two hours', 'due_at': anchor + self.INTERVAL}, 'liveness:' + str(state['generation']))
                 db.execute('UPDATE events SET acknowledged=0 WHERE id=?', (event['id'],))
 
     def started(self):
-        # Production calls this once when the child invokes its first ANCOR tool.
+        # Every valid coordinator tool call is activity, including later gateway turns.
         # Enqueue, process creation and CLI startup failure are not coordination.
         with self.store._transaction() as db:
             db.execute('UPDATE coordination_clock SET last_started=?, generation=generation+1', (self.clock(),))
@@ -261,6 +261,15 @@ class Scheduling:
             if items and len(done) == len(items):
                 results.append({**base, 'state': 'stalled', 'reason': 'acceptance_pending',
                                 'waiting_on': None, 'task_ids': [task['id'] for task in done]})
+                continue
+            scheduled = [task for task in items if task.get('status') == 'scheduled']
+            if (scheduled and timers
+                    and all(timer['state'] == 'scheduled' and timer['due_at'] > now for timer in timers)
+                    and all(task.get('status') in {'scheduled', 'todo', 'done', 'archived', 'cancelled'}
+                            for task in items)):
+                results.append({**base, 'state': 'waiting_on_timer', 'reason': 'scheduled_wake_pending',
+                                'waiting_on': {'wake_ids': [timer['id'] for timer in timers]},
+                                'task_ids': [task['id'] for task in scheduled]})
                 continue
             reason = 'no_work' if not items else 'no_active_task'
             results.append({**base, 'state': 'stalled', 'reason': reason,

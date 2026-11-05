@@ -154,6 +154,9 @@ def test_retry_budget_durable_bounded_and_recovers(tmp_path):
     for _ in range(3):
         assert len(host.pending(32)) == 32
     host = Host(ctx, board=Board(), clock=lambda: now[0])
+    # Unattempted events behind the head batch still get their own budget.
+    for _ in range(3):
+        assert len(host.pending(32)) == 8
     assert host.pending(32) == []
     assert host.pending(32) == []
     now[0] = 3600
@@ -509,3 +512,21 @@ def test_creation_hold_is_bookkeeping_not_a_worker_block_signal(tmp_path, encode
     board.history.append({'id': 18, 'task_id': 't', 'kind': 'blocked', 'payload': {'reason': 'missing authorization'}})
     host.scan()
     assert [e['payload']['id'] for e in pending_native(store)] == [18]
+
+
+def test_new_input_does_not_reset_old_event_cooldown(tmp_path):
+    now = [1000]
+    ctx = Context(tmp_path / 'store.db')
+    host = Host(ctx, board=Board(), clock=lambda: now[0])
+    old = host.store.add_event('host.liveness', {'reason': 'test'})
+    for _ in range(3):
+        assert [e['id'] for e in host.pending(32)] == [old['id']]
+    assert host.pending(32) == []
+    new = host.store.add_event('request.changed', {'reason': 'new input'})
+    assert [e['id'] for e in host.pending(32)] == [new['id']]
+    host.store.ack_events([new['id']])
+    host = Host(ctx, board=Board(), clock=lambda: now[0])
+    assert host.pending(32) == []
+    assert str(new['id']) not in host.state()['event_retries']
+    now[0] += 3600
+    assert [e['id'] for e in host.pending(32)] == [old['id']]
