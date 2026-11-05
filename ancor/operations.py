@@ -150,8 +150,16 @@ class Operations:
     def reconcile(self):
         """Recover durable native links; association protocol stays at revision 1."""
         store = self.service.store
-        requests = {r['id']: r for r in store.snapshot()['requests']}
-        for task in self.board.list():
+        snapshot = store.snapshot()
+        requests = {r['id']: r for r in snapshot['requests']}
+        owners = {link['task_id']: link['request_id'] for link in snapshot['task_links']}
+        tasks = self.board.list()
+        for task in tasks:
+            link = self.board.link(task)
+            owner = owners.get(task['id'])
+            if owner is not None and (not link or link['revision'] != 1 or link['request_id'] != owner):
+                raise ValueError(f"task ownership conflict: {task['id']} native ANCOR-LINK disagrees with {owner}")
+        for task in tasks:
             link = self.board.link(task)
             if link and link['revision'] == 1 and link['request_id'] in requests:
                 store.link_task(link['request_id'], task['id'])

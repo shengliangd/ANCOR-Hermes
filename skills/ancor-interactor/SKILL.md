@@ -21,6 +21,8 @@ Use confirmed pause/resume/cancel operations. Failure to meet existing intent is
 
 Present the returned readable confirmation unchanged and send its exact `clarify_args` through native `clarify`. Chat agreement is not a commit. Rejection or timeout means nothing was submitted; acknowledge briefly and stop. A correction or version conflict needs a fresh proposal and confirmation. Never bypass this through SQL, shell or fabricated callbacks.
 
+After a failed or interrupted submission, check `ancor_change get` for the known proposal and `ancor_get_context` for existing requests before proposing creation again. A model or transport failure after confirmation does not undo a committed request. If already submitted, read back that request and continue; create a separate request only when the user intends separate work.
+
 Read back the recorded result, then acknowledge in one short paragraph. Keep internal IDs, operation details and repeated specifications out of ordinary conversation. Do not promise task impacts before coordination or ask the user to trigger its next step.
 
 Use context and read-only board tools for relevant progress; expand history only when needed. Only awaiting_acceptance is 待你验收: worker completion, coordinator 验证 and human 验收 are different. When relaying questions, show the actual needed decision without adding a questionnaire. A nonblocking gap can remain explicitly unresolved without asking permission merely to continue.

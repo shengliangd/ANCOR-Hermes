@@ -59,6 +59,12 @@ class Store(Changes):
                     payload TEXT NOT NULL, source_key TEXT UNIQUE,
                     acknowledged INTEGER NOT NULL DEFAULT 0);
             ''')
+            duplicates = db.execute(
+                'SELECT task_id FROM task_links GROUP BY task_id HAVING COUNT(*) > 1').fetchall()
+            if duplicates:
+                raise ValueError('task ownership conflict: repair duplicate associations before opening store: '
+                                 + ', '.join(row['task_id'] for row in duplicates))
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS task_links_owner ON task_links(task_id)')
             self._require_title_columns(db)
             self._ensure_columns(db, 'drafts', {'summary': 'TEXT'})
             self._ensure_columns(db, 'requests', {'target_status': 'TEXT'})
@@ -582,8 +588,14 @@ class Store(Changes):
         self._text(task_id)
         with self._transaction() as db:
             self._get(db, 'requests', request_id)
-            db.execute('INSERT OR IGNORE INTO task_links VALUES (?, ?)',
-                       (request_id, task_id))
+            self._link_task(db, request_id, task_id)
+
+    @staticmethod
+    def _link_task(db, request_id, task_id):
+        owner = db.execute('SELECT request_id FROM task_links WHERE task_id=?', (task_id,)).fetchone()
+        if owner is not None and owner['request_id'] != request_id:
+            raise ValueError(f"task ownership conflict: {task_id} belongs to {owner['request_id']}, not {request_id}")
+        db.execute('INSERT OR IGNORE INTO task_links VALUES (?, ?)', (request_id, task_id))
 
     def snapshot(self):
         with self._transaction() as db:
@@ -885,6 +897,6 @@ class Store(Changes):
             request = self._get(db, 'requests', request_id)
             if request['status'] != 'active' or request['target_status'] is not None:
                 raise ValueError('association target must be stably active')
-            db.execute('INSERT OR IGNORE INTO task_links VALUES (?, ?)', (request_id, task_id))
+            self._link_task(db, request_id, task_id)
             self._add_event(db, 'task.associated', {'task_id': task_id, 'request_id': request_id, 'reason': reason})
             return {'task_id': task_id, 'request_id': request_id, 'reason': reason}

@@ -547,3 +547,33 @@ def test_native_parser_accepts_exact_mutation_contracts(monkeypatch):
     assert args.task_ids == ['t1'] and args.reason == 'Answer recorded'
     args = parser.parse_args(['kanban', '--board', 'ancor', 'comment', 't1', 'User answer', '--author', 'ancor-coordinator'])
     assert args.text == ['User answer'] and args.author == 'ancor-coordinator'
+
+
+def test_association_conflict_preserves_original_basis_and_unblock(setup):
+    ctx, store, board, _ = setup
+    change = store.propose_change(None, [{'op': 'create', 'title': 'Original',
+        'fields': {'outcome': ['Produce ten samples']}}], actor='test', source={'kind': 'test'})
+    result = store.commit_change(change['id'], 'test:confirmed')
+    req = store.get_request(result['request_id'])
+    versions = [p['version_id'] for points in store.content(req['id'])['fields'].values() for p in points]
+    op = operations(setup)
+    tid = op.call(create_args(req, generation=1, point_versions=versions, hold=True))['task_id']
+    other = store.confirm(store.create_draft('Duplicate')['id'], 'test-human')
+    store.associate_task(tid, req['id'], 'same owner')
+    with pytest.raises(ValueError, match='task ownership conflict'):
+        op.call(dict(action='associate', task_id=tid, request_id=other['id'], reason='reuse'))
+    store.review_impact(req['id'], 1, [{'task_id': tid, 'decision': 'unaffected', 'reason': 'basis is current'}], 'covered')
+    assert op.call(dict(action='unblock', task_id=tid, reason='continue'))['status'] == 'ready'
+    assert store.snapshot()['task_links'] == [{'request_id': req['id'], 'task_id': tid}]
+
+
+def test_reconcile_rejects_native_owner_mismatch(setup):
+    ctx, store, board, req = setup
+    op = operations(setup)
+    tid = op.call(create_args(req, hold=True))['task_id']
+    other = store.confirm(store.create_draft('Other')['id'], 'test-human')
+    body = board.tasks[tid]['task']['body']
+    board.tasks[tid]['task']['body'] = body.replace(req['id'], other['id'])
+    with pytest.raises(ValueError, match='task ownership conflict'):
+        op.reconcile()
+    assert store.snapshot()['task_links'] == [{'request_id': req['id'], 'task_id': tid}]

@@ -791,7 +791,7 @@ def register(ctx, *, scan_runner=None):
                  'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
             'ancor_board': (
-                'Read and coordinate linked native tasks. list returns compact summaries; show returns one card with bounded recent history; history expands comments, events or runs for one card. create requires a contract with outcome, expected_output and evidence; inputs, advice and binding_constraints are optional; edit takes the same contract and re-renders the card. archive writes an audit comment and verifies the native terminal state. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, archive, and associate.',
+                'Read and coordinate linked native tasks. list returns compact summaries; show returns one card with bounded recent history; history expands comments, events or runs for one card. create requires a contract with outcome, expected_output and evidence; inputs, advice and binding_constraints are optional; edit takes the same contract and re-renders the card. archive writes an audit comment and verifies the native terminal state. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, archive, and associate. Each task has exactly one request owner; associate is idempotent for that owner and rejects sharing or transfer.',
                 {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock',
                                                         'history', 'comment', 'link', 'unlink', 'edit', 'revise',
                                                         'archive', 'associate']},

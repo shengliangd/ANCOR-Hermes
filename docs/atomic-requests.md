@@ -62,3 +62,11 @@ The command copies the source and available notification/confirmation sidecars, 
 The dashboard remains read-only and now displays structured content, questions, current task adjustments and recent change history. Confirmation references and transport secrets remain redacted.
 
 Local validation covers transactional rollback, optimistic conflicts, retries, native confirmation, role boundaries, question/outbox recovery, scoped native card adjustment, current-generation verification, migration and dashboard reads. The isolated native probe uses `ANCOR_HERMES_SOURCE` (or the default installed source path) and a disposable database; it does not launch models or modify a live board. A real model-backed workflow and installation checks remain release gates before deployment. No runtime installation is performed by this repository change.
+
+## Task ownership
+
+Each native task belongs to exactly one request. `task_links.task_id` is unique and
+must agree with the card’s `ANCOR-LINK`. Re-associating the same owner is idempotent;
+associating a different request fails. Reconciliation reports conflicts rather
+than replacing ownership. Existing duplicate associations require explicit repair
+before opening the store. Shared execution cards and ownership transfer are not supported.

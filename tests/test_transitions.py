@@ -92,35 +92,14 @@ def test_archive_failure_leaves_cancellation_staged(tmp_path):
     assert current['target_status'] == 'cancelled'
 
 
-@pytest.mark.parametrize('mode', ['cancel', 'replace'])
-def test_shared_card_blocks_terminal_transition(tmp_path, mode):
+def test_cross_request_card_association_is_rejected(tmp_path):
     store = Store(tmp_path / 'store.db')
     req = request(store, 'First')
     other = request(store, 'Second')
-    store.link_task(req['id'], 'shared')
-    store.link_task(other['id'], 'shared')
-    board = Board({'shared': 'running'})
-
-    if mode == 'cancel':
-        store.cancel([req['id']], 'First is withdrawn')
-    else:
-        replacement = store.confirm(store.create_draft(
-            'Replacement', req['id'], title='Replacement')['id'],
-            'human:replacement')
-        assert replacement['status'] == 'pending'
-
-    result = advance_request(store, board, req['id'])
-    assert result['outcome'] == 'blocked'
-    assert result['blockers'] == [{
-        'task_id': 'shared',
-        'reason': 'task_shared_with_stable_request',
-        'request_ids': [other['id']],
-    }]
-    assert board.calls == []
-    current = store.get_request(req['id'])
-    assert current['status'] == 'active'
-    assert current['target_status'] == ('cancelled' if mode == 'cancel' else 'invalidated')
-    assert board.list()[0]['status'] == 'running'
+    store.link_task(req['id'], 'owned')
+    with pytest.raises(ValueError, match='task ownership conflict'):
+        store.link_task(other['id'], 'owned')
+    assert store.snapshot()['task_links'] == [{'request_id': req['id'], 'task_id': 'owned'}]
 
 
 def test_replacement_waits_for_every_base_request(tmp_path):

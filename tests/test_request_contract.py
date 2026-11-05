@@ -78,16 +78,16 @@ def test_draft_requires_authoritative_title(tmp_path, monkeypatch):
 
 
 def test_open_question_scope_is_request_and_task(tmp_path, monkeypatch):
-    tasks = {'t1': {'id': 't1', 'status': 'blocked'}}
+    tasks = {tid: {'id': tid, 'status': 'blocked'} for tid in ('t1', 't2')}
     tools, store, req = registered(tmp_path, monkeypatch, 'ancor-coordinator', tasks)
     other = store.confirm(store.create_draft('Other report')['id'], 'fixture')
     store.link_task(req['id'], 't1')
-    store.link_task(other['id'], 't1')
+    store.link_task(other['id'], 't2')
     base = {'action': 'send', 'kind': 'question', 'message': 'Which label?', 'task_id': 't1'}
     assert not call(tools, 'ancor_notify',
                     dict(base, id='q1', request_id=req['id'])).get('error')
     assert not call(tools, 'ancor_notify',
-                    dict(base, id='q2', request_id=other['id'])).get('error')
+                    dict(base, id='q2', request_id=other['id'], task_id='t2')).get('error')
 
 
 def test_coordinator_can_withdraw_superseded_question(tmp_path, monkeypatch):
