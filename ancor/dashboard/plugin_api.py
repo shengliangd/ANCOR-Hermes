@@ -6,21 +6,67 @@ module intentionally has no mutation endpoint or write transaction.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
+import sys
+import types
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from ancor.views import event_summary, notification_detail, notification_selection, notification_summary, request_detail, request_ref, task_detail, task_ref
+# Hermes imports this file directly, outside the agent plugin's namespace.
+# Resolve siblings under an installation-specific package without executing the
+# plugin entrypoint or adding unrelated installed plugins to sys.path.
+if not __package__:
+    root = Path(__file__).resolve().parents[1]
+    namespace = "_ancor_dashboard_" + hashlib.sha256(str(root).encode()).hexdigest()[:16]
+    if namespace not in sys.modules:
+        package = types.ModuleType(namespace)
+        package.__path__ = [str(root)]
+        sys.modules[namespace] = package
+    __package__ = namespace + ".dashboard"
+
+from ..views import event_summary, notification_detail, notification_selection, notification_summary, request_detail, request_ref, task_detail, task_ref
 
 router = APIRouter()
 
 
+def _home() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+    except ImportError:
+        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+    return Path(get_hermes_home()).expanduser()
+
+
+def _settings() -> dict:
+    # Read configuration without initializing Hermes or the request store.
+    path = _home() / "config.yaml"
+    if not path.exists():
+        return {}
+    try:
+        import hermes_yaml as yaml
+    except ImportError:
+        import yaml
+    config = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
+    return config.get("plugins", {}).get("entries", {}).get("ancor", {}).get("settings", {})
+
+
 def _store_path() -> Path:
-    raw = os.environ.get("ANCOR_STORE_PATH") or os.environ.get("ANCOR_DB_PATH")
-    return Path(raw).expanduser() if raw else Path.home() / ".hermes" / "ancor" / "requests.db"
+    raw = (os.environ.get("ANCOR_STORE_PATH") or os.environ.get("ANCOR_DB_PATH")
+           or _settings().get("store_path"))
+    return Path(raw).expanduser() if raw else _home() / "ancor" / "requests.db"
+
+
+def _board():
+    from ..board import NativeBoard
+    settings = _settings()
+    env = dict(os.environ, HERMES_HOME=str(_home()))
+    return NativeBoard(
+        os.environ.get("HERMES_KANBAN_BOARD") or settings.get("board", "ancor"),
+        profile=settings.get("coordinator_profile", "ancor-coordinator"), env=env)
 
 
 def _notifications_path() -> Path:
@@ -48,7 +94,8 @@ def _one(conn, sql: str, args=(), label="item"):
 
 
 def _redact(value):
-    sensitive = {"token", "access_token", "confirmation_reference", "answer_reference", "receipt", "target", "cvc", "password"}
+    sensitive = {"token", "access_token", "confirmation_reference", "answer_reference",
+                 "reference", "session_id", "tool_call_id", "receipt", "target", "cvc", "password"}
     if isinstance(value, dict):
         return {key: "[redacted]" if key.lower() in sensitive else _redact(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -78,8 +125,7 @@ def _links(conn):
 def _read_tasks():
     """Native board listing is a read-only CLI bridge; failures yield an empty board."""
     try:
-        from ancor.board import NativeBoard
-        return NativeBoard(os.environ.get("HERMES_KANBAN_BOARD", "ancor")).list()
+        return _board().list()
     except Exception:
         return []
 
@@ -95,16 +141,12 @@ def _notifications():
         return []
     try:
         rows = _rows(conn, "SELECT * FROM human_notifications ORDER BY rowid")
-        for row in rows:
-            if row.get("receipt"):
-                try:
-                    row["receipt"] = json.loads(row["receipt"])
-                except ValueError:
-                    row["receipt"] = None
-            # Never return receipt/target/transport identity to a browser.
-            row.pop("receipt", None)
-            row.pop("target", None)
-        return rows
+        # Only display fields cross into the browser; confirmation bindings and
+        # transport receipts remain in the durable store.
+        visible = {"id", "kind", "message", "state", "answer", "request_id", "task_id",
+                   "queued_at", "delivery_started_at", "next_attempt_at", "closed_at",
+                   "closed_by", "close_reason", "error"}
+        return [{key: value for key, value in row.items() if key in visible} for row in rows]
     finally:
         conn.close()
 
@@ -174,8 +216,7 @@ def task(task_id: str):
     if row is None:
         raise HTTPException(status_code=404, detail="task not found")
     try:
-        from ancor.board import NativeBoard
-        detail = NativeBoard(os.environ.get("HERMES_KANBAN_BOARD", "ancor"))._call("show", task_id)
+        detail = _board()._call("show", task_id)
     except Exception:
         detail = {"task": row, "comments": [], "events": [], "runs": [], "parents": [], "children": []}
     return {"task": task_detail(detail)}

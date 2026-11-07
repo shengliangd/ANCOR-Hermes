@@ -11,10 +11,15 @@
   const Button = (SDK.components && SDK.components.Button) || "button";
   const esc = (value) => String(value == null ? "" : value);
   function fetchData(path) {
-    return fetch("/api/plugins/ancor/" + path, { credentials: "same-origin" }).then((r) => {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
-    });
+    const url = "/api/plugins/ancor/" + path;
+    if (typeof SDK.fetchJSON === "function") return SDK.fetchJSON(url);
+    if (typeof SDK.authedFetch === "function") {
+      return SDK.authedFetch(url).then((r) => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
+    }
+    return Promise.reject(new Error("当前 Hermes 未提供鉴权请求接口，请更新 Hermes。"));
   }
   function List(props) {
     const items = props.items || [];

@@ -16,9 +16,11 @@ Choose the Hermes **root**, not a role's profile directory:
 export HERMES_HOME=/absolute/path/to/.hermes
 ```
 
-Keep this environment value and the installer's `--hermes-home` argument
-consistent. The argument controls prompt and backup paths; the installer does
-not set the environment used by its `hermes -p ...` subprocesses.
+Use this environment value for the manual Hermes commands below. The installer
+treats `--hermes-home` as authoritative: it resolves that path and passes it as
+`HERMES_HOME` to every plugin-install and Gateway-restart subprocess, alongside
+using it for prompt and backup paths. It does not change the invoking shell's
+environment. The dry-run preview includes this explicit root for each command.
 
 Check existing profiles with `hermes -p default profile list`. Create any missing
 role profiles before installing; run only the applicable creation commands:

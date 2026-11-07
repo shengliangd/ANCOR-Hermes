@@ -1,6 +1,6 @@
 # ANCOR for Hermes
 
-ANCOR turns substantial work into durable, inspectable requests and coordinates
+ANCOR (AI-Native Coordination Runtime) turns substantial work into durable, inspectable requests and coordinates
 them through three roles:
 
 - **Interactor** talks with the user, handles small work directly, and records
@@ -59,3 +59,7 @@ its dependencies; some are skipped when those are unavailable. Set
 - [Plugin settings and declared interfaces](ancor/plugin.yaml)
 - [Isolated real-model trial runner](scripts/isolated_trial.py): use a new,
   disposable Hermes home; model calls use the configured provider and credentials.
+
+## License
+
+ANCOR is licensed under the [MIT License](LICENSE).

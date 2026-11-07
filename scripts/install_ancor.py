@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -27,10 +28,12 @@ ROLES = {
 }
 
 
-def run(command: list[str], *, dry_run: bool = False) -> None:
-    print("+", " ".join(command))
+def run(command: list[str], *, hermes_home: Path, dry_run: bool = False) -> None:
+    print("+", shlex.join(["env", f"HERMES_HOME={hermes_home}", *command]))
     if not dry_run:
-        subprocess.run(command, check=True)
+        environment = os.environ.copy()
+        environment["HERMES_HOME"] = str(hermes_home)
+        subprocess.run(command, check=True, env=environment)
 
 
 def sha256(path: Path) -> str:
@@ -109,7 +112,8 @@ def main() -> int:
 
     for profile in profiles:
         run([hermes, "-p", profile, "plugins", "install", source,
-             "--ref", ref, "--force", "--yes-deps", "--enable"], dry_run=args.dry_run)
+             "--ref", ref, "--force", "--yes-deps", "--enable"],
+            hermes_home=hermes_home, dry_run=args.dry_run)
 
     if not args.dry_run:
         staged = Path(tempfile.mkdtemp(prefix=".ancor-prompts-", dir=hermes_home))
@@ -140,7 +144,7 @@ def main() -> int:
 
     if not args.no_restart:
         run([hermes, "-p", args.owner_profile, "gateway", "restart"],
-            dry_run=args.dry_run)
+            hermes_home=hermes_home, dry_run=args.dry_run)
     print(f"ANCOR {ref} installed into {', '.join(profiles)}")
     if not args.dry_run:
         print(f"Backup and release manifest: {backup}")
