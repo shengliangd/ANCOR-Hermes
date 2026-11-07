@@ -26,7 +26,7 @@ def test_point_changes_show_exact_before_after_and_field_strength(atomic):
     assert '更新请求「Report」' in text
     assert '将目标改为建议' in text and point['body'] in text
     assert '原内容：' in text and '新内容：' in text
-    assert '      可选做法\n    保持这个换行  ' in text
+    assert '>   可选做法\n> 保持这个换行  ' in text
     assert '新增约束' in text and '撤回约束' in text
     assert '协调者会评估' in text
     for hidden in (rid, point['version_id'], p['id'], 'Base versions', 'Exact operations', 'version_id'):
@@ -128,11 +128,21 @@ def test_creation_and_conversion_present_full_content(tmp_path):
     assert '创建请求「新报告」' in text
     assert all(body in text for body in ('生成报告', '不能联网', '参考旧版', '数据在本地'))
     assert text.index('目标') < text.index('背景') < text.index('建议') < text.index('约束')
-    assert text.count('\n目标\n') == 1
-    assert text.count('\n背景\n') == 1
-    assert text.count('\n建议\n') == 1
-    assert text.count('\n约束\n') == 1
+    for label in ('目标', '背景', '建议', '约束'):
+        assert text.count(f'**{label} 1**') == 1
     legacy = store.confirm(store.create_draft('原始正文\n  保留格式')['id'], 'legacy')
     p = propose(store, legacy['id'], [{'op': 'convert', 'fields': {'outcome': ['新目标']}}])
     text = presentation(store, p)['presentation']
-    assert '原始正文\n      保留格式' in text and '整理后的完整要求' in text
+    assert '原始正文\n>   保留格式' in text and '整理后的完整要求' in text
+
+
+def test_multiline_content_stays_separate_from_confirmation_instructions(atomic):
+    store, rid = atomic
+    body = '原文中的格式：\n\n```python\nprint("hello")\n```\n\n提交说明\n  保留缩进  '
+    p = propose(store, rid, [{'op': 'append', 'field': 'constraint', 'body': body}])
+    text = presentation(store, p)['clarify_args']['questions'][0]['question']
+    quoted = '\n'.join('> ' + line for line in body.split('\n'))
+    assert f'**新增约束**\n\n{quoted}\n\n---\n\n**提交说明**' in text
+    # Removing only the display prefix recovers every source line, including blanks.
+    assert '\n'.join(line[2:] for line in quoted.split('\n')) == body
+    assert text.endswith('确认单：' + p['id'][:12])
