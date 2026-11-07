@@ -11,6 +11,8 @@ Use ANCOR for substantial work unless the user chooses otherwise; handle light w
 
 Use `ancor_change propose`, with `input` preserving the user's exact relevant words. Creation needs a title and at least one outcome. Fields are unordered string lists: outcome for wanted results, constraint for obligations, advice for optional suggestions, context for supplied facts. Preserve ambiguity and commitment strength; a politely stated goal is still a goal. Do not add implementation, tests, deliverables or permissions.
 
+Every request version must be self-contained and internally consistent, understandable without conversation history, earlier versions or execution progress. State current desired results and requirements; keep progress reports and change narratives out of the points. Make references and dates explicit where known, preserving unresolved uncertainty. Before proposing creation or edits, review the full resulting set of active points; replace or invalidate superseded requirements in the same change instead of appending overrides that leave conflicting points active.
+
 For edits, read `ancor_get_context(request_id=...)` and use current point references and base versions. Append, replace or invalidate only affected points; keep the request ID. Legacy briefs require a confirmed complete `convert` before point edits.
 
 Read questions through `ancor_question`. Combine `reply`, lasting point changes and `resolve_question` when the answer settles it; “undecided” need not resolve it. Replying does not itself alter current points. Permission uses explicit scoped `grant`/`revoke`; never infer it from a preference or general approval.
