@@ -42,14 +42,17 @@ def test_schema_fences_readiness_and_context_parity(tmp_path, monkeypatch):
     call = lambda name, args: json.loads(tools[name]['handler'](args))
     args = dict(action='schedule', request_id=req['id'], reason='external release', due_at=time.time() + 1000)
     assert call('ancor_wake', {'action': 'list'})['items'] == []
-    context = call('ancor_get_context', {})
+    context = call('ancor_get_context', {'request_id': req['id']})
     assert context['progression'][0]['state'] == 'active'
     assert context['progression'][0]['reason'] == 'running_heartbeat'
     assert context['liveness']['last_started'] is not None
     host = Host(ctx, store=store, board=SimpleNamespace())
-    heartbeat = context['progression'][0]['tasks'][0]['last_heartbeat_at']
+    heartbeat = context['tasks']['items'][0]['last_heartbeat_at']
     host.tasks = [{'id': 'task', 'status': 'running', 'last_heartbeat_at': heartbeat}]
-    assert host.wake_packet()['progression'] == context['progression']
+    raw = host.wake_packet()['progression'][0]
+    for key in ('request_id', 'state', 'reason', 'task_ids'):
+        assert raw[key] == context['progression'][0][key]
+    assert context['scheduled_wakes'] == host.wake_packet()['scheduled_wakes']
     assert 'error' not in call('ancor_wake', args)
     wake = call('ancor_wake', dict(action='schedule', request_id=req['id'], reason='external release 2', due_at=time.time() + 2000))
     first = call('ancor_get_context', {})['liveness']
@@ -124,7 +127,7 @@ def test_ack_does_not_depend_on_question_delivery(tmp_path, monkeypatch):
     blocked = store.add_event('native.blocked', {'task_id': 'task'},
                               source_key='native:test:blocked')
     assert 'error' not in call('ancor_get_context', {'ack_event_ids': [blocked['id']]})
-    context = call('ancor_get_context', {})
+    context = call('ancor_get_context', {'request_id': req['id']})
     assert context['progression'][0]['state'] == 'stalled'
     assert context['progression'][0]['reason'] == 'blocked_without_wait'
 
@@ -139,7 +142,7 @@ def test_ack_does_not_depend_on_question_delivery(tmp_path, monkeypatch):
     blocked_again = store.add_event('native.blocked', {'task_id': 'task'},
                                     source_key='native:test:blocked-again')
     assert 'error' not in call('ancor_get_context', {'ack_event_ids': [blocked_again['id']]})
-    context = call('ancor_get_context', {})
+    context = call('ancor_get_context', {'request_id': req['id']})
     assert context['progression'][0]['state'] == 'stalled'
     assert context['progression'][0]['reason'] == 'question_delivery_unconfirmed'
     Scheduling(store).sync_health(store.snapshot(), tasks,

@@ -126,7 +126,7 @@ def test_verification_waits_while_a_request_question_is_open(tmp_path, monkeypat
     box.mark_sent('arrival', {'success': True})
     context = call(coordinator, 'ancor_get_context', {})
     assert context['requests']['items'][0]['progression']['state'] == 'waiting_on_human'
-    assert context['open_question_count'] == 1
+    assert context['counts']['notifications']['open_questions'] == 1
     assert not any(item.get('why_code') == 'open_question'
                    for item in context['attention'])
     result = json.loads(coordinator['ancor_acceptance']['handler']({

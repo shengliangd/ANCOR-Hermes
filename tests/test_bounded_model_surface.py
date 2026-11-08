@@ -106,10 +106,9 @@ def test_default_overview_is_bounded_under_history_heavy_fixture(tmp_path, monke
     assert result['counts']['notifications']['closed'] == 14
     assert {item['kind'] for item in result['omitted']} == {
         'tasks', 'notifications'}
-    omitted = {(item['kind'], item['reason']): item['count']
-               for item in result['omitted']}
-    assert omitted[('tasks', 'done')] == 70
-    assert omitted[('tasks', 'archived')] == 10
+    assert all('count' not in item for item in result['omitted'])
+    assert result['counts']['tasks']['by_status']['done'] == 70
+    assert result['counts']['tasks']['by_status']['archived'] == 10
 
 
 def test_request_expansion_scopes_every_nested_collection(tmp_path, monkeypatch):
@@ -168,9 +167,18 @@ def test_request_expansion_scopes_every_nested_collection(tmp_path, monkeypatch)
     assert [item['request_id'] for item in result['progression']] == [first['id']]
     assert [event['id'] for event in result['pending_events']['items']] == [first_event['id']]
     assert result['transitions']['count'] == 26
-    assert result['transitions']['returned'] == 20
-    assert result['transitions']['truncated'] is True
-    assert {item['request_id'] for item in result['transitions']['items']} == {first['id']}
+    assert 'items' not in result['transitions']
+    history = json.loads(tools['ancor_get_context']['handler'](
+        result['transitions']['exact_via']['args']))
+    assert history['transitions']['returned'] == 20
+    assert history['transitions']['truncated'] is True
+    assert {item['request_id'] for item in history['transitions']['items']} == {first['id']}
+    older = json.loads(tools['ancor_get_context']['handler'](
+        history['transitions']['next']['args']))
+    assert older['transitions']['returned'] == 6
+    assert older['transitions']['truncated'] is False
+    ids = [item['id'] for page in [history, older] for item in page['transitions']['items']]
+    assert len(set(ids)) == 26
 
 
 def test_scheduled_wake_observation_is_bounded(tmp_path):

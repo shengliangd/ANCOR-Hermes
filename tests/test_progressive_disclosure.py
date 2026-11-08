@@ -284,7 +284,8 @@ def test_request_history_requires_explicit_flags(tmp_path, monkeypatch):
         {'request_id': req['id'], 'include_done': True, 'include_archived': True}))
     assert [task['id'] for task in expanded['tasks']['items']] == ['live', 'old']
     assert expanded['tasks']['count'] == 2
-    assert expanded['archived_task_count'] == 1
+    assert expanded['counts']['tasks']['by_status']['archived'] == 1
+    assert 'archived_task_count' not in expanded
     assert not any(row['kind'] == 'tasks' for row in expanded['omitted'])
     hidden = json.loads(tools['ancor_get_context']['handler'](
         {'request_id': req['id']}))
@@ -352,9 +353,12 @@ def test_context_separates_conditions_from_events_and_hides_history_by_default(t
     assert [row['id'] for row in overview['notifications']['items']] == ['q1']
     assert overview['counts']['notifications']['closed'] == 1
     assert [event['id'] for event in overview['pending_events']['items']] == [native['id']]
-    assert [condition['id'] for condition in overview['conditions']] == [
-        'stalled:' + req['id']]
-    assert overview['conditions'][0]['ack_policy'] == 'host_owned'
+    assert 'conditions' not in overview and 'progression' not in overview
+    assert any(item['request_id'] == req['id'] and item['why_code'] == 'stale_heartbeat'
+               for item in overview['attention'])
+    detail = call(overview['requests']['items'][0]['exact_via']['args'])
+    assert detail['progression'][0]['condition']['id'] == 'stalled:' + req['id']
+    assert detail['progression'][0]['condition']['ack_policy'] == 'host_owned'
     assert overview['tasks']['items'][0]['exact_via']['args']['task_id'] == 'running'
     assert overview['pending_events']['items'][0]['exact_via']['args']['event_id'] == native['id']
 

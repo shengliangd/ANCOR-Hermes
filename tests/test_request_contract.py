@@ -166,7 +166,8 @@ def test_expanded_context_reports_paused_state_and_reason(tmp_path, monkeypatch)
     context = call(tools, 'ancor_get_context', {'request_id': req['id']})
     assert context['request']['status'] == 'paused'
     assert context['progression'][0]['state'] == 'paused'
-    paused = next(item for item in context['transitions']['items']
+    history = call(tools, 'ancor_get_context', context['transitions']['exact_via']['args'])
+    paused = next(item for item in history['transitions']['items']
                   if item['kind'] == 'request.paused')
     assert paused['reason_preview'] == 'User asked'
 

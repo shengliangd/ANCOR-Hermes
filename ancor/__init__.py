@@ -14,7 +14,7 @@ from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
                     event_counts, event_summaries, host_condition_state,
                     is_open_question, notification_counts, notification_detail,
                     notification_selection, notification_summary, omitted_groups,
-                    request_content, request_counts, request_detail, request_progress,
+                    progression_detail, request_content, request_counts, request_detail, request_progress,
                     request_ref,
                     select_tasks, task_counts, task_exact_via, transition_summary)
 
@@ -353,12 +353,14 @@ def register(ctx, *, scan_runner=None):
         include_archived = args.get('include_archived', False)
         include_closed_notifications = args.get('include_closed_notifications', False)
         include_content = args.get('include_content', False)
+        include_history = args.get('include_history', False)
         progress_only = args.get('progress_only', False)
         for name, value in (
                 ('include_done', include_done),
                 ('include_archived', include_archived),
                 ('include_closed_notifications', include_closed_notifications),
                 ('include_content', include_content),
+                ('include_history', include_history),
                 ('progress_only', progress_only)):
             if type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
@@ -366,14 +368,22 @@ def register(ctx, *, scan_runner=None):
             raise ValueError('progress_only cannot be combined with request_id')
         if include_content and (not request_id or progress_only or event_id is not None):
             raise ValueError('include_content requires request_id without event_id or progress_only')
+        if include_history and (not request_id or progress_only or event_id is not None):
+            raise ValueError('include_history requires request_id without event_id or progress_only')
+        before_id = args.get('before_id')
+        if before_id is not None and (not include_history or type(before_id) is not int or before_id < 1):
+            raise ValueError('before_id requires include_history and a positive integer')
         if event_id is not None:
             if not coordinator:
                 raise PermissionError('coordinator profile required to inspect events')
             retained = service.store.events_by_ids([event_id])
             if not retained:
                 raise KeyError(event_id)
-            return {'event': retained[0],
-                    'expand': 'Use ancor_board show with the payload task_id for full task evidence.'}
+            result = {'event': retained[0]}
+            task_id = (retained[0].get('payload') or {}).get('task_id')
+            if task_id:
+                result['task'] = {'exact_via': task_exact_via(task_id)}
+            return result
         try:
             notification_rows = notifications()
         except ValueError as exc:
@@ -393,20 +403,12 @@ def register(ctx, *, scan_runner=None):
         from .scheduling import Scheduling
         observation = Scheduling(service.store).observation(
             data, all_tasks, notification_rows)
-        drafts_by_id = {draft['id']: draft for draft in data['drafts']}
         progression = {item['request_id']: item
                        for item in observation['progression']}
-        expand = ('Call ancor_get_context with request_id=<id> for current request state; '
-                  'add include_content=true for complete request text and active grants'
-                  + (', event_id=<id> for one complete event, or ancor_ack_events for handled IDs' if coordinator else '')
-                  + '; call ancor_board show with task_id=<id> for the full contract, '
-                    'comments, runs and events.')
         deprecated = ({'deprecated': 'use ancor_ack_events'}
                       if args.get('ack_event_ids') else {})
         ordinary_events = [event for event in data['pending_events']
                            if event['kind'] != 'host.stalled']
-        conditions = conditions_with_state(
-            observation['progression'], host_condition_state(service.store.path))
         if request_id:
             request = service.store.get_request(request_id)
             linked = [task for task in all_tasks or []
@@ -425,6 +427,9 @@ def register(ctx, *, scan_runner=None):
                                        if link['request_id'] == request_id]}
             scoped = Scheduling(service.store).observation(
                 filtered, linked, notification_rows)
+            conditions = conditions_with_state(
+                scoped['progression'], host_condition_state(service.store.path))
+            conditions_by_request = {item['request_id']: item for item in conditions}
             acceptance_events = [event for event in service.store.acceptances()
                                  if (event.get('payload') or {}).get('request_id') == request_id]
             eligible_notifications = (relevant if include_closed_notifications
@@ -442,25 +447,19 @@ def register(ctx, *, scan_runner=None):
                 'content': content,
                 'grants': (collection([{key: grant[key] for key in ('id', 'action', 'target', 'scope')}
                                        for grant in grants]) if include_content else {
-                    'count': len(grants), 'exact_via': content_via}),
-                'coordination': {
-                    key: coordination[key] for key in (
-                        'generation', 'observed_generation', 'needs_review')},
+                    'count': len(grants)}),
+                'coordination': {'needs_review': coordination['needs_review']},
                 'questions': collection([question_ref(q)
                     for q in service.store.questions(request_id) if q['state'] == 'open']),
                 'request': request_detail(
-                    request, include_text=False),
+                    request, include_text=False, include_audit=include_history),
                 'tasks': collection(
-                    [{**task, 'exact_via': task_exact_via(task['id'])} for task in visible],
+                    [{**{key: value for key, value in task.items()
+                         if key not in {'request_id', 'request_title'}},
+                      'exact_via': task_exact_via(task['id'])} for task in visible],
                     total=len(selected_tasks)),
                 'counts': {'tasks': task_counts(linked),
                            'notifications': notification_counts(relevant)},
-                'acceptance': acceptance_ref(
-                    request, linked,
-                    acceptance_events[-1] if acceptance_events else None),
-                'archived_task_count': sum(
-                    1 for task in linked
-                    if task.get('archived_at') or task.get('archived')),
                 'notifications': collection(
                     [notification_summary(row, exact_via=True)
                      for row in selected_notifications],
@@ -469,21 +468,31 @@ def register(ctx, *, scan_runner=None):
                     [task for task in linked if task not in selected_tasks],
                     [row for row in relevant if row not in eligible_notifications],
                     request_id=request_id),
-                'open_question_count': sum(
-                    is_open_question(row) for row in relevant),
-                'transitions': bounded_latest(
-                    [transition_summary(event) for event in
-                     service.store.request_transitions(request_id)],
-                    TRANSITION_LIMIT),
-                'conditions': [condition for condition in conditions
-                               if condition['request_id'] == request_id],
-                'progression': scoped['progression'],
                 'liveness': scoped['liveness'],
                 'scheduled_wakes': scoped['scheduled_wakes'],
-                'expand': expand,
                 **extra,
                 **deprecated,
             }
+            from .host import CONDITION_BACKOFF_SECONDS
+            result['progression'] = [progression_detail(
+                item, conditions_by_request.get(item['request_id']),
+                retry_seconds=CONDITION_BACKOFF_SECONDS) for item in scoped['progression']]
+            acceptance = acceptance_ref(
+                request, linked, acceptance_events[-1] if acceptance_events else None)
+            if acceptance['status'] != 'not_ready' or include_history:
+                result['acceptance'] = acceptance
+            transitions = service.store.request_transitions(request_id)
+            if transitions:
+                result['transitions'] = (bounded_latest(
+                    [transition_summary(event) for event in transitions], TRANSITION_LIMIT,
+                    before_id=before_id)
+                    if include_history else {'count': len(transitions), 'exact_via': {
+                        'tool': 'ancor_get_context', 'args': {
+                            'request_id': request_id, 'include_history': True}}})
+                if include_history and result['transitions']['truncated']:
+                    result['transitions']['next'] = {'tool': 'ancor_get_context', 'args': {
+                        'request_id': request_id, 'include_history': True,
+                        'before_id': result['transitions']['items'][0]['id']}}
             if coordinator:
                 result['coordination']['pending_adjustments'] = sum(
                     review['state'] != 'applied' for review in coordination['reviews'])
@@ -563,17 +572,12 @@ def register(ctx, *, scan_runner=None):
             'omitted': omitted_groups(
                 [task for task in all_tasks or [] if task not in selected_tasks],
                 [row for row in notification_rows if row not in notification_source]),
-            'conditions': conditions,
             'notifications': collection(
                 [notification_summary(row, exact_via=True)
                  for row in selected_notifications],
                 total=len(notification_source)),
-            'open_question_count': sum(
-                is_open_question(row) for row in notification_rows),
-            'progression': observation['progression'],
             'liveness': observation['liveness'],
             'scheduled_wakes': observation['scheduled_wakes'],
-            'expand': expand,
             **extra,
             **deprecated,
         }
@@ -769,9 +773,11 @@ def register(ctx, *, scan_runner=None):
                  'feedback': {'type': 'string',
                               'description': 'Exact human change request. Required only for request_changes.'}}, ['action']),
             'ancor_get_context': (
-                'Read a compact ANCOR overview or request-scoped current state. Pass request_id with include_content=true only when complete request text, point version IDs or active grants are needed. Default queries omit text, completed/archived tasks and closed notifications; history needs explicit include flags. Set progress_only=true for minimal open-work progress, including requests awaiting human acceptance. Read-only: this role cannot acknowledge events or mutate the board.',
+                'Read a compact ANCOR overview or request-scoped current state. Pass request_id with include_content=true only when complete request text, point version IDs or active grants are needed. Default queries omit text, completed/archived tasks and closed notifications. Request state keeps mutation versions; include_history=true expands transitions and audit versions. Content and grants share content.exact_via; counts are under counts. Set progress_only=true for minimal open-work progress, including requests awaiting human acceptance. Read-only: this role cannot acknowledge events or mutate the board.',
                 {'request_id': {'type': 'string'},
                  'include_content': {'type': 'boolean', 'description': 'Requires request_id. Expand complete authoritative text and active grants; points omit the duplicate brief and audit metadata.'},
+                 'include_history': {'type': 'boolean', 'description': 'Requires request_id. Expand transition history and request audit versions; default queries give a history count and query when history exists.'},
+                 'before_id': {'type': 'integer', 'minimum': 1, 'description': 'With include_history=true, return older transitions before this event ID.'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
@@ -848,10 +854,12 @@ def register(ctx, *, scan_runner=None):
                     ('request_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'reason')}},
                 ['action']),
             'ancor_get_context': (
-                'Read a compact coordination snapshot or request-scoped current state: counts, open tasks/questions, pending event previews and health. Request queries also omit completed/archived tasks, closed notifications, request text, notes and full review/basis records by default. Pass request_id with include_content=true for authoritative text, point version IDs and active grants; ancor_reconcile get for review/basis records; ancor_note list/get for working notes; ancor_board show for a full task; ancor_notify id for one notification. History requires explicit include flags. Pass event_id for one complete event. Use ancor_ack_events for handled IDs; ack_event_ids is deprecated.',
+                'Read a compact coordination snapshot or request-scoped current state: counts, open tasks/questions, pending event previews and health. Request queries also omit completed/archived tasks, closed notifications, request text, notes and full review/basis records by default. Pass request_id with include_content=true for authoritative text, point version IDs and active grants; ancor_reconcile get for review/basis records; ancor_note list/get for working notes; ancor_board show for a full task; ancor_notify id for one notification. Pass request_id with include_history=true for transitions and audit versions. Content and grants share content.exact_via; health decisions appear once in progression, and totals under counts. Pass event_id for one complete event. Use ancor_ack_events for handled IDs; ack_event_ids is deprecated.',
                 {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}},
                  'request_id': {'type': 'string'},
                  'include_content': {'type': 'boolean', 'description': 'Requires request_id. Expand complete authoritative text and active grants; points omit the duplicate brief and audit metadata.'},
+                 'include_history': {'type': 'boolean', 'description': 'Requires request_id. Expand transition history and request audit versions; default queries give a history count and query when history exists.'},
+                 'before_id': {'type': 'integer', 'minimum': 1, 'description': 'With include_history=true, return older transitions before this event ID.'},
                  'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
                  'include_done': {'type': 'boolean'},

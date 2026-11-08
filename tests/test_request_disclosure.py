@@ -63,7 +63,7 @@ def test_request_state_stays_small_and_content_expands_losslessly(long_lived_req
     call = register(role)
     state = call('ancor_get_context', {'request_id': rid})
     encoded = json.dumps(state, ensure_ascii=False)
-    assert len(encoded) < 8000, len(encoded)
+    assert len(encoded) < 6000, len(encoded)
     assert state['content']['counts'] == {f: len(rows) for f, rows in fields.items()}
     assert [t['id'] for t in state['tasks']['items']] == ['task-26']
     assert state['counts']['tasks']['terminal'] == 26
@@ -75,6 +75,16 @@ def test_request_state_stays_small_and_content_expands_losslessly(long_lived_req
     assert 'Historical scheduling note' not in encoded
     assert 'Obsolete question' not in encoded
     assert state['grants']['count'] == 1
+    assert 'exact_via' not in state['grants']
+    assert not {'mode', 'generation'} & state['content'].keys()
+    assert not {'generation', 'observed_generation'} & state['coordination'].keys()
+    assert not {'notes_version', 'verification_id'} & state['request'].keys()
+    for key in ('generation', 'observed_generation', 'title_version', 'control_version'):
+        assert state['request'][key] == store.get_request(rid)[key]
+    assert not {'expand', 'conditions', 'archived_task_count', 'open_question_count', 'acceptance'} & state.keys()
+    assert all(not {'request_id', 'request_title'} & task.keys()
+               for task in state['tasks']['items'])
+    assert all(not {'tasks', 'timers'} & item.keys() for item in state['progression'])
     if role == 'ancor-coordinator':
         assert state['notes']['count'] == 105
         assert 'items' not in state['notes']
@@ -99,9 +109,43 @@ def test_request_state_stays_small_and_content_expands_losslessly(long_lived_req
     assert history['omitted'] == []
 
 
+@pytest.mark.parametrize('role', ['ancor-coordinator', 'ancor-interactor'])
+def test_audit_history_and_retry_details_are_reachable_without_duplicate_health(long_lived_request, role):
+    from pathlib import Path
+    from ancor.host import CONDITION_BACKOFF_SECONDS
+
+    store, rid, _, register = long_lived_request
+    call = register(role)
+    state = {'conditions': {'stalled:' + rid: {
+        'since': 50, 'generation': 2, 'last_woken_at': 100}}}
+    Path(store.path + '.host.json').write_text(json.dumps(state))
+    before = store.snapshot()
+    overview = call('ancor_get_context', {})
+    assert 'conditions' not in overview and 'progression' not in overview
+    assert 'expand' not in overview
+    reference = overview['requests']['items'][0]
+    assert reference['progression']['reason'] == 'no_active_task'
+    assert any(item['request_id'] == rid for item in overview['attention'])
+    current = call(reference['exact_via']['tool'], reference['exact_via']['args'])
+    health = current['progression'][0]
+    assert health['reason'] == 'no_active_task'
+    assert health['condition'] == {
+        'id': 'stalled:' + rid, 'ack_policy': 'host_owned',
+        'since': 50, 'generation': 2, 'last_woken_at': 100,
+        'retry_at': 100 + CONDITION_BACKOFF_SECONDS}
+    history = call('ancor_get_context', {'request_id': rid, 'include_history': True})
+    for key in ('notes_version', 'verification_id'):
+        assert history['request'][key] == store.get_request(rid)[key]
+    assert store.snapshot() == before
+
+
 def test_content_expansion_rejects_ambiguous_scope(long_lived_request):
     _, rid, _, register = long_lived_request
     call = register('ancor-coordinator')
     for args in [{'include_content': True}, {'request_id': rid, 'include_content': 'true'},
-                 {'request_id': rid, 'include_content': True, 'event_id': 1}]:
+                 {'request_id': rid, 'include_content': True, 'event_id': 1},
+                 {'include_history': True}, {'request_id': rid, 'include_history': 'true'},
+                 {'request_id': rid, 'include_history': True, 'event_id': 1},
+                 {'request_id': rid, 'before_id': 10},
+                 {'request_id': rid, 'include_history': True, 'before_id': True}]:
         assert call('ancor_get_context', args)['code'] == 'invalid_request'

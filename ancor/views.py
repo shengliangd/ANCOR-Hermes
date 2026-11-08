@@ -206,7 +206,7 @@ def awaiting_acceptances(requests, notifications):
     return items
 
 
-def request_detail(request, draft=None, *, include_text=True):
+def request_detail(request, draft=None, *, include_text=True, include_audit=True):
     """One request; model state queries omit text, dashboard details retain it."""
     item = {
         'id': request['id'],
@@ -215,7 +215,10 @@ def request_detail(request, draft=None, *, include_text=True):
         'target_status': request.get('target_status'),
         'replacement_of': request.get('replacement_of'),
     }
-    for key in ('content_mode', 'generation', 'title_version', 'control_version', 'notes_version', 'observed_generation', 'verification_id'):
+    keys = ['content_mode', 'generation', 'title_version', 'control_version', 'observed_generation']
+    if include_audit:
+        keys.extend(('notes_version', 'verification_id'))
+    for key in keys:
         if key in request:
             item[key] = request[key]
     if request.get('status') == 'awaiting_acceptance':
@@ -224,12 +227,14 @@ def request_detail(request, draft=None, *, include_text=True):
         item['brief'] = request['brief']
         if draft and draft.get('summary'):
             item['summary'] = draft['summary']
+    if not include_audit:
+        item = {key: value for key, value in item.items() if value is not None}
     return item
 
 
 def request_content(content, brief, *, expanded=False):
     """One authoritative text representation, without storage/audit columns."""
-    result = {'mode': content['mode'], 'generation': content['generation']}
+    result = {}
     if expanded:
         if content['mode'] == 'points':
             result['fields'] = {
@@ -343,11 +348,12 @@ def select_tasks(tasks, *, include_done=False, include_archived=False):
 
 
 def task_counts(tasks):
-    """Count tasks by native status without hiding terminal work."""
+    """Count tasks by status, honoring archive flags on older native records."""
     counts = {}
     terminal = 0
     for task in tasks or ():
-        status = task.get('status') or 'unknown'
+        status = ('archived' if task.get('archived_at') or task.get('archived')
+                  else task.get('status') or 'unknown')
         counts[status] = counts.get(status, 0) + 1
         if is_terminal_task(task):
             terminal += 1
@@ -488,7 +494,7 @@ def attention_items(progression, tasks=(), notifications=(), events=(), limit=8)
 
 
 def omitted_groups(tasks, notifications, *, request_id=None):
-    """Describe excluded history with counts and executable follow-up queries."""
+    """Point to excluded history; counts live in the enclosing state statistics."""
     task_rows = list(tasks or ())
     notification_rows = list(notifications or ())
     omitted = []
@@ -502,7 +508,7 @@ def omitted_groups(tasks, notifications, *, request_id=None):
         count = buckets[status]
         if count:
             omitted.append({
-                'kind': 'tasks', 'reason': status, 'count': count,
+                'kind': 'tasks', 'reason': status,
                 'query': {'tool': 'ancor_board', 'args': (
                     {'action': 'list', 'include_archived': True}
                     if status == 'archived' else
@@ -513,12 +519,12 @@ def omitted_groups(tasks, notifications, *, request_id=None):
                    if row.get('answer') is not None and row.get('closed_at') is None)
     if closed:
         omitted.append({
-            'kind': 'notifications', 'reason': 'closed', 'count': closed,
+            'kind': 'notifications', 'reason': 'closed',
             'query': {'tool': 'ancor_notify', 'args': {'action': 'list'}},
         })
     if answered:
         omitted.append({
-            'kind': 'notifications', 'reason': 'answered', 'count': answered,
+            'kind': 'notifications', 'reason': 'answered',
             'query': {'tool': 'ancor_notify', 'args': {'action': 'list'}},
         })
     if request_id is not None:
@@ -728,6 +734,19 @@ def conditions_with_state(progression, state=None):
             if field in saved:
                 condition[field] = saved[field]
     return conditions
+
+
+def progression_detail(progression, condition=None, *, retry_seconds):
+    """Keep health decisions once; task evidence and timers have their own collections."""
+    item = {key: value for key, value in progression.items()
+            if key not in {'tasks', 'tasks_truncated', 'timers'} and value is not None}
+    if condition is not None:
+        item['condition'] = {key: condition[key] for key in (
+            'id', 'ack_policy', 'since', 'generation', 'last_woken_at')
+            if condition.get(key) is not None}
+        if condition.get('last_woken_at') is not None:
+            item['condition']['retry_at'] = condition['last_woken_at'] + retry_seconds
+    return item
 
 
 def wake_summary(wake):
