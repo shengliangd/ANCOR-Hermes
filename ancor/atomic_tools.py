@@ -102,8 +102,8 @@ def interfaces(service, operations, *, interactor, coordinator):
     methods = {'change': change, 'question': question}
     if coordinator:
         definitions['ancor_reconcile'] = (
-            'Review current generation against EVERY linked task, including finished work, and explain coverage '
-            'of new requests. Decisions: unaffected, reverify, revise, retire. A request change never '
+            'Assess the effect of current requirements on every linked task, including finished work, and explain coverage '
+            'of new requests. Classify unchanged work as unaffected; this is not a full retest or content review of every card. Decisions: unaffected, reverify, revise, retire. A request change never '
             'automatically stops all cards. Finish each pending adjustment only after applying it; revise requires '
             'a current task basis and a quiescent worker. Reverify requires explicit evidence. '
             'Get returns durable review/basis state even after wake events were acknowledged.',

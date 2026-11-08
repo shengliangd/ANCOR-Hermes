@@ -737,7 +737,10 @@ def register(ctx, *, scan_runner=None):
         'type': 'object',
         'description': ('Worker card. It holds these six parts and nothing else. '
                         'outcome, expected_output and evidence are required; inputs, '
-                        'advice and binding_constraints may be empty.'),
+                        'advice and binding_constraints may be empty. Convey intended use and audience in outcome/inputs, '
+                        'purpose-appropriate quality expectations in expected_output, and substantive '
+                        'checks of the actual output in evidence. Keep optional preferences distinct '
+                        'from necessary quality.'),
         'properties': {
             'outcome': {'type': 'string', 'pattern': r'\S'},
             'inputs': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
@@ -880,16 +883,16 @@ def register(ctx, *, scan_runner=None):
                  'note_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200,
                                 'description': 'Explicitly expand this many note previews for request_id; omitted by default. Prefer ancor_note list/get.'}}, []),
             'ancor_ack_events': (
-                'Atomically acknowledge durable event IDs after acting on them. The whole batch is rejected without writing if any ID is missing, host-owned (host.stalled or host.liveness), or blocked by a triage card. Repeating an acknowledged ID is idempotent and returns it in already_acked.',
+                'Atomically acknowledge durable event IDs after acting on them. For worker completion, read the result and relevant evidence, decide the next action, and preserve material findings or follow-up actions. Workers own work-level quality; focus on delivery impact and examine underlying work when a concrete concern warrants it. Acknowledgement needs no separate per-card quality report; pending repair remains work to finish. The whole batch is rejected without writing if any ID is missing, host-owned (host.stalled or host.liveness), or blocked by a triage card. Repeating an acknowledged ID is idempotent and returns it in already_acked.',
                 {'event_ids': {'type': 'array', 'minItems': 1,
                                'items': {'type': 'integer', 'minimum': 1}},
                  'reason': {'type': 'string'}}, ['event_ids']),
             'ancor_acceptance': (
-                'Record independent coordinator verification against the exact stored brief, or reject with a reason. Verification requires every linked native card to be done or archived and archives verified done cards. verify/accept moves the request to awaiting_acceptance; it is not final acceptance. The human-facing role makes the final decision.',
+                'Record independent coordinator verification against the current request, or reject with a reason. Review the assembled delivery and content that directly affects it for substance, clarity and usefulness. Reuse worker findings for underlying work; investigate further to resolve concrete concerns about the result. Correct meaningful defects and briefly explain why the delivery meets the request. Verification does not require exhaustive testing or an extra audit package. Verification requires every linked native card to be done or archived and archives verified done cards. verify/accept moves the request to awaiting_acceptance; it is not final acceptance. The human-facing role makes the final decision.',
                 {'request_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['verify', 'accept', 'reject']},
                  'evidence': {
                      'type': 'object',
-                     'description': 'Required for verify/accept. Bind the exact stored request brief and independently verified artifacts to linked task IDs.',
+                     'description': 'Required for verify/accept. Bind the current request and delivery artifacts to linked task IDs. In verification, briefly explain the findings supporting delivery quality and usefulness, drawing on your review and applicable worker checks. Mention limitations that affect use and describe checks honestly. Reuse existing findings; these fields do not require extra tests or audit artifacts.',
                      'properties': {
                          'brief': {'type': 'string', 'description': 'Exact stored legacy brief; structured requests use generation and coverage.'},
                          'generation': {'type': 'integer', 'minimum': 1},
