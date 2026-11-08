@@ -714,13 +714,16 @@ def register(ctx, *, scan_runner=None):
             operations.reconcile()
         return service.acceptance(args)
 
+    def signal(args, **_native):
+        return service.signal(args)
+
     def note(args, **_native):
         return service.note(args)
 
     methods = {'request': request, 'get_context': get_context,
                'ack_events': ack_events, 'notify': notify,
                'acceptance': acceptance, 'board': board_action, 'wake': wake,
-               'note': note}
+               'note': note, 'signal': signal}
     if coordinator or worker:
         # ANCOR owns the repairable-block loop; keep the native breaker from
         # routing unrelated causes on one card to triage.
@@ -756,6 +759,12 @@ def register(ctx, *, scan_runner=None):
         definitions = {}
     elif interactor:
         definitions = {
+            'ancor_signal': (
+                'Send informational text to the coordinator through the durable event queue. '
+                'No request or task is required. Submit the returned exact clarify_args through native clarify; only explicit confirmation enqueues the signal. '
+                'This does not change requests or grant authorization. '
+                'Returns an immutable proposal, not delivery or coordinator acknowledgement.',
+                {'text': {'type': 'string', 'pattern': r'\S'}}, ['text']),
             'ancor_request': (
                 'Draft, confirm, cancel, pause, resume, answer, or make the final human acceptance decision on an ANCOR request. draft requires an authoritative single-line title plus an outcome-oriented brief; keep implementation method and task decomposition out unless the user made a detail a hard constraint. cancel, pause, resume, accept and request_changes create immutable proposals with exact native clarify_args. accept is final human acceptance of coordinator-verified work; request_changes requires exact feedback and returns the request to active repair. respond is retired; use ancor_change with native confirmation for every human input.',
                 {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond', 'accept', 'request_changes']},

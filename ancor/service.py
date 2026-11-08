@@ -86,6 +86,20 @@ class Service:
             return self.command_presentation(command)
         raise ValueError('unknown request action')
 
+    def signal(self, args):
+        text = args.get('text')
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError('text must be a non-empty string')
+        return self.signal_presentation(self.store.propose_signal(text, self.ctx.profile_name))
+
+    def signal_presentation(self, proposal):
+        identifier = proposal['id']
+        return {**proposal, 'clarify_args': {'questions': [{
+            'question': '确认将以下提醒发送给协调者？\n\n' + proposal['text'],
+            'choices': [f'Do not send {identifier}', f'Confirm ANCOR signal {identifier}'],
+            'multi_select': False}]},
+            'next_step': 'Call native clarify with clarify_args unchanged. Only explicit confirmation enqueues this information; it does not change requests or grant authorization.'}
+
     def change(self, args):
         action = args['action']
         if action == 'propose':
@@ -322,7 +336,13 @@ class Service:
         questions = args.get('questions') if isinstance(args, dict) else None
         question_text = questions[0].get('question', '') if isinstance(questions, list) and questions and isinstance(questions[0], dict) else ''
         human_reference = re.search(r'\n确认单：([0-9a-f]{12})$', question_text) if isinstance(question_text, str) else None
-        if human_reference:
+        choices = questions[0].get('choices') if isinstance(questions, list) and questions and isinstance(questions[0], dict) else None
+        if isinstance(choices, list) and any(
+                isinstance(choice, str) and re.fullmatch(r'Confirm ANCOR signal [0-9a-f]{32}', choice)
+                for choice in choices):
+            kind, pattern = 'signal', r'Confirm ANCOR signal ([0-9a-f]{32})'
+            human_reference = None
+        elif human_reference:
             kind, pattern = 'change', None
         elif 'ANCOR change ' in encoded:
             kind, pattern = 'change', r'Apply ANCOR change ([0-9a-f]{32})'
@@ -346,11 +366,13 @@ class Service:
             if human_reference:
                 target = self.store.change_by_reference(human_reference.group(1))
             else:
-                matches = re.findall(pattern, encoded)
+                matches = re.findall(pattern, json.dumps(choices) if kind == 'signal' else encoded)
                 if len(matches) != 1:
                     raise ValueError('exact ANCOR confirmation choice required')
                 target = matches[0]
-            if kind == 'change':
+            if kind == 'signal':
+                expected = self.signal_presentation(self.store.get_signal_proposal(target))['clarify_args']
+            elif kind == 'change':
                 expected = self.change_presentation(self.store.get_change(target))['clarify_args']
             elif kind == 'human_decision':
                 expected = self.command_presentation(
@@ -404,7 +426,10 @@ class Service:
                 payload = json.loads(result) if isinstance(result, str) else result
                 if isinstance(payload, dict) and payload.get('error'):
                     raise RuntimeError(f"clarify failed: {payload['error']}")
-                if kind == 'change':
+                if kind == 'signal':
+                    question = self.signal_presentation(self.store.get_signal_proposal(target))['clarify_args']['questions'][0]
+                    answer = question['choices'][1]
+                elif kind == 'change':
                     question = self.change_presentation(self.store.get_change(target))['clarify_args']['questions'][0]
                     answer = question['choices'][1]
                 elif kind == 'draft':
@@ -445,7 +470,9 @@ class Service:
                                     'session_id': session_id, 'tool_call_id': tool_call_id},
                                    sort_keys=True)
             try:
-                if kind == 'change':
+                if kind == 'signal':
+                    self.store.confirm_signal(target, reference)
+                elif kind == 'change':
                     self.store.commit_change(target, reference)
                 elif kind == 'draft':
                     self.store.confirm(target, reference)

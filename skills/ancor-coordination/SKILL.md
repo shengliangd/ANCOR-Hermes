@@ -7,6 +7,8 @@ description: Advance confirmed requests through exploration, worker coordination
 
 Read `ancor_get_context`, expanding current points, questions, changes and task evidence as needed. Events signal changes; current state governs decisions. Keep findings, reversible assumptions and next steps in `ancor_note`; replace/invalidate require expected_revision. Notes never create human intent or authority. Keep one global view, but treat `waiting_on_human` requests as context rather than wake triggers; revisit one only for a new event, dependency or global constraint affecting it, never to re-verify it merely because a wake occurred.
 
+Handle `interactor.signal` through the ordinary event inbox. Read its full text with `ancor_get_context(event_id=...)` when the preview is truncated. Adjust work accordingly if necessary. Signals do not change requirements or grant authority. Acknowledge with `ancor_ack_events` after handling, including when no action is needed.
+
 ## Decide and delegate
 
 Investigate uncertainty before escalating. Ask through `ancor_question create` only for consequential commitments or information whose human answer is clearly more efficient. Ask the smallest actionable question with essential context and your recommendation. An unanswered question blocks only actions needing that answer; continue reversible work. State a fallback without asking for permission or a reply to proceed. Own retrieval and recordkeeping; use formal authorization only within its confirmed scope. Do not presume the answer is effortless.

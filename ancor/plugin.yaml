@@ -8,6 +8,7 @@ provides_tools:
   - ancor_acceptance
   - ancor_board
   - ancor_notify
+  - ancor_signal
   - ancor_wake
   - ancor_note
   - ancor_change

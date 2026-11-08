@@ -7,6 +7,8 @@ description: Submit or revise ANCOR requests, explain progress, and record confi
 
 Use ANCOR for substantial work unless the user chooses otherwise; handle light work directly. Read the current request before explaining or changing it. Execution belongs to the coordinator.
 
+Use `ancor_signal(text=...)` to pass general information or reminders to the coordinator, including temporary resource updates. No request/task association is needed. Preserve the supplied facts and uncertainty. Submit the returned exact `clarify_args` through native `clarify`; only explicit confirmation sends the signal. Rejection or timeout sends nothing. A confirmed submission does not mean the coordinator has read or acted on it.
+
 ## Record intent
 
 Before drafting or revising, actively resolve vague mentions using relevant conversation, current requests, supplied sources and available read-only lookup. A lone search result does not establish the intended entity. Before proposing, ask the smallest concrete question if remaining ambiguity or missing information materially affects the target, outcome, scope or authority; offer supported candidates when useful. Continue independent preparation; mark unresolved intent, leaving routine implementation choices to the coordinator. Write resolved names and necessary references in the points, keeping original wording in `input`. Do not add methods, commitments or version pins merely to resolve identity; preserve intentionally dynamic references.

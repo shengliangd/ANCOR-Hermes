@@ -54,6 +54,9 @@ class Store(Changes):
                     deleted_at INTEGER);
                 CREATE INDEX IF NOT EXISTS request_notes_scope
                     ON request_notes(request_id, deleted_at, updated_at);
+                CREATE TABLE IF NOT EXISTS signal_proposals (
+                    id TEXT PRIMARY KEY, text TEXT NOT NULL, source TEXT NOT NULL,
+                    created_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
                     payload TEXT NOT NULL, source_key TEXT UNIQUE,
@@ -517,6 +520,32 @@ class Store(Changes):
             (kind, json.dumps(payload), source_key, int(acknowledged)))
         return Store._event(db.execute('SELECT * FROM events WHERE id = ?',
                                        (cursor.lastrowid,)).fetchone())
+
+    def propose_signal(self, text, source):
+        self._text(text)
+        self._text(source)
+        identifier = uuid4().hex
+        with self._transaction() as db:
+            db.execute('INSERT INTO signal_proposals VALUES (?, ?, ?, ?)',
+                       (identifier, text, source, time.time()))
+        return self.get_signal_proposal(identifier)
+
+    def get_signal_proposal(self, identifier):
+        with self._transaction() as db:
+            row = db.execute('SELECT * FROM signal_proposals WHERE id=?', (identifier,)).fetchone()
+            if row is None:
+                raise KeyError(identifier)
+            return dict(row)
+
+    def confirm_signal(self, identifier, reference):
+        self._text(reference)
+        with self._transaction() as db:
+            row = db.execute('SELECT * FROM signal_proposals WHERE id=?', (identifier,)).fetchone()
+            if row is None:
+                raise KeyError(identifier)
+            return self._add_event(db, 'interactor.signal', {
+                'text': row['text'], 'source': row['source'], 'created_at': time.time(),
+                'confirmation_reference': reference}, source_key='signal:' + identifier)
 
     def add_event(self, kind, payload, source_key=None):
         with self._transaction() as db:

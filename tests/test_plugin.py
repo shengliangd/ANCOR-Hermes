@@ -197,7 +197,7 @@ def test_only_ancor_roles_have_business_tools():
         plugin.register(ctx)
         assert bool(tools) is expected
         if role == 'ancor-interactor':
-            assert set(tools) == {'ancor_request', 'ancor_get_context', 'ancor_board', 'ancor_notify', 'ancor_change', 'ancor_question'}
+            assert set(tools) == {'ancor_request', 'ancor_get_context', 'ancor_board', 'ancor_notify', 'ancor_change', 'ancor_question', 'ancor_signal'}
             assert tools['ancor_request']['schema']['parameters']['properties']['action']['enum'] == [
                 'draft', 'confirm', 'cancel', 'pause', 'resume', 'respond',
                 'accept', 'request_changes']
