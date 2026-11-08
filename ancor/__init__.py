@@ -14,7 +14,7 @@ from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
                     event_counts, event_summaries, host_condition_state,
                     is_open_question, notification_counts, notification_detail,
                     notification_selection, notification_summary, omitted_groups,
-                    request_counts, request_detail, request_progress,
+                    request_content, request_counts, request_detail, request_progress,
                     request_ref,
                     select_tasks, task_counts, task_exact_via, transition_summary)
 
@@ -331,7 +331,7 @@ def register(ctx, *, scan_runner=None):
 
     def get_context(args, **_native):
         request_id = args.get('request_id')
-        task_limit = args.get('task_limit', 200 if request_id else 50)
+        task_limit = args.get('task_limit', 50)
         if type(task_limit) is not int or not 1 <= task_limit <= 200:
             raise ValueError('task_limit must be an integer between 1 and 200')
         notification_limit = args.get('notification_limit', 10)
@@ -352,16 +352,20 @@ def register(ctx, *, scan_runner=None):
         include_done = args.get('include_done', False)
         include_archived = args.get('include_archived', False)
         include_closed_notifications = args.get('include_closed_notifications', False)
+        include_content = args.get('include_content', False)
         progress_only = args.get('progress_only', False)
         for name, value in (
                 ('include_done', include_done),
                 ('include_archived', include_archived),
                 ('include_closed_notifications', include_closed_notifications),
+                ('include_content', include_content),
                 ('progress_only', progress_only)):
             if type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
         if progress_only and request_id:
             raise ValueError('progress_only cannot be combined with request_id')
+        if include_content and (not request_id or progress_only or event_id is not None):
+            raise ValueError('include_content requires request_id without event_id or progress_only')
         if event_id is not None:
             if not coordinator:
                 raise PermissionError('coordinator profile required to inspect events')
@@ -392,7 +396,8 @@ def register(ctx, *, scan_runner=None):
         drafts_by_id = {draft['id']: draft for draft in data['drafts']}
         progression = {item['request_id']: item
                        for item in observation['progression']}
-        expand = ('Call ancor_get_context with request_id=<id> for exact request text'
+        expand = ('Call ancor_get_context with request_id=<id> for current request state; '
+                  'add include_content=true for complete request text and active grants'
                   + (', event_id=<id> for one complete event, or ancor_ack_events for handled IDs' if coordinator else '')
                   + '; call ancor_board show with task_id=<id> for the full contract, '
                     'comments, runs and events.')
@@ -407,8 +412,7 @@ def register(ctx, *, scan_runner=None):
             linked = [task for task in all_tasks or []
                       if task.get('request_id') == request_id]
             selected_tasks = select_tasks(
-                linked, include_done=args.get('include_done', True),
-                include_archived=args.get('include_archived', True))
+                linked, include_done=include_done, include_archived=include_archived)
             visible = selected_tasks[:task_limit]
             relevant = [row for row in notification_rows
                         if row.get('request_id') == request_id]
@@ -423,15 +427,29 @@ def register(ctx, *, scan_runner=None):
                 filtered, linked, notification_rows)
             acceptance_events = [event for event in service.store.acceptances()
                                  if (event.get('payload') or {}).get('request_id') == request_id]
-            selected_notifications = notification_selection(relevant, notification_limit)
+            eligible_notifications = (relevant if include_closed_notifications
+                                      else actionable_notifications(relevant))
+            selected_notifications = notification_selection(eligible_notifications, notification_limit)
+            content = request_content(service.store.content(request_id), request['brief'],
+                                      expanded=include_content)
+            content_via = {'tool': 'ancor_get_context', 'args': {
+                'request_id': request_id, 'include_content': True}}
+            if not include_content:
+                content['exact_via'] = content_via
+            grants = service.store.active_grants(request_id)
+            coordination = service.store.coordination(request_id)
             result = {
-                'content': service.store.content(request_id),
-                'grants': collection(service.store.active_grants(request_id)),
-                'coordination': service.store.coordination(request_id),
+                'content': content,
+                'grants': (collection([{key: grant[key] for key in ('id', 'action', 'target', 'scope')}
+                                       for grant in grants]) if include_content else {
+                    'count': len(grants), 'exact_via': content_via}),
+                'coordination': {
+                    key: coordination[key] for key in (
+                        'generation', 'observed_generation', 'needs_review')},
                 'questions': collection([question_ref(q)
                     for q in service.store.questions(request_id) if q['state'] == 'open']),
                 'request': request_detail(
-                    request, drafts_by_id.get(request['draft_id'])),
+                    request, include_text=False),
                 'tasks': collection(
                     [{**task, 'exact_via': task_exact_via(task['id'])} for task in visible],
                     total=len(selected_tasks)),
@@ -446,8 +464,11 @@ def register(ctx, *, scan_runner=None):
                 'notifications': collection(
                     [notification_summary(row, exact_via=True)
                      for row in selected_notifications],
-                    total=len(relevant)),
-                'omitted': omitted_groups(linked, relevant),
+                    total=len(eligible_notifications)),
+                'omitted': omitted_groups(
+                    [task for task in linked if task not in selected_tasks],
+                    [row for row in relevant if row not in eligible_notifications],
+                    request_id=request_id),
                 'open_question_count': sum(
                     is_open_question(row) for row in relevant),
                 'transitions': bounded_latest(
@@ -464,11 +485,18 @@ def register(ctx, *, scan_runner=None):
                 **deprecated,
             }
             if coordinator:
+                result['coordination']['pending_adjustments'] = sum(
+                    review['state'] != 'applied' for review in coordination['reviews'])
+                result['coordination']['exact_via'] = {
+                    'tool': 'ancor_reconcile', 'args': {'action': 'get', 'request_id': request_id}}
                 result['pending_events'] = collection(
                     event_summaries(events, event_limit, exact_via=True), total=len(events))
-                result['notes'] = service.note({
+                notes = service.note({
                     'action': 'list', 'request_id': request_id,
-                    'limit': note_limit})
+                    'limit': note_limit if 'note_limit' in args else 1})
+                result['notes'] = (notes if 'note_limit' in args else {
+                    'count': notes['count'], 'exact_via': {
+                        'tool': 'ancor_note', 'args': {'action': 'list', 'request_id': request_id}}})
             else:
                 result['pending_events'] = collection([], total=len(events))
             return result
@@ -498,7 +526,8 @@ def register(ctx, *, scan_runner=None):
                         is_open_question(row) for row in notification_rows),
                 },
                 'expand': ('Call ancor_get_context with request_id=<id> for '
-                           'exact request text or ancor_board show for one task.'),
+                           'current state; add include_content=true for exact request text, '
+                           'or use ancor_board show for one task.'),
                 **extra,
             }
         selected_tasks = select_tasks(
@@ -531,7 +560,9 @@ def register(ctx, *, scan_runner=None):
                 notifications=([] if coordinator else
                                actionable_notifications(notification_rows)),
                 events=ordinary_events, limit=attention_limit),
-            'omitted': omitted_groups(all_tasks or [], notification_rows),
+            'omitted': omitted_groups(
+                [task for task in all_tasks or [] if task not in selected_tasks],
+                [row for row in notification_rows if row not in notification_source]),
             'conditions': conditions,
             'notifications': collection(
                 [notification_summary(row, exact_via=True)
@@ -738,8 +769,9 @@ def register(ctx, *, scan_runner=None):
                  'feedback': {'type': 'string',
                               'description': 'Exact human change request. Required only for request_changes.'}}, ['action']),
             'ancor_get_context': (
-                'Read a compact ANCOR overview: open draft previews, request title references, open task references, counts, attention items, open questions and health. Set progress_only=true for a minimal open-work view; it retains coordinator-verified requests awaiting final human acceptance, while excluding history. Accepted requests are closed; awaiting_acceptance requests are still open work. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed. Pass request_id to expand one request with its exact brief. Read-only: this role cannot acknowledge events or mutate the board.',
+                'Read a compact ANCOR overview or request-scoped current state. Pass request_id with include_content=true only when complete request text, point version IDs or active grants are needed. Default queries omit text, completed/archived tasks and closed notifications; history needs explicit include flags. Set progress_only=true for minimal open-work progress, including requests awaiting human acceptance. Read-only: this role cannot acknowledge events or mutate the board.',
                 {'request_id': {'type': 'string'},
+                 'include_content': {'type': 'boolean', 'description': 'Requires request_id. Expand complete authoritative text and active grants; points omit the duplicate brief and audit metadata.'},
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
@@ -816,9 +848,10 @@ def register(ctx, *, scan_runner=None):
                     ('request_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'reason')}},
                 ['action']),
             'ancor_get_context': (
-                'Read a compact coordination snapshot: counts, attention items, open task references, open questions, host conditions, pending event previews and health for active or paused requests. Terminal tasks and closed notifications are summarized in counts/omitted instead of listed; set include_done, include_archived or include_closed_notifications only when history is needed. Payloads are previews; pass request_id for exact request text, ancor_board show for a full task, and ancor_notify id for one full notification. Pass event_id to read one complete event, including one already acknowledged. Use ancor_ack_events for handled IDs; ack_event_ids is deprecated.',
+                'Read a compact coordination snapshot or request-scoped current state: counts, open tasks/questions, pending event previews and health. Request queries also omit completed/archived tasks, closed notifications, request text, notes and full review/basis records by default. Pass request_id with include_content=true for authoritative text, point version IDs and active grants; ancor_reconcile get for review/basis records; ancor_note list/get for working notes; ancor_board show for a full task; ancor_notify id for one notification. History requires explicit include flags. Pass event_id for one complete event. Use ancor_ack_events for handled IDs; ack_event_ids is deprecated.',
                 {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}},
                  'request_id': {'type': 'string'},
+                 'include_content': {'type': 'boolean', 'description': 'Requires request_id. Expand complete authoritative text and active grants; points omit the duplicate brief and audit metadata.'},
                  'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
                  'include_done': {'type': 'boolean'},
@@ -827,7 +860,8 @@ def register(ctx, *, scan_runner=None):
                  'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
                  'event_limit': {'type': 'integer', 'minimum': 1, 'maximum': 500},
                  'event_id': {'type': 'integer', 'minimum': 1},
-                 'note_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, []),
+                 'note_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200,
+                                'description': 'Explicitly expand this many note previews for request_id; omitted by default. Prefer ancor_note list/get.'}}, []),
             'ancor_ack_events': (
                 'Atomically acknowledge durable event IDs after acting on them. The whole batch is rejected without writing if any ID is missing, host-owned (host.stalled or host.liveness), or blocked by a triage card. Repeating an acknowledged ID is idempotent and returns it in already_acked.',
                 {'event_ids': {'type': 'array', 'minItems': 1,

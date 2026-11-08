@@ -53,7 +53,7 @@ def test_public_structured_journey_and_local_revision(tmp_path, monkeypatch):
     rid = create_request(human, hooks)
     _, coordinator, _, _ = registered(tmp_path, monkeypatch, 'ancor-coordinator', board)
     store = Store(ctx.get_config('store_path'))
-    context = call(human, 'ancor_get_context', {'request_id': rid})
+    context = call(human, 'ancor_get_context', {'request_id': rid, 'include_content': True})
     versions = [p['version_id'] for ps in context['content']['fields'].values() for p in ps]
     t = call(coordinator, 'ancor_board', {'action': 'create', 'request_id': rid, 'key': 'report',
              'title': 'Write report', 'contract': contract(), 'generation': 1, 'point_versions': versions})
@@ -152,7 +152,7 @@ def test_public_question_answer_persists_in_current_context(tmp_path, monkeypatc
               {'op': 'resolve_question', 'question_id': 'where', 'revision': 1, 'reason': 'Location recorded'}]})
     confirm(hooks, proposal, 'answer')
     store.ack_events([e['id'] for e in store.pending_events()])
-    context = call(human, 'ancor_get_context', {'request_id': rid})
+    context = call(human, 'ancor_get_context', {'request_id': rid, 'include_content': True})
     assert context['content']['fields']['context'][0]['body'] == 'Input: /data/input.csv'
     assert context['questions']['count'] == 0
 

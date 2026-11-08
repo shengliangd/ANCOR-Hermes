@@ -101,6 +101,8 @@ def test_note_tool_is_coordinator_only_and_context_lists_previews(tmp_path, monk
 
     context = call(tools, 'ancor_get_context', {'request_id': request['id']})
     assert context['notes']['count'] == 1
+    assert 'items' not in context['notes']
+    context = call(tools, 'ancor_get_context', {'request_id': request['id'], 'note_limit': 1})
     assert context['notes']['items'][0]['body_preview'].startswith('verified artifact')
     assert context['notes']['items'][0]['created_at'] == listed['items'][0]['created_at']
     assert context['notes']['items'][0]['updated_at'] == listed['items'][0]['updated_at']

@@ -84,8 +84,12 @@ def test_context_is_compact_and_request_expands(tmp_path, monkeypatch):
     full_event = call({'event_id': event['id']})
     assert full_event['event']['payload']['request_id'] == req['id']
 
-    expanded = call({'request_id': req['id']})
-    assert expanded['request']['brief'] == brief
+    scoped = call({'request_id': req['id']})
+    assert 'brief' not in scoped['request']
+    assert 'brief' not in scoped['content']
+    expanded = call(scoped['content']['exact_via']['args'])
+    assert expanded['content']['brief'] == brief
+    assert 'brief' not in expanded['request']
     assert expanded['tasks']['items'][0]['id'] == 't1'
     assert 'body' not in expanded['tasks']['items'][0]
 
@@ -254,7 +258,7 @@ def test_board_list_prioritizes_live_recent_tasks_before_truncation(tmp_path):
     assert with_archived['items'][-1]['id'] == 'archived'
 
 
-def test_request_expansion_keeps_archived_tasks_for_acceptance(tmp_path, monkeypatch):
+def test_request_history_requires_explicit_flags(tmp_path, monkeypatch):
     tools = {}
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
@@ -277,13 +281,13 @@ def test_request_expansion_keeps_archived_tasks_for_acceptance(tmp_path, monkeyp
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: cards)
     ancor.register(ctx)
     expanded = json.loads(tools['ancor_get_context']['handler'](
-        {'request_id': req['id']}))
+        {'request_id': req['id'], 'include_done': True, 'include_archived': True}))
     assert [task['id'] for task in expanded['tasks']['items']] == ['live', 'old']
     assert expanded['tasks']['count'] == 2
     assert expanded['archived_task_count'] == 1
+    assert not any(row['kind'] == 'tasks' for row in expanded['omitted'])
     hidden = json.loads(tools['ancor_get_context']['handler'](
-        {'request_id': req['id'], 'include_done': False,
-         'include_archived': False}))
+        {'request_id': req['id']}))
     assert [task['id'] for task in hidden['tasks']['items']] == ['live']
     assert hidden['counts']['tasks']['terminal'] == 1
 

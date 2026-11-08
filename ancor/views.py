@@ -206,24 +206,42 @@ def awaiting_acceptances(requests, notifications):
     return items
 
 
-def request_detail(request, draft=None):
-    """Exact, single-request detail. Only this projection exposes the brief."""
+def request_detail(request, draft=None, *, include_text=True):
+    """One request; model state queries omit text, dashboard details retain it."""
     item = {
         'id': request['id'],
         'title': request['title'],
         'status': request['status'],
         'target_status': request.get('target_status'),
         'replacement_of': request.get('replacement_of'),
-        'brief': request['brief'],
     }
     for key in ('content_mode', 'generation', 'title_version', 'control_version', 'notes_version', 'observed_generation', 'verification_id'):
         if key in request:
             item[key] = request[key]
     if request.get('status') == 'awaiting_acceptance':
         item['completion_notice_id'] = completion_id(request)
-    if draft and draft.get('summary'):
-        item['summary'] = draft['summary']
+    if include_text:
+        item['brief'] = request['brief']
+        if draft and draft.get('summary'):
+            item['summary'] = draft['summary']
     return item
+
+
+def request_content(content, brief, *, expanded=False):
+    """One authoritative text representation, without storage/audit columns."""
+    result = {'mode': content['mode'], 'generation': content['generation']}
+    if expanded:
+        if content['mode'] == 'points':
+            result['fields'] = {
+                field: [{key: point[key] for key in ('point_id', 'version_id', 'body')}
+                        for point in points]
+                for field, points in content['fields'].items()}
+        else:
+            result['brief'] = brief
+    else:
+        result['counts'] = {field: len(points)
+                            for field, points in content['fields'].items()}
+    return result
 
 
 def note_summary(note):
@@ -469,7 +487,7 @@ def attention_items(progression, tasks=(), notifications=(), events=(), limit=8)
     return unique[:limit]
 
 
-def omitted_groups(tasks, notifications):
+def omitted_groups(tasks, notifications, *, request_id=None):
     """Describe excluded history with counts and executable follow-up queries."""
     task_rows = list(tasks or ())
     notification_rows = list(notifications or ())
@@ -503,6 +521,9 @@ def omitted_groups(tasks, notifications):
             'kind': 'notifications', 'reason': 'answered', 'count': answered,
             'query': {'tool': 'ancor_notify', 'args': {'action': 'list'}},
         })
+    if request_id is not None:
+        for group in omitted:
+            group['query']['args']['request_id'] = request_id
     return omitted
 
 
