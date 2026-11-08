@@ -209,6 +209,12 @@ def register(ctx, *, scan_runner=None):
     worker = ctx.profile_name == ctx.get_config('worker_profile', 'ancor-worker')
     if not interactor and not coordinator and not worker:
         return
+    # Native locale layers are available on newer Hermes hosts. The layer is
+    # gateway-wide: confirmations already offer an explicit 'do not submit' choice.
+    if interactor and hasattr(ctx, 'register_locale'):
+        from agent.i18n import supported_languages
+        for language in supported_languages():
+            ctx.register_locale(language, {'gateway.clarify.skip_hint': ''})
     from .service import Service
     service = Service(ctx)
     from .operations import Operations
