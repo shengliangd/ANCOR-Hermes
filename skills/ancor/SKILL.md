@@ -57,8 +57,6 @@ Complete the intake before drafting or proposing a request.
 4. Ask the user concise, high-value questions before drafting. Group independent questions when practical so the user is not questioned repeatedly. If an answer creates a new material ambiguity, resolve that follow-up before proceeding.
 5. Do not draft or call `ancor_change propose` while a material ambiguity remains. If no material question remains, state that understanding briefly and continue.
 
-Ordinary conversation is the correct place for intake questions. Native `clarify` remains reserved for the final formal proposal and confirmation.
-
 ### Draft and propose
 
 1. Read the shared request standard before proposing anything.
