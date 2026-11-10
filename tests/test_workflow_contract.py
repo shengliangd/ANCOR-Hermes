@@ -13,7 +13,9 @@ def test_role_skills_reference_available_ancor_interfaces():
     import yaml
     manifest = yaml.safe_load((ROOT / 'ancor/plugin.yaml').read_text())
     available = set(manifest['provides_tools'])
-    for path in (ROOT / 'skills').glob('ancor-*/SKILL.md'):
+    paths = [*sorted((ROOT / 'skills').glob('ancor-*/SKILL.md')),
+             ROOT / 'skills/ancor/SKILL.md']
+    for path in paths:
         text = path.read_text()
         metadata = yaml.safe_load(text.split('---', 2)[1])
         assert metadata['name'] == path.parent.name
