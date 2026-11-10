@@ -73,6 +73,9 @@ if args[2:4] == ['plugins', 'install']:
 def test_all_installs_and_restart_use_explicit_root(installer, tmp_path, monkeypatch, owner):
     ambient = os.environ['HERMES_HOME']
     target = tmp_path / 'chosen instance'
+    obsolete = target / 'profiles/ancor-interactor/skills/ancor-interactor/SKILL.md'
+    obsolete.parent.mkdir(parents=True)
+    obsolete.write_text('obsolete managed prompt\n')
     monkeypatch.setattr(sys, 'argv', ['install_ancor.py', '--hermes-home',
                                     'chosen instance', '--owner-profile', owner])
 
@@ -97,6 +100,9 @@ def test_all_installs_and_restart_use_explicit_root(installer, tmp_path, monkeyp
         assert (home / 'skills' / skill / 'SKILL.md').read_bytes() == (repo / 'skills' / skill / 'SKILL.md').read_bytes()
     command_home = target / 'profiles' / 'ancor-interactor'
     assert not (command_home / 'skills/ancor-interactor').exists()
+    backups = list((target / 'backups').glob('ancor-install-*'))
+    assert any((path / 'prompts/ancor-interactor/skills/ancor-interactor/SKILL.md').is_file()
+               for path in backups)
     for relative in ('SKILL.md', 'references/REQUEST_STANDARD.md'):
         assert ((command_home / 'skills/ancor' / relative).read_bytes()
                 == (repo / 'skills/ancor' / relative).read_bytes())

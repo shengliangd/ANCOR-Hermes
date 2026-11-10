@@ -26,6 +26,9 @@ ROLES = {
     "coordinator": "ancor-coordination",
     "worker": "ancor-worker",
 }
+OBSOLETE_SKILLS = {
+    "interactor": ("ancor-interactor",),
+}
 
 
 def run(command: list[str], *, hermes_home: Path, dry_run: bool = False) -> None:
@@ -123,6 +126,16 @@ def main() -> int:
     if not args.dry_run:
         staged = Path(tempfile.mkdtemp(prefix=".ancor-prompts-", dir=hermes_home))
         try:
+            obsolete_paths = []
+            for role, skills in OBSOLETE_SKILLS.items():
+                for skill in skills:
+                    obsolete = profile_home(hermes_home, f"ancor-{role}") / "skills" / skill
+                    if not obsolete.exists():
+                        continue
+                    backup_path = backup / "prompts" / f"ancor-{role}" / "skills" / skill
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(obsolete, backup_path)
+                    obsolete_paths.append(obsolete)
             for name, source_path in prompt_sources.items():
                 role, relative = name.split("/", 1)
                 destination = profile_home(hermes_home, role) / relative
@@ -138,6 +151,8 @@ def main() -> int:
                 destination = profile_home(hermes_home, role) / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staged / name, destination)
+            for obsolete in obsolete_paths:
+                shutil.rmtree(obsolete)
         finally:
             shutil.rmtree(staged, ignore_errors=True)
 
