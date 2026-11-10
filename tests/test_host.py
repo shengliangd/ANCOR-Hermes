@@ -8,6 +8,7 @@ import pytest
 from ancor.board import NativeBoard
 from ancor.host import Host, child_environment, coordinator_command, scan_runner
 from ancor.store import Store
+from native_hermes import native_source_or_skip
 
 
 class Context:
@@ -309,9 +310,7 @@ def test_host_closes_question_when_task_is_no_longer_blocked(tmp_path):
 def test_native_event_api_to_store_and_prompt(tmp_path, monkeypatch):
     import sqlite3
     from pathlib import Path
-    source = Path('/home/user/.hermes/hermes-agent')
-    if not source.exists():
-        pytest.skip('installed Hermes source unavailable')
+    source = native_source_or_skip()
     monkeypatch.syspath_prepend(str(source))
     db = tmp_path / 'native.db'
     with sqlite3.connect(db) as conn:

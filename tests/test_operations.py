@@ -6,6 +6,7 @@ import pytest
 
 from ancor.board import NativeBoard
 from ancor.store import Store
+from native_hermes import native_source_or_skip
 
 
 
@@ -536,9 +537,7 @@ def test_create_uses_configured_worker_and_verifies_readback(setup, existing_ass
 def test_native_parser_accepts_exact_mutation_contracts(monkeypatch):
     import argparse
     from pathlib import Path
-    source = Path('/home/user/.hermes/hermes-agent')
-    if not source.exists():
-        pytest.skip('installed native parser unavailable')
+    source = native_source_or_skip()
     monkeypatch.syspath_prepend(str(source))
     from hermes_cli.kanban_parser import build_parser
     parser = argparse.ArgumentParser()

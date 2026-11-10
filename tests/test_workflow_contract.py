@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import ancor
+from native_hermes import native_source_or_skip
 
 ROOT = Path(__file__).parents[1]
 
@@ -67,9 +68,7 @@ def test_manifest_uses_native_setting_mapping(tmp_path):
     import os
     import subprocess
     import pytest
-    native = Path('/home/user/.hermes/hermes-agent')
-    if not native.is_dir():
-        pytest.skip('native Hermes unavailable')
+    native = native_source_or_skip()
     script = '''
 import sys
 sys.path.insert(0, sys.argv[1])

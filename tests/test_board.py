@@ -4,12 +4,13 @@ import pytest
 import sqlite3
 from pathlib import Path
 
+from native_hermes import native_python_or_skip, native_source_or_skip
+
 
 def test_installed_native_cli_roundtrip_isolated(tmp_path):
     import os
-    source = Path('/home/user/.hermes/hermes-agent')
-    if not source.exists():
-        pytest.skip('installed Hermes source unavailable')
+    source = native_source_or_skip()
+    python = native_python_or_skip(source)
     home = tmp_path / 'home'
     home.mkdir()
     import site
@@ -18,11 +19,11 @@ def test_installed_native_cli_roundtrip_isolated(tmp_path):
     # This is an authorized isolated native probe. Do not inherit the parent
     # agent's delegated-child mutation fences into the probe process.
     script = 'import argparse,sys; from hermes_cli.kanban_parser import build_parser; from hermes_cli.kanban import kanban_command; p=argparse.ArgumentParser(); build_parser(p.add_subparsers()); sys.exit(kanban_command(p.parse_args(sys.argv[1:])))'
-    probe = subprocess.run([str(source / '.venv/bin/python'), '-c', 'from hermes_cli.kanban import kanban_command'], env=env, capture_output=True, text=True)
+    probe = subprocess.run([str(python), '-c', 'from hermes_cli.kanban import kanban_command'], env=env, capture_output=True, text=True)
     if probe.returncode and 'ModuleNotFoundError' in probe.stderr:
         pytest.skip('isolated installed CLI missing dependency: ' + probe.stderr.splitlines()[-1])
     def run(argv, **kwargs):
-        return subprocess.run([str(source / '.venv/bin/python'), '-c', script, *argv[3:]], **kwargs)
+        return subprocess.run([str(python), '-c', script, *argv[3:]], **kwargs)
     board = NativeBoard('default', run=run, env=env)
     first = board.create('r1', 1, 'step', title='isolated test', body='no execution', assignee='ancor-test-worker')
     again = board.create('r1', 1, 'step', title='isolated test', body='no execution', assignee='ancor-test-worker')
@@ -53,9 +54,7 @@ def test_installed_native_cli_roundtrip_isolated(tmp_path):
 
 
 def test_native_events_read_only_and_bounded(tmp_path, monkeypatch):
-    source = Path('/home/user/.hermes/hermes-agent')
-    if not source.exists():
-        pytest.skip('installed Hermes source unavailable')
+    source = native_source_or_skip()
     monkeypatch.syspath_prepend(str(source))
     path = tmp_path / 'native.db'
     with sqlite3.connect(path) as conn:

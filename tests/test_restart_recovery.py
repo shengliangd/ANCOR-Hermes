@@ -13,6 +13,7 @@ from ancor.host import Host
 from ancor.notification import NotificationOutbox
 from ancor.store import Store
 from test_host import Board, Context
+from native_hermes import native_source_or_skip
 
 
 ROOT = Path(__file__).parents[1]
@@ -256,9 +257,7 @@ def test_confirmed_demand_restart_requires_no_resubmit(tmp_path, acknowledged):
 def test_native_completion_written_during_downtime_replayed_once(tmp_path, monkeypatch):
     # Real installed native list_events interface; fixture writer is NOT a worker model.
     from ancor.board import NativeBoard
-    native = Path('/home/user/.hermes/hermes-agent')
-    if not native.is_dir():
-        pytest.skip('installed native source unavailable')
+    native = native_source_or_skip()
     monkeypatch.syspath_prepend(str(native))
     path, db = tmp_path / 'store.db', tmp_path / 'native.db'
     store = Store(path)

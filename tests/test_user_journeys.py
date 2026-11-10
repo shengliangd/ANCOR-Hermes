@@ -16,9 +16,9 @@ import sys
 
 import pytest
 
+from native_hermes import native_python_or_skip, native_source_or_skip
+
 ROOT = Path(__file__).resolve().parents[1]
-NATIVE = Path(os.environ.get('ANCOR_NATIVE_HERMES', '/home/user/.hermes/hermes-agent'))
-NATIVE_PYTHON = Path(os.environ.get('ANCOR_NATIVE_PYTHON', str(NATIVE / '.venv/bin/python')))
 NATIVE_COMMAND_TIMEOUT = 15
 _REAL_SUBPROCESS_RUN = subprocess.run
 
@@ -56,16 +56,16 @@ def fenced():
 
 @pytest.mark.parametrize('journey', ['confirmation', 'rolling', 'blocker', 'replacement', 'acceptance', 'restart'])
 def test_user_journey(tmp_path, journey):
-    if not NATIVE.is_dir():
-        pytest.skip('installed native Hermes source unavailable')
+    native = native_source_or_skip()
+    native_python = native_python_or_skip(native)
     if journey != 'confirmation' and fenced():
         pytest.skip('real Kanban mutation requires unfenced parent execution')
     home = tmp_path / 'home'
     home.mkdir()
     env = dict(os.environ, HOME=str(home), HERMES_HOME=str(home / '.hermes'),
                HERMES_KANBAN_HOME=str(home / 'board-root'))
-    env['PYTHONPATH'] = os.pathsep.join([str(ROOT), str(NATIVE), site.getusersitepackages()])
-    result = subprocess.run([str(NATIVE_PYTHON), str(Path(__file__).resolve()),
+    env['PYTHONPATH'] = os.pathsep.join([str(ROOT), str(native), site.getusersitepackages()])
+    result = subprocess.run([str(native_python), str(Path(__file__).resolve()),
                              journey], cwd=ROOT, env=env, capture_output=True, text=True, timeout=240)
     assert result.returncode == 0, result.stdout + '\n' + result.stderr
     assert 'JOURNEY PASSED: ' + journey in result.stdout

@@ -9,12 +9,13 @@ from dataclasses import asdict
 import pytest
 
 from ancor.board import NativeBoard
+from native_hermes import native_source_or_skip
 
 
 @pytest.mark.skipif(os.environ.get('ANCOR_NATIVE_TEST') != '1', reason='authorized parent native probe only')
 @pytest.mark.parametrize('gated', [False, True])
 def test_native_revise_preserves_scope_and_parent_gating(tmp_path, monkeypatch, gated):
-    monkeypatch.syspath_prepend('/home/user/.hermes/hermes-agent')
+    monkeypatch.syspath_prepend(str(native_source_or_skip()))
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
     path = tmp_path / 'kanban.db'

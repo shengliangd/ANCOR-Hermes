@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from native_hermes import native_source_or_skip
+
 
 def test_manifest_declares_tools():
     path = Path(__file__).parents[1] / 'ancor/plugin.yaml'
@@ -127,9 +129,7 @@ def test_native_registration_and_nested_clarify(tmp_path):
     import os
     import subprocess
     import sys
-    native = Path('/home/user/.hermes/hermes-agent')
-    if not native.is_dir():
-        pytest.skip('installed native source unavailable')
+    native = native_source_or_skip()
     script = '''
 import json, sys
 sys.path.insert(0, sys.argv[1])

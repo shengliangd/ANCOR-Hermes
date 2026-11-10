@@ -4,12 +4,12 @@ from pathlib import Path
 import subprocess
 import pytest
 
-NATIVE = Path('/home/user/.hermes/hermes-agent')
+from native_hermes import native_python_or_skip, native_source_or_skip
 
 
 def test_native_business_registration_and_gates(tmp_path):
-    if not NATIVE.is_dir():
-        pytest.skip('native Hermes unavailable')
+    native = native_source_or_skip()
+    native_python = native_python_or_skip(native)
     script = r'''
 import asyncio, json, os, sys
 sys.path.insert(0, sys.argv[1])
@@ -114,6 +114,6 @@ print('native registration, coordination gates, replies, acceptance and pump ver
     env = dict(os.environ, HOME=str(tmp_path), HERMES_HOME=str(tmp_path / '.hermes'))
     import site
     env['PYTHONPATH'] = site.getusersitepackages()
-    result = subprocess.run([str(NATIVE / '.venv/bin/python'), '-c', script, str(NATIVE)],
+    result = subprocess.run([str(native_python), '-c', script, str(native)],
                             cwd=Path(__file__).parents[1], env=env, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr

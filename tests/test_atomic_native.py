@@ -6,12 +6,11 @@ from pathlib import Path
 import pytest
 
 from ancor.transitions import require_quiescence
+from native_hermes import native_source_or_skip
 
 
 def test_native_block_edit_resume_preserves_other_work(tmp_path, monkeypatch):
-    source = Path(os.environ.get('ANCOR_HERMES_SOURCE', '/opt/ancor-native/.hermes/hermes-agent'))
-    if not source.is_dir():
-        pytest.skip('set ANCOR_HERMES_SOURCE to installed Hermes source')
+    source = native_source_or_skip()
     monkeypatch.syspath_prepend(str(source))
     monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'hermes'))
     try:
