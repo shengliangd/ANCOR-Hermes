@@ -110,6 +110,28 @@ def test_tools_enforce_role_boundary_and_note_versions(tmp_path, monkeypatch):
     assert Store(ctx.get_config('store_path')).get_request(rid)['generation'] == 1
 
 
+def test_public_board_comment_accepts_body_and_writes_task_history(tmp_path, monkeypatch):
+    ctx, human, hooks, board = registered(tmp_path, monkeypatch)
+    rid = create_request(human, hooks)
+    _, coordinator, _, _ = registered(tmp_path, monkeypatch, 'ancor-coordinator', board)
+    store = Store(ctx.get_config('store_path'))
+    versions = [p['version_id'] for ps in store.content(rid)['fields'].values() for p in ps]
+    task = call(coordinator, 'ancor_board', {
+        'action': 'create', 'request_id': rid, 'key': 'report',
+        'title': 'Write report', 'contract': contract(),
+        'generation': 1, 'point_versions': versions})
+
+    properties = coordinator['ancor_board']['schema']['parameters']['properties']
+    assert properties['body'] == {'type': 'string'}
+    comment = call(coordinator, 'ancor_board', {
+        'action': 'comment', 'task_id': task['task_id'],
+        'body': 'Use the verified input before drafting'})
+    assert comment['changed'] == ['comment']
+    shown = call(coordinator, 'ancor_board', {
+        'action': 'show', 'task_id': task['task_id']})
+    assert shown['comments']['items'][-1]['body'] == 'Use the verified input before drafting'
+
+
 def test_verification_waits_while_a_request_question_is_open(tmp_path, monkeypatch):
     ctx, human, hooks, board = registered(tmp_path, monkeypatch)
     rid = create_request(human, hooks)

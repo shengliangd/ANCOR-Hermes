@@ -863,7 +863,7 @@ def register(ctx, *, scan_runner=None):
                  'include_archived': {'type': 'boolean'},
                  'contract': contract_schema,
                  **{field: {'type': 'string'} for field in
-                    ('request_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'reason')}},
+                    ('request_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'reason', 'body')}},
                 ['action']),
             'ancor_get_context': (
                 'Read a compact coordination snapshot or request-scoped current state: counts, open tasks/questions, pending event previews and health. Request queries also omit completed/archived tasks, closed notifications, request text, notes and full review/basis records by default. Pass request_id with include_content=true for authoritative text, point version IDs and active grants; ancor_reconcile get for review/basis records; ancor_note list/get for working notes; ancor_board show for a full task; ancor_notify id for one notification. Pass request_id with include_history=true for transitions and audit versions. Content and grants share content.exact_via; health decisions appear once in progression, and totals under counts. Pass event_id for one complete event. Use ancor_ack_events for handled IDs; ack_event_ids is deprecated.',
