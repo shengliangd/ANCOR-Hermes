@@ -37,15 +37,16 @@ Use this four-profile inventory for installation and verification:
 | Profile | ANCOR plugin | Installed role prompts | Runtime responsibility |
 | --- | --- | --- | --- |
 | Owner (`default`) | Required | None; preserve owner's existing prompts | Gateway loops, connected `api_server`; shared-bot transport in the example below |
-| `ancor-interactor` | Required | `roles/ancor-interactor/SOUL.md`, `skills/ancor-interactor/SKILL.md` | User conversation, ANCOR and native `clarify` |
+| `ancor-interactor` | Required | `roles/ancor-interactor/SOUL.md`, `skills/ancor/` | User conversation, explicit `/ancor create` and `/ancor revise`, ANCOR and native `clarify` |
 | `ancor-coordinator` | Required | `roles/ancor-coordinator/SOUL.md`, `skills/ancor-coordination/SKILL.md` | ANCOR, investigation and verification |
 | `ancor-worker` | Required | `roles/ancor-worker/SOUL.md`, `skills/ancor-worker/SKILL.md` | Native Kanban, execution and delegation |
 
 The installer uses these three fixed role names. The owner is `default` unless
 selected with `--owner-profile`; it must be distinct from the role profiles.
 Ensure role skills are loaded, for example with `skills.auto_load` in each
-role's configuration (`ancor-interactor`, `ancor-coordination`, `ancor-worker`,
-respectively). The owner plugin goes into `$HERMES_HOME/plugins/ancor` when the
+role's configuration (`ancor`, `ancor-coordination`, `ancor-worker`,
+respectively). The `ancor` skill is the interactor's auto-loaded role skill and
+also provides the `/ancor` command surface. The owner plugin goes into `$HERMES_HOME/plugins/ancor` when the
 owner is `default`; role plugins go into
 `$HERMES_HOME/profiles/<profile>/plugins/ancor`. Each role's SOUL goes at its
 profile root and its skill under `skills/<skill>/SKILL.md`.
@@ -216,13 +217,13 @@ hermes -p default gateway status
 ```
 
 All four must show ANCOR installed and enabled from the selected release, and
-the installer must finish its six prompt hash checks. Check role skill loading
+the installer must finish its prompt and reference hash checks. Check role skill loading
 and shared settings against the inventory above. Gateway status/logs should
 show the configured owner, interactor and transport profile served, the
 messaging and `api_server` adapters connected, and no ANCOR startup or delivery
 errors.
 
-Then exercise a small, deliberately authorized request in the intended chat:
+Then exercise a small, deliberately authorized `/ancor create` request in the intended chat:
 
 1. A user message reaches the interactor, which presents native confirmation.
    Confirming records exactly one request in the shared store.

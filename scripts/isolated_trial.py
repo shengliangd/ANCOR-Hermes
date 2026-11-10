@@ -20,6 +20,16 @@ REPO = Path(__file__).resolve().parents[1]
 ROLES = ('ancor-interactor', 'ancor-coordinator', 'ancor-worker')
 
 
+def role_skills(role):
+    if role == 'ancor-interactor':
+        primary = 'ancor'
+    elif role == 'ancor-coordinator':
+        primary = 'ancor-coordination'
+    else:
+        primary = role
+    return (primary,)
+
+
 def prepare(root, native, credentials):
     import yaml
     from dotenv import dotenv_values
@@ -107,7 +117,7 @@ def prepare(root, native, credentials):
             'agent': {'max_turns': 24},
             'approvals': {'single_query_mode': 'approve'},
             'auxiliary': {'background_review': {'enabled': False}}, 'curator': {'enabled': False},
-            'skills': {'auto_load': [{'ancor-interactor': 'ancor-interactor',
+            'skills': {'auto_load': [{'ancor-interactor': 'ancor',
                                     'ancor-coordinator': 'ancor-coordination', 'ancor-worker': 'ancor-worker'}[role]] if role in ROLES else []},
             'plugins': {'enabled': ['ancor'], 'entries': {'ancor': {'enabled': True, 'settings': settings}}},
             'kanban': {'review_dispatch': False, 'dispatch_in_gateway': False, 'auto_subscribe': False},
@@ -120,8 +130,8 @@ def prepare(root, native, credentials):
         (home / 'skills').mkdir(exist_ok=True)
         if role in ROLES:
             shutil.copy2(REPO / 'roles' / role / 'SOUL.md', home / 'SOUL.md')
-            skill = 'ancor-coordination' if role == 'ancor-coordinator' else role
-            shutil.copytree(REPO / 'skills' / skill, home / 'skills' / skill)
+            for skill in role_skills(role):
+                shutil.copytree(REPO / 'skills' / skill, home / 'skills' / skill)
         identities[role] = {'model': model.get('default'), 'provider': model.get('provider')}
     (root / 'trial.json').write_text(json.dumps({'root': str(root), 'native': str(native),
            'python': str(python), 'repo': str(REPO), 'models': identities}, indent=2))
@@ -145,8 +155,8 @@ def sync_trial(root):
                         ignore=shutil.ignore_patterns('__pycache__'))
         if role in ROLES:
             shutil.copy2(REPO / 'roles' / role / 'SOUL.md', home / 'SOUL.md')
-            skill = 'ancor-coordination' if role == 'ancor-coordinator' else role
-            shutil.copytree(REPO / 'skills' / skill, home / 'skills' / skill, dirs_exist_ok=True)
+            for skill in role_skills(role):
+                shutil.copytree(REPO / 'skills' / skill, home / 'skills' / skill, dirs_exist_ok=True)
 
 
 def environment(root):

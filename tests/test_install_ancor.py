@@ -17,10 +17,16 @@ def installer(tmp_path, monkeypatch):
     script = repo / 'scripts/install_ancor.py'
     script.parent.mkdir(parents=True)
     shutil.copy2(Path(__file__).parents[1] / 'scripts/install_ancor.py', script)
-    for role, skill in (('interactor', 'ancor-interactor'),
-                        ('coordinator', 'ancor-coordination'),
-                        ('worker', 'ancor-worker')):
-        for relative in (f'roles/ancor-{role}/SOUL.md', f'skills/{skill}/SKILL.md'):
+    role_skills = (('interactor', ('ancor',)),
+                   ('coordinator', ('ancor-coordination',)),
+                   ('worker', ('ancor-worker',)))
+    for role, skills in role_skills:
+        relatives = [f'roles/ancor-{role}/SOUL.md']
+        for skill in skills:
+            relatives.append(f'skills/{skill}/SKILL.md')
+            if skill == 'ancor':
+                relatives.append(f'skills/{skill}/references/REQUEST_STANDARD.md')
+        for relative in relatives:
             path = repo / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f'Fixture release file: {relative}\n')
@@ -89,6 +95,13 @@ def test_all_installs_and_restart_use_explicit_root(installer, tmp_path, monkeyp
         home = target / 'profiles' / f'ancor-{role}'
         assert (home / 'SOUL.md').read_bytes() == (repo / 'roles' / f'ancor-{role}' / 'SOUL.md').read_bytes()
         assert (home / 'skills' / skill / 'SKILL.md').read_bytes() == (repo / 'skills' / skill / 'SKILL.md').read_bytes()
+    command_home = target / 'profiles' / 'ancor-interactor'
+    assert not (command_home / 'skills/ancor-interactor').exists()
+    for relative in ('SKILL.md', 'references/REQUEST_STANDARD.md'):
+        assert ((command_home / 'skills/ancor' / relative).read_bytes()
+                == (repo / 'skills/ancor' / relative).read_bytes())
+    for profile in ('ancor-coordinator', 'ancor-worker'):
+        assert not (target / 'profiles' / profile / 'skills/ancor').exists()
 
 
 def test_dry_run_shows_root_without_installing(installer, tmp_path, monkeypatch, capsys):

@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 
 ROLES = {
-    "interactor": "ancor-interactor",
+    "interactor": "ancor",
     "coordinator": "ancor-coordination",
     "worker": "ancor-worker",
 }
@@ -80,7 +80,12 @@ def main() -> int:
     prompt_sources: dict[str, Path] = {}
     for role, skill in ROLES.items():
         prompt_sources[f"ancor-{role}/SOUL.md"] = repo / "roles" / f"ancor-{role}" / "SOUL.md"
-        prompt_sources[f"ancor-{role}/skills/{skill}/SKILL.md"] = repo / "skills" / skill / "SKILL.md"
+        skill_dir = repo / "skills" / skill
+        for source_path in sorted(skill_dir.rglob("*")):
+            if not source_path.is_file() or "__pycache__" in source_path.parts:
+                continue
+            relative = source_path.relative_to(repo / "skills").as_posix()
+            prompt_sources[f"ancor-{role}/skills/{relative}"] = source_path
     missing = [str(path) for path in prompt_sources.values() if not path.is_file()]
     if missing:
         raise SystemExit("missing release files: " + ", ".join(missing))

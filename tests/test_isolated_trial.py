@@ -36,6 +36,12 @@ def test_trial_refuses_provisioning_inside_credential_source(tmp_path, trial_mod
     assert not destination.exists()
 
 
+def test_trial_interactor_installs_command_skill_with_shared_standard(trial_module):
+    assert trial_module.role_skills('ancor-interactor') == ('ancor',)
+    assert trial_module.role_skills('ancor-coordinator') == ('ancor-coordination',)
+    assert trial_module.role_skills('ancor-worker') == ('ancor-worker',)
+
+
 def test_trial_model_recovery_stays_inside_trial_and_does_not_print_secrets(tmp_path, trial_module, capsys):
     root = tmp_path / 'trial'
     worker = root / 'profiles/ancor-worker'
