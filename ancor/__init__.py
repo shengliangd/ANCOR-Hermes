@@ -698,7 +698,7 @@ def register(ctx, *, scan_runner=None):
             # and only its exact native confirmation commits the answer.
             proposal = box.propose_response(identifier, args['answer'])
             return {'notification': notification_detail(existing),
-                    **service.response_presentation(proposal)}
+                    **service.prepared_response_presentation(proposal)}
         raise ValueError('unknown notification action')
 
     def request(args, **_native):
