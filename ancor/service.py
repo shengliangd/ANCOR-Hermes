@@ -144,6 +144,24 @@ class Service:
     def _presentation_digest(text):
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
+    def _open_desktop_preview(self, path, digest):
+        """Open the immutable Markdown file when its short clarify is submitted."""
+        dispatch = getattr(self.ctx, 'dispatch_tool', None)
+        if not callable(dispatch):
+            return False
+        try:
+            raw = dispatch('desktop_preview', {
+                'action': 'open', 'url': path,
+                'label': f'ANCOR 确认 · {digest[:12]}',
+            })
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            return (bool(payload.get('success')) and not payload.get('error')
+                    if isinstance(payload, dict) and 'success' in payload
+                    else not (isinstance(payload, dict) and payload.get('error')))
+        except Exception:
+            log.debug('ANCOR Desktop Markdown preview unavailable', exc_info=True)
+            return False
+
     def _desktop_clarify_args(self, kind, target, full_args, path, digest):
         """Concise Desktop clarify bound to the immutable Markdown file."""
         question = full_args['questions'][0]
@@ -467,6 +485,11 @@ class Service:
             expected = self._clarify_candidates(kind, target)
             if args not in expected:
                 raise ValueError('native clarify arguments must match the complete immutable proposal exactly')
+            if self._session_surface() in {'desktop', 'webapp'} and len(expected) > 1 and args == expected[1]:
+                response = self._raw_confirmation(kind, target)
+                digest = self._presentation_digest(response['presentation'])
+                if not self._open_desktop_preview(response['draft_file'], digest):
+                    raise ValueError('ANCOR Markdown preview could not be opened; open the file path manually and retry')
             with self._confirmations() as db:
                 existing = db.execute('SELECT kind, target, args, consumed FROM confirmations '
                                       'WHERE session=? AND call=?',

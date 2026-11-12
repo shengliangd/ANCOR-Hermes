@@ -15,13 +15,14 @@ from ancor.store import Store
 class PreviewContext:
     profile_name = 'ancor-interactor'
 
-    def __init__(self):
+    def __init__(self, response=None):
+        self.response = response if response is not None else {'success': True}
         self.calls = []
         self.config = {'coordinator_profile': 'ancor-coordinator', 'human_target': 'test:user'}
 
     def dispatch_tool(self, name, args):
         self.calls.append((name, args))
-        raise AssertionError('confirmation must not invoke desktop_preview automatically')
+        return json.dumps(self.response)
 
     def get_config(self, key, default=None):
         return self.config.get(key, default)
@@ -36,10 +37,10 @@ def set_surface(monkeypatch, surface):
     monkeypatch.setitem(sys.modules, 'hermes_cli.plugin_session', plugin_session)
 
 
-def create_change(tmp_path, monkeypatch, *, surface='desktop'):
+def create_change(tmp_path, monkeypatch, *, surface='desktop', preview_response=None):
     set_surface(monkeypatch, surface)
     store = Store(tmp_path / 'requests.db')
-    ctx = PreviewContext()
+    ctx = PreviewContext(preview_response)
     service = Service(ctx, store=store)
     result = service.change({
         'action': 'propose',
@@ -65,10 +66,10 @@ def submitted(question):
     }
 
 
-def make_case(tmp_path, monkeypatch, kind, *, surface='desktop'):
+def make_case(tmp_path, monkeypatch, kind, *, surface='desktop', preview_response=None):
     set_surface(monkeypatch, surface)
     store = Store(tmp_path / 'requests.db')
-    ctx = PreviewContext()
+    ctx = PreviewContext(preview_response)
     service = Service(ctx, store=store)
     request = store.confirm(store.create_draft('Base request')['id'], 'fixture')
     rid = request['id']
@@ -147,8 +148,23 @@ def test_desktop_clarify_binds_to_markdown_file_without_opening_it(tmp_path, mon
 
     args = proposal['clarify_args']
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
+    assert ctx.calls == [('desktop_preview', {
+        'action': 'open', 'url': str(path), 'label': f'ANCOR 确认 · {digest[:12]}',
+    })]
     service.post_tool_call('clarify', args, submitted(question), session_id='s', tool_call_id='c')
     assert store.get_change(proposal['id'])['committed_at'] is not None
+
+
+def test_preview_failure_blocks_the_short_desktop_confirmation(tmp_path, monkeypatch):
+    service, store, _, proposal = create_change(
+        tmp_path, monkeypatch, preview_response={'success': False, 'message': 'declined'})
+
+    blocked = service.pre_tool_call(
+        'clarify', proposal['clarify_args'], session_id='s', tool_call_id='c')
+
+    assert blocked['action'] == 'block'
+    assert 'preview could not be opened' in blocked['message']
+    assert store.get_change(proposal['id'])['committed_at'] is None
 
 
 def test_messaging_surface_uses_the_full_clarify(tmp_path, monkeypatch):
@@ -157,7 +173,7 @@ def test_messaging_surface_uses_the_full_clarify(tmp_path, monkeypatch):
 
     assert ctx.calls == []
     assert question.startswith('**创建请求')
-    assert 'Render **Markdown**' in question
+    assert '> Render \\*\\*Markdown\\*\\*' in question
     assert Path(proposal['draft_file']).suffix == '.md'
 
 
@@ -191,6 +207,10 @@ def test_every_ancor_confirmation_gets_a_bound_desktop_file(tmp_path, monkeypatc
     assert f'确认单：{kind}:{target}' in question['question']
     assert service.pre_tool_call(
         'clarify', response['clarify_args'], session_id='s', tool_call_id='c') is None
+    assert ctx.calls == [('desktop_preview', {
+        'action': 'open', 'url': response['draft_file'],
+        'label': f'ANCOR 确认 · {response["presentation_digest"][:12]}',
+    })]
     service.post_tool_call(
         'clarify', response['clarify_args'], submitted(question), session_id='s', tool_call_id='c')
     with sqlite3.connect(service.store.path + '.confirmations.db') as db:

@@ -32,7 +32,7 @@ def test_point_changes_show_exact_before_after_and_field_strength(atomic):
     assert text.startswith('**更新请求「Report」**  \n')
     assert '将目标改为建议' in text and point['body'] in without_formatting(text)
     assert '原内容：' in text and '新内容：' in text
-    assert '\n```\n  可选做法\n保持这个换行  \n```\n' in text
+    assert '\n>   可选做法\n> 保持这个换行  \n' in text
     assert '新增约束' in text and '撤回约束' in text
     assert '协调者会评估' in text
     for hidden in (rid, point['version_id'], p['id'], 'Base versions', 'Exact operations', 'version_id'):
@@ -106,9 +106,9 @@ def test_revocation_shows_exact_original_authorization(atomic):
     text = presentation(store, p)['presentation']
     assert '撤回授权' in text
     assert all(value in text for value in ('部署', '测试环境', '仅本次交付'))
-    assert '允许的动作：  \n```\n部署' in text
-    assert '对象：  \n```\n测试环境' in text
-    assert '适用范围：  \n```\n仅本次交付' in text
+    assert '允许的动作：  \n> 部署' in text
+    assert '对象：  \n> 测试环境' in text
+    assert '适用范围：  \n> 仅本次交付' in text
     assert grant['id'] not in text
 
 
@@ -142,7 +142,7 @@ def test_creation_and_conversion_present_full_content(tmp_path):
     legacy = store.confirm(store.create_draft('原始正文\n  保留格式')['id'], 'legacy')
     p = propose(store, legacy['id'], [{'op': 'convert', 'fields': {'outcome': ['新目标']}}])
     text = presentation(store, p)['presentation']
-    assert '原始正文\n  保留格式' in text and '整理后的完整要求' in text
+    assert '> 原始正文\n>   保留格式' in text and '整理后的完整要求' in text
 
 
 def test_multiline_content_stays_separate_from_confirmation_instructions(atomic):
@@ -151,9 +151,10 @@ def test_multiline_content_stays_separate_from_confirmation_instructions(atomic)
     p = propose(store, rid, [{'op': 'append', 'field': 'constraint', 'body': body}])
     text = presentation(store, p)['clarify_args']['questions'][0]['question']
     markdown = pytest.importorskip('markdown_it').MarkdownIt('commonmark')
-    fences = [token for token in markdown.parse(text) if token.type == 'fence']
-    assert len(fences) == 1
-    assert fences[0].content == body + '\n'
+    tokens = markdown.parse(text)
+    assert not any(token.type == 'fence' for token in tokens)
+    assert any(token.type == 'blockquote_open' for token in tokens)
+    assert '> 原文中的格式：\n>\n> \\`\\`\\`python\n> print\\("hello"\\)\n> \\`\\`\\`\n>\n> 提交说明\n>   保留缩进  ' in text
     assert '\n---\n**提交说明**  \n' in text
     assert text.endswith('确认单：' + p['id'][:12])
 
@@ -239,10 +240,10 @@ def test_repeated_title_changes_show_each_transition(atomic):
     store, rid = atomic
     p = propose(store, rid, [{'op': 'title', 'title': '中间名称'}, {'op': 'title', 'title': '最终名称'}])
     text = presentation(store, p)['presentation']
-    assert '原名称：  \n```\nReport\n' in text
-    assert '新名称：  \n```\n中间名称\n' in text
-    assert '原名称：  \n```\n中间名称\n' in text
-    assert '新名称：  \n```\n最终名称\n' in text
+    assert '原名称：  \n> Report\n' in text
+    assert '新名称：  \n> 中间名称\n' in text
+    assert '原名称：  \n> 中间名称\n' in text
+    assert '新名称：  \n> 最终名称\n' in text
 
 
 def test_prose_changes_show_both_exact_versions_in_literal_blocks(atomic):
@@ -253,8 +254,10 @@ def test_prose_changes_show_both_exact_versions_in_literal_blocks(atomic):
                              'body': '单次使用 1024k token。'}])
     text = presentation(store, p)['presentation']
     markdown = pytest.importorskip('markdown_it').MarkdownIt('commonmark')
-    fences = [token.content for token in markdown.parse(text) if token.type == 'fence']
-    assert fences == [point['body'] + '\n', '单次使用 1024k token。\n']
+    tokens = markdown.parse(text)
+    assert not any(token.type == 'fence' for token in tokens)
+    assert '> ' + point['body'] in text
+    assert '> 单次使用 1024k token。' in text
     assert '**512k**' not in text and '**1024k**' not in text
 
 
@@ -265,16 +268,14 @@ def test_source_markdown_cannot_hide_labels_or_fixed_instructions(atomic):
     p = propose(store, rid, [{'op': 'append', 'field': 'constraint', 'body': body}])
     text = presentation(store, p)['presentation']
     tokens = markdown.parse(text)
-    assert not any(token.type in {'code_block', 'html_block', 'heading_open'} for token in tokens)
-    fences = [token for token in tokens if token.type == 'fence']
-    assert len(fences) == 1 and fences[0].content == body + '\n'
+    assert not any(token.type in {'code_block', 'html_block', 'heading_open', 'fence'} for token in tokens)
+    assert sum(token.type == 'blockquote_open' for token in tokens) == 1
     inline = [token for token in tokens if token.type == 'inline']
     assert inline[-1].content.endswith('确认单：' + p['id'][:12])
     assert any(token.content.startswith('**提交说明**') for token in inline)
     rendered = markdown.render(text)
     assert '&lt;details&gt;' in rendered and '&amp;copy;' in rendered
     assert '<br />' in rendered
-    assert not any(token.type == 'blockquote_open' for token in tokens)
     assert '│ ' not in text
     assert '\n***\n' not in text
     strong_text = [child.content for token in inline for child in (token.children or [])

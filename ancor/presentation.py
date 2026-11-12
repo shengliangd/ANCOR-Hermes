@@ -70,9 +70,11 @@ def change_confirmation(store, db, rid, operations, identifier):
             for label, count in counts.items()))
 
     def body(text):
-        # A longer fence keeps embedded source fences inside the literal block.
-        fence = '`' * max(3, 1 + max((len(run) for run in re.findall(r'`+', text)), default=0))
-        lines.extend([fence, text, fence])
+        # Quote and escape source text line-by-line so user Markdown cannot
+        # swallow labels or fixed confirmation instructions.
+        for line in text.split('\n'):
+            escaped = _literal(line)
+            lines.append('> ' + escaped if escaped else '>')
 
     def value(label, text):
         lines.append(label + '  ')
