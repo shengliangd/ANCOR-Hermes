@@ -145,57 +145,30 @@ class Service:
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
     def _desktop_clarify_args(self, kind, target, full_args, path, digest):
-        """Concise Desktop clarify bound to the immutable Markdown preview."""
+        """Concise Desktop clarify bound to the immutable Markdown file."""
         question = full_args['questions'][0]
         return {'questions': [{
             **question,
-            'question': ('请在 Hermes 内置 Markdown 预览中核对完整 ANCOR 确认内容。\n'
+            'question': ('请打开以下 Markdown 文件核对完整 ANCOR 确认内容。\n'
                          f'文件：{path}\n'
-                         '若预览已关闭，可复制上面的路径重新打开。\n'
+                         '如无法直接打开，可复制上面的路径。\n'
                          f'内容摘要：{digest[:12]}\n'
                          f'确认单：{kind}:{target}'),
         }]}
 
-    def _open_desktop_preview(self, path, label, digest):
-        """Open the built-in Markdown viewer only for Desktop/Webapp sessions."""
-        if self._session_surface() not in {'desktop', 'webapp'}:
-            return False
-        dispatch = getattr(self.ctx, 'dispatch_tool', None)
-        if not callable(dispatch):
-            return False
-        try:
-            raw = dispatch('desktop_preview', {
-                'action': 'open', 'url': path,
-                'label': f'{label} · {digest[:12]}',
-            })
-            payload = json.loads(raw) if isinstance(raw, str) else raw
-            opened = (bool(payload.get('success')) and not payload.get('error')
-                      if isinstance(payload, dict) and 'success' in payload
-                      else not (isinstance(payload, dict) and payload.get('error')))
-            if opened:
-                marker = Path(str(path) + '.previewed')
-                marker.write_text(digest + '\n', encoding='utf-8')
-                marker.chmod(0o600)
-            return opened
-        except Exception:
-            log.debug('ANCOR Desktop Markdown preview unavailable', exc_info=True)
-            return False
-
     def _prepare_confirmation(self, kind, response):
-        """Open a bound Markdown preview and shorten clarify only after success."""
+        """Bind a Desktop confirmation to its immutable Markdown file."""
         text = response.get('presentation')
         path = response.get('draft_file')
         identifier = response.get('id')
         if not text or not path or not identifier:
             return response
         digest = self._presentation_digest(text)
-        opened = self._open_desktop_preview(path, 'ANCOR 确认', digest)
         response['presentation_digest'] = digest
-        response['desktop_preview'] = {'opened': opened, 'file': path}
-        if opened:
+        if self._session_surface() in {'desktop', 'webapp'}:
             response['clarify_args'] = self._desktop_clarify_args(
                 kind, identifier, response['clarify_args'], path, digest)
-            response['next_step'] = ('Use the unchanged concise clarify_args. The opened immutable Markdown file '
+            response['next_step'] = ('Use the unchanged concise clarify_args. The immutable Markdown file '
                                      'is the complete confirmation content; only the native confirmation commits it.')
         return response
 
@@ -216,7 +189,7 @@ class Service:
         raise ValueError(f'unknown ANCOR confirmation kind {kind!r}')
 
     def _clarify_candidates(self, kind, target):
-        """Full clarify plus the digest-bound Desktop variant when preview succeeded."""
+        """Full clarify plus the digest-bound Desktop variant."""
         response = self._raw_confirmation(kind, target)
         full = response['clarify_args']
         text = response['presentation']
@@ -224,13 +197,7 @@ class Service:
         digest = self._presentation_digest(text)
         candidates = [full]
         if self._session_surface() in {'desktop', 'webapp'}:
-            marker = Path(path + '.previewed')
-            try:
-                previewed = marker.read_text(encoding='utf-8').strip() == digest
-            except OSError:
-                previewed = False
-            if previewed:
-                candidates.append(self._desktop_clarify_args(kind, target, full, path, digest))
+            candidates.append(self._desktop_clarify_args(kind, target, full, path, digest))
         return candidates
 
     def change_presentation(self, proposal):

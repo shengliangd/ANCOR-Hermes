@@ -1,4 +1,4 @@
-"""Desktop Markdown previews remain optional while the native clarify stays authoritative."""
+"""Desktop confirmations bind to Markdown files while native clarify stays authoritative."""
 import json
 from pathlib import Path
 import sqlite3
@@ -15,14 +15,13 @@ from ancor.store import Store
 class PreviewContext:
     profile_name = 'ancor-interactor'
 
-    def __init__(self, response=None):
-        self.response = response if response is not None else {'success': True}
+    def __init__(self):
         self.calls = []
         self.config = {'coordinator_profile': 'ancor-coordinator', 'human_target': 'test:user'}
 
     def dispatch_tool(self, name, args):
         self.calls.append((name, args))
-        return json.dumps(self.response)
+        raise AssertionError('confirmation must not invoke desktop_preview automatically')
 
     def get_config(self, key, default=None):
         return self.config.get(key, default)
@@ -37,10 +36,10 @@ def set_surface(monkeypatch, surface):
     monkeypatch.setitem(sys.modules, 'hermes_cli.plugin_session', plugin_session)
 
 
-def create_change(tmp_path, monkeypatch, *, surface='desktop', preview_response=None):
+def create_change(tmp_path, monkeypatch, *, surface='desktop'):
     set_surface(monkeypatch, surface)
     store = Store(tmp_path / 'requests.db')
-    ctx = PreviewContext(preview_response)
+    ctx = PreviewContext()
     service = Service(ctx, store=store)
     result = service.change({
         'action': 'propose',
@@ -66,10 +65,10 @@ def submitted(question):
     }
 
 
-def make_case(tmp_path, monkeypatch, kind, *, surface='desktop', preview_response=None):
+def make_case(tmp_path, monkeypatch, kind, *, surface='desktop'):
     set_surface(monkeypatch, surface)
     store = Store(tmp_path / 'requests.db')
-    ctx = PreviewContext(preview_response)
+    ctx = PreviewContext()
     service = Service(ctx, store=store)
     request = store.confirm(store.create_draft('Base request')['id'], 'fixture')
     rid = request['id']
@@ -130,20 +129,18 @@ def make_case(tmp_path, monkeypatch, kind, *, surface='desktop', preview_respons
 
 
 @pytest.mark.parametrize('surface', ['desktop', 'webapp'])
-def test_desktop_preview_binds_short_clarify_to_markdown_file(tmp_path, monkeypatch, surface):
+def test_desktop_clarify_binds_to_markdown_file_without_opening_it(tmp_path, monkeypatch, surface):
     service, store, ctx, proposal = create_change(tmp_path, monkeypatch, surface=surface)
     question = proposal['clarify_args']['questions'][0]
     path = Path(proposal['draft_file'])
     digest = proposal['presentation_digest']
 
-    assert ctx.calls == [('desktop_preview', {
-        'action': 'open', 'url': str(path), 'label': f'ANCOR 确认 · {digest[:12]}',
-    })]
+    assert ctx.calls == []
     assert path.suffix == '.md' and digest[:12] in path.name
     assert path.read_text(encoding='utf-8') == proposal['presentation']
     assert path.stat().st_mode & 0o777 == 0o600
     assert f'文件：{path}' in question['question']
-    assert '若预览已关闭，可复制上面的路径重新打开。' in question['question']
+    assert '如无法直接打开，可复制上面的路径。' in question['question']
     assert f'内容摘要：{digest[:12]}' in question['question']
     assert f'确认单：change:{proposal["id"]}' in question['question']
     assert 'Render **Markdown**' not in question['question']
@@ -154,29 +151,7 @@ def test_desktop_preview_binds_short_clarify_to_markdown_file(tmp_path, monkeypa
     assert store.get_change(proposal['id'])['committed_at'] is not None
 
 
-def test_preview_failure_keeps_the_complete_native_clarify(tmp_path, monkeypatch):
-    service, _, ctx, proposal = create_change(
-        tmp_path, monkeypatch, preview_response={'error': 'preview unavailable'})
-    question = proposal['clarify_args']['questions'][0]['question']
-
-    assert len(ctx.calls) == 1
-    assert question.startswith('**创建请求')
-    assert 'Render **Markdown**' in question
-    assert '内容摘要：' not in question
-    assert service.pre_tool_call(
-        'clarify', proposal['clarify_args'], session_id='s', tool_call_id='c') is None
-
-
-def test_preview_unsuccessful_result_keeps_the_complete_native_clarify(tmp_path, monkeypatch):
-    _, _, _, proposal = create_change(
-        tmp_path, monkeypatch, preview_response={'success': False, 'message': 'declined'})
-    question = proposal['clarify_args']['questions'][0]['question']
-
-    assert question.startswith('**创建请求')
-    assert proposal['desktop_preview']['opened'] is False
-
-
-def test_messaging_surface_neither_previews_nor_uses_the_desktop_variant(tmp_path, monkeypatch):
+def test_messaging_surface_uses_the_full_clarify(tmp_path, monkeypatch):
     _, _, ctx, proposal = create_change(tmp_path, monkeypatch, surface='feishu')
     question = proposal['clarify_args']['questions'][0]['question']
 
@@ -205,11 +180,11 @@ CONFIRMATION_KINDS = [
 
 
 @pytest.mark.parametrize('kind', CONFIRMATION_KINDS)
-def test_every_ancor_confirmation_gets_a_bound_desktop_preview(tmp_path, monkeypatch, kind):
+def test_every_ancor_confirmation_gets_a_bound_desktop_file(tmp_path, monkeypatch, kind):
     service, _, ctx, response, target = make_case(tmp_path, monkeypatch, kind)
     question = response['clarify_args']['questions'][0]
 
-    assert len(ctx.calls) == 1 and ctx.calls[0][0] == 'desktop_preview'
+    assert ctx.calls == []
     assert Path(response['draft_file']).suffix == '.md'
     assert f'文件：{response["draft_file"]}' in question['question']
     assert f'内容摘要：{response["presentation_digest"][:12]}' in question['question']
