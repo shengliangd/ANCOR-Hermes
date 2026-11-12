@@ -22,7 +22,7 @@ def change_confirmation(store, db, rid, operations, identifier):
         verb = {'accept': '验收请求', 'pause': '暂停请求', 'resume': '恢复请求',
                 'cancel': '取消请求', 'request_changes': '要求返工',
                 'reply': '回复问题', 'title': '修改请求名称'}.get(operations[0]['op'], verb)
-    lines = [f'**{verb}「{_literal(title)}」**  ']
+    lines = [f'**{verb}「{_literal(title)}」**']
     groups = {'内容变更': [], '授权调整': [], '问题处理': [], '状态与验收': []}
     questions = {}
     for op in operations:
@@ -65,36 +65,45 @@ def change_confirmation(store, db, rid, operations, identifier):
     groups = {label: items for label, items in groups.items() if items}
     if len(operations) > 1:
         counts = Counter(item['label'] for items in groups.values() for item in items)
-        lines.append(' · '.join(
+        lines.extend(['', ' · '.join(
             f'{label} {count} {"个" if label.endswith("问题") else "项"}'
-            for label, count in counts.items()))
+            for label, count in counts.items())])
+
+    def blank():
+        if not lines or lines[-1] != '':
+            lines.append('')
 
     def body(text):
         # Quote and escape source text line-by-line so user Markdown cannot
-        # swallow labels or fixed confirmation instructions.
+        # swallow labels or fixed confirmation instructions. Hard breaks
+        # preserve authored line boundaries inside the quote, while blank
+        # quote lines preserve paragraph breaks.
+        blank()
         for line in text.split('\n'):
             escaped = _literal(line)
-            lines.append('> ' + escaped if escaped else '>')
+            lines.append('> ' + escaped + '  ' if escaped else '>')
+        blank()
 
     def value(label, text):
-        lines.append(label + '  ')
+        blank()
+        lines.append(label)
         body(text)
 
     number = 0
     content_changed = False
     for group, items in groups.items():
-        lines.extend(['', '---'])
-        if len(groups) > 1:
-            lines.append(f'### {group}')
+        lines.extend(['', '---', '', f'### {group}', ''])
         for item in items:
             number += 1
-            lines.append(f"**{number}. {item['label']}**  ")
+            lines.extend([f"#### {number}. {item['label']}", ''])
             op = item['op']
             kind = op['op']
             if kind in {'create', 'convert'}:
                 if kind == 'convert':
                     value('原请求正文：', request['brief'])
-                    lines.append('整理后的完整要求：  ')
+                    blank()
+                    lines.append('整理后的完整要求：')
+                    blank()
                 for field in FIELD_ORDER:
                     for index, text in enumerate(op['fields'].get(field, []), 1):
                         value(f'{LABELS[field]} {index}：', text)
@@ -123,14 +132,20 @@ def change_confirmation(store, db, rid, operations, identifier):
                 if reason is not None:
                     if not shared_reason:
                         value('解决依据：', reason)
-                    lines.append('提交后：将问题标记为已解决。  ')
+                    blank()
+                    lines.append('提交后：将问题标记为已解决。')
+                    blank()
                 else:
-                    lines.append('本次仅记录回复，问题保持开放。  ')
+                    blank()
+                    lines.append('本次仅记录回复，问题保持开放。')
+                    blank()
             elif kind in {'pause', 'resume', 'cancel'}:
                 value('原因：', op['reason'])
-                lines.extend([{'pause': '确认后，系统将停止相关执行；暂停完成前会显示处理中。',
-                               'resume': '确认后，协调者将重新检查现有工作并安排继续执行。',
-                               'cancel': '确认后，系统将结束相关任务，历史记录会保留。'}[kind] + '  '])
+                blank()
+                lines.append({'pause': '确认后，系统将停止相关执行；暂停完成前会显示处理中。',
+                              'resume': '确认后，协调者将重新检查现有工作并安排继续执行。',
+                              'cancel': '确认后，系统将结束相关任务，历史记录会保留。'}[kind])
+                blank()
             elif kind == 'request_changes':
                 body(op['feedback'])
             elif kind == 'accept':
@@ -158,9 +173,9 @@ def change_confirmation(store, db, rid, operations, identifier):
                 value('允许的动作：', grant['action'])
                 value('对象：', grant['target'])
                 value('适用范围：', grant['scope'])
-    lines.extend(['', '---', '**提交说明**  '])
+    lines.extend(['', '---', '', '**提交说明**', ''])
     if content_changed:
-        lines.append('确认后，协调者会评估这些要求，并据此安排或调整工作。  ')
-    lines.extend(['请确认以上内容。  ', f'确认单：{identifier[:12]}'])
+        lines.extend(['确认后，协调者会评估这些要求，并据此安排或调整工作。', ''])
+    lines.extend(['请确认以上内容。', '', f'确认单：{identifier[:12]}'])
     return {'questions': [{'question': '\n'.join(lines),
                            'choices': ['暂不提交', '确认提交'], 'multi_select': False}]}

@@ -29,10 +29,11 @@ def test_point_changes_show_exact_before_after_and_field_strength(atomic):
     ])
     view = presentation(store, p)
     text = view['clarify_args']['questions'][0]['question']
-    assert text.startswith('**更新请求「Report」**  \n')
+    assert text.startswith('**更新请求「Report」**\n\n')
     assert '将目标改为建议' in text and point['body'] in without_formatting(text)
     assert '原内容：' in text and '新内容：' in text
-    assert '\n>   可选做法\n> 保持这个换行  \n' in text
+    assert '\n>   可选做法' in text
+    assert '\n> 保持这个换行' in text
     assert '新增约束' in text and '撤回约束' in text
     assert '协调者会评估' in text
     for hidden in (rid, point['version_id'], p['id'], 'Base versions', 'Exact operations', 'version_id'):
@@ -106,9 +107,9 @@ def test_revocation_shows_exact_original_authorization(atomic):
     text = presentation(store, p)['presentation']
     assert '撤回授权' in text
     assert all(value in text for value in ('部署', '测试环境', '仅本次交付'))
-    assert '允许的动作：  \n> 部署' in text
-    assert '对象：  \n> 测试环境' in text
-    assert '适用范围：  \n> 仅本次交付' in text
+    assert '允许的动作：\n\n> 部署  ' in text
+    assert '对象：\n\n> 测试环境  ' in text
+    assert '适用范围：\n\n> 仅本次交付  ' in text
     assert grant['id'] not in text
 
 
@@ -134,15 +135,15 @@ def test_creation_and_conversion_present_full_content(tmp_path):
     p = propose(store, None, [{'op': 'create', 'title': '新报告', 'fields': {
         'outcome': ['生成报告'], 'constraint': ['不能联网'], 'advice': ['参考旧版'], 'context': ['数据在本地']}}])
     text = presentation(store, p)['presentation']
-    assert text.startswith('**创建请求「新报告」**  \n')
+    assert text.startswith('**创建请求「新报告」**\n\n')
     assert all(body in text for body in ('生成报告', '不能联网', '参考旧版', '数据在本地'))
     assert text.index('目标') < text.index('背景') < text.index('建议') < text.index('约束')
     for label in ('目标', '背景', '建议', '约束'):
-        assert text.count(f'\n{label} 1：  \n') == 1
+        assert text.count(f'\n{label} 1：\n\n') == 1
     legacy = store.confirm(store.create_draft('原始正文\n  保留格式')['id'], 'legacy')
     p = propose(store, legacy['id'], [{'op': 'convert', 'fields': {'outcome': ['新目标']}}])
     text = presentation(store, p)['presentation']
-    assert '> 原始正文\n>   保留格式' in text and '整理后的完整要求' in text
+    assert '> 原始正文  \n>   保留格式' in text and '整理后的完整要求' in text
 
 
 def test_multiline_content_stays_separate_from_confirmation_instructions(atomic):
@@ -154,8 +155,9 @@ def test_multiline_content_stays_separate_from_confirmation_instructions(atomic)
     tokens = markdown.parse(text)
     assert not any(token.type == 'fence' for token in tokens)
     assert any(token.type == 'blockquote_open' for token in tokens)
-    assert '> 原文中的格式：\n>\n> \\`\\`\\`python\n> print\\("hello"\\)\n> \\`\\`\\`\n>\n> 提交说明\n>   保留缩进  ' in text
-    assert '\n---\n**提交说明**  \n' in text
+    assert ('> 原文中的格式：  \n>\n> \\`\\`\\`python  \n> print\\("hello"\\)  \n'
+            '> \\`\\`\\`  \n>\n> 提交说明  \n>   保留缩进') in text
+    assert '\n---\n\n**提交说明**\n\n' in text
     assert text.endswith('确认单：' + p['id'][:12])
 
 
@@ -183,7 +185,7 @@ def test_mixed_change_has_counted_sections_and_one_question_body(atomic):
     assert '修改约束 2 项 · 撤回授权 2 项 · 授予授权 1 项 · 回复并解决问题 1 个' in text
     assert '**本次变更**' not in text
     assert text.index('### 内容变更') < text.index('### 授权调整') < text.index('### 问题处理')
-    assert re.findall(r'^\*\*(\d+)\. ', text, re.M) == ['1', '2', '3', '4', '5', '6']
+    assert re.findall(r'^#### (\d+)\. ', text, re.M) == ['1', '2', '3', '4', '5', '6']
     assert text.count('是否调整本次测试的累计上限？') == 1
     for grant in grants:
         assert grant['scope'] in text
@@ -240,10 +242,10 @@ def test_repeated_title_changes_show_each_transition(atomic):
     store, rid = atomic
     p = propose(store, rid, [{'op': 'title', 'title': '中间名称'}, {'op': 'title', 'title': '最终名称'}])
     text = presentation(store, p)['presentation']
-    assert '原名称：  \n> Report\n' in text
-    assert '新名称：  \n> 中间名称\n' in text
-    assert '原名称：  \n> 中间名称\n' in text
-    assert '新名称：  \n> 最终名称\n' in text
+    assert '原名称：\n\n> Report  \n' in text
+    assert '新名称：\n\n> 中间名称  \n' in text
+    assert '原名称：\n\n> 中间名称  \n' in text
+    assert '新名称：\n\n> 最终名称  \n' in text
 
 
 def test_prose_changes_show_both_exact_versions_in_literal_blocks(atomic):
@@ -268,7 +270,12 @@ def test_source_markdown_cannot_hide_labels_or_fixed_instructions(atomic):
     p = propose(store, rid, [{'op': 'append', 'field': 'constraint', 'body': body}])
     text = presentation(store, p)['presentation']
     tokens = markdown.parse(text)
-    assert not any(token.type in {'code_block', 'html_block', 'heading_open', 'fence'} for token in tokens)
+    assert not any(token.type in {'code_block', 'html_block', 'fence'} for token in tokens)
+    headings = []
+    for index, token in enumerate(tokens):
+        if token.type == 'heading_open':
+            headings.append((token.tag, tokens[index + 1].content))
+    assert headings == [('h3', '内容变更'), ('h4', '1. 新增约束')]
     assert sum(token.type == 'blockquote_open' for token in tokens) == 1
     inline = [token for token in tokens if token.type == 'inline']
     assert inline[-1].content.endswith('确认单：' + p['id'][:12])
@@ -280,5 +287,5 @@ def test_source_markdown_cannot_hide_labels_or_fixed_instructions(atomic):
     assert '\n***\n' not in text
     strong_text = [child.content for token in inline for child in (token.children or [])
                    if child.type == 'text']
-    assert '1. 新增约束' in strong_text and '提交说明' in strong_text
+    assert '提交说明' in strong_text
     assert sum(token.type == 'hr' for token in tokens) == 2

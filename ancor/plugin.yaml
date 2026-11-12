@@ -1,5 +1,5 @@
 name: ancor
-version: 0.8.0
+version: 0.8.1
 description: Durable requests and interactor/coordinator workflow over native Hermes Kanban.
 provides_tools:
   - ancor_request
