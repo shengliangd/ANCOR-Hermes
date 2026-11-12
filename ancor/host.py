@@ -13,6 +13,9 @@ from pathlib import Path
 import time
 
 from .board import NativeBoard
+from .event_policy import is_wake_event, payload_dict
+from .execution_guard import (freeze_execution_unknown, is_execution_unknown,
+                              is_execution_unknown_hold)
 from .runtime import Coordinator
 from .views import completion_id
 from .store import Store
@@ -159,23 +162,32 @@ class Host:
                 # heartbeats and scheduling bookkeeping must not self-wake.
                 # Native auto_blocked is a DispatchResult field; its durable
                 # circuit-breaker event is gave_up (not auto_blocked).
-                details = event.get('payload') or {}
-                if isinstance(details, str):
+                details = payload_dict(event)
+                unknown = (event['kind'] == 'crashed'
+                           and is_execution_unknown(details))
+                if unknown:
+                    # The owner hook normally freezes before the next dispatch.
+                    # Repeating the guard here covers plugin reloads, older
+                    # dispatchers, and a hook write that raced with shutdown.
                     try:
-                        details = json.loads(details)
-                    except ValueError:
-                        details = {}
-                initial_hold = (event['kind'] == 'blocked' and isinstance(details, dict)
-                                and details.get('reason') == 'initial_status'
-                                and details.get('status') == 'blocked')
-                if not initial_hold and event['kind'] in {
-                    'completed', 'blocked', 'review_requested', 'dependency_wait',
-                    'gave_up', 'timed_out', 'spawn_failed', 'crashed', 'stale',
-                    'rate_limited', 'block_loop_detected', 'protocol_violation',
-                    'completion_blocked_hallucination', 'completion_blocked_empty_result',
-                    'suspected_hallucinated_references', 'changes_requested',
-                    'descendant_invalidated',
-                }:
+                        freeze_execution_unknown(
+                            task_id, board=self.board_name, run_id=event.get('run_id'))
+                    except Exception:
+                        log.exception('ANCOR execution freeze failed for task %s', task_id)
+                    event = {
+                        **event,
+                        'payload': {
+                            **details,
+                            'ancor_classification': 'execution_unknown',
+                            'reconcile_before_retry': True,
+                        },
+                    }
+                    self.store.add_event(
+                        'native.execution_unknown', event,
+                        source_key=f"native:{self.board_name}:{event['id']}")
+                elif not is_execution_unknown_hold(event) and is_wake_event(event):
+                    # Heartbeats and bookkeeping reach this cursor only as the
+                    # ignored page watermark; they never create model work.
                     self.store.add_event('native.' + event['kind'], event,
                         source_key=f"native:{self.board_name}:{event['id']}")
                 # Advance only this task after durable ingestion. Store source

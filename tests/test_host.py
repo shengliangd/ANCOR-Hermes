@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from ancor.board import NativeBoard
+from ancor.execution_guard import FREEZE_REASON
 from ancor.host import Host, child_environment, coordinator_command, scan_runner
 from ancor.store import Store
 from native_hermes import native_source_or_skip
@@ -328,6 +329,39 @@ def test_native_event_api_to_store_and_prompt(tmp_path, monkeypatch):
     assert host.pending(32)[0]['kind'] == 'native.blocked'
     assert host.pending(32)[0]['payload']['task_id'] == 'worker'
     assert host.state()['task_cursors'] == {'worker': 9}
+
+
+def test_execution_unknown_is_frozen_and_projected_as_reconciliation(tmp_path, monkeypatch):
+    ctx = Context(tmp_path / 'store.db')
+    store = Store(ctx.config['store_path'])
+    req = store.confirm(store.create_draft('deliver')['id'], 'human:1')
+    store.link_task(req['id'], 't1')
+    store.ack_events([e['id'] for e in store.pending_events()])
+    board = Board({'id': 't1', 'status': 'blocked'})
+    board.history = [{
+        'id': 17, 'task_id': 't1', 'kind': 'crashed', 'run_id': 42,
+        'payload': {'worker_output': 'Kanban owner refused: Kanban execution unknown'}}]
+    host = Host(ctx, store=store, board=board, db_path=tmp_path / 'native.db')
+    frozen = []
+    monkeypatch.setattr('ancor.host.freeze_execution_unknown',
+                        lambda task_id, **kwargs: frozen.append((task_id, kwargs)))
+
+    host.scan()
+
+    assert frozen == [('t1', {'board': 'test-board', 'run_id': 42})]
+    pending = pending_native(store)
+    assert [event['kind'] for event in pending] == ['native.execution_unknown']
+    assert pending[0]['payload']['payload']['ancor_classification'] == 'execution_unknown'
+    assert pending[0]['payload']['payload']['reconcile_before_retry'] is True
+    assert host.state()['task_cursors'] == {'t1': 17}
+
+    store.ack_events([event['id'] for event in pending])
+    board.history.append({
+        'id': 18, 'task_id': 't1', 'kind': 'blocked', 'run_id': 43,
+        'payload': {'reason': FREEZE_REASON, 'kind': 'capability'}})
+    host.scan()
+    assert pending_native(store) == []
+    assert host.state()['task_cursors'] == {'t1': 18}
 
 
 def test_idle_never_spawns(tmp_path, monkeypatch):

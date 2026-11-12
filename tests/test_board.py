@@ -70,6 +70,26 @@ def test_native_events_read_only_and_bounded(tmp_path, monkeypatch):
         NativeBoard.events(tmp_path / 'missing.db', ['a'])
 
 
+def test_native_event_read_coalesces_heartbeat_backlog(tmp_path, monkeypatch):
+    source = native_source_or_skip()
+    monkeypatch.syspath_prepend(str(source))
+    path = tmp_path / 'native.db'
+    rows = [(identifier, 'a', 'heartbeat', '{}', identifier, None)
+            for identifier in range(1, 151)]
+    rows.append((151, 'a', 'completed', '{}', 151, 1))
+    rows.extend((identifier, 'a', 'heartbeat', '{}', identifier, None)
+                for identifier in range(152, 250))
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT, created_at INTEGER, run_id INTEGER)')
+        conn.executemany('INSERT INTO task_events VALUES (?, ?, ?, ?, ?, ?)', rows)
+
+    events = NativeBoard.events(path, ['a'], limit=100)
+
+    assert [event['id'] for event in events] == [151, 249]
+    assert events[0]['kind'] == 'completed'
+    assert events[1]['kind'] == 'heartbeat'
+
+
 def test_guard_blocks_stale_but_not_unrelated(tmp_path):
     tasks = [
         {'id': 'stale', 'status': 'running', 'body': 'ANCOR-LINK:{"request_id":"r1","revision":1,"key":"a"}'},

@@ -1,5 +1,5 @@
 name: ancor
-version: 0.7.0
+version: 0.8.0
 description: Durable requests and interactor/coordinator workflow over native Hermes Kanban.
 provides_tools:
   - ancor_request
@@ -19,6 +19,7 @@ provides_hooks:
   - post_tool_call
   - transform_tool_result
   - kanban_task_blocked
+  - on_kanban_worker_exited
 config_schema:
   interactor_profile:
     type: string

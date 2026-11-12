@@ -172,7 +172,14 @@ def _validate_action_request(name, args):
 def register(ctx, *, scan_runner=None):
     if scan_runner is None:
         from .host import scan_runner
-    if ctx.profile_name == ctx.get_config('owner_profile', 'default') and ctx.get_config('gateway_owner', False):
+    owner = (ctx.profile_name == ctx.get_config('owner_profile', 'default')
+             and ctx.get_config('gateway_owner', False))
+    if owner and hasattr(ctx, 'register_hook'):
+        from .execution_guard import execution_recovery_hook
+        ctx.register_hook('on_kanban_worker_exited', execution_recovery_hook(
+            ctx.get_config('board')))
+
+    if owner:
         def connected(native, adapter):
             # Hermes owns plugin registrations per discovery generation: force re-discovery
             # disposes them (including supervised tasks), while same-key plugins are not
@@ -208,6 +215,10 @@ def register(ctx, *, scan_runner=None):
     coordinator = ctx.profile_name == coordinator_profile
     worker = ctx.profile_name == ctx.get_config('worker_profile', 'ancor-worker')
     if not interactor and not coordinator and not worker:
+        if owner and hasattr(ctx, 'register_hook'):
+            from .block_guard import block_guard_hook
+            ctx.register_hook('kanban_task_blocked', block_guard_hook(
+                ctx.get_config('board'), ctx.get_config('block_unblock_cycles', 3)))
         return
     # Native locale layers are available on newer Hermes hosts. The layer is
     # gateway-wide: confirmations already offer an explicit 'do not submit' choice.

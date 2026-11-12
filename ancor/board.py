@@ -11,6 +11,8 @@ import json
 import logging
 import subprocess
 
+from .event_policy import coalesce_native_events
+
 log = logging.getLogger(__name__)
 
 
@@ -47,7 +49,11 @@ class NativeBoard:
                     for event in list_events(conn, task_id) if event.id > after}
         finally:
             conn.close()
-        return [rows[key] for key in sorted(rows)[:limit]]
+        # Heartbeats and other bookkeeping can dominate a task's event history.
+        # Keep every actionable event in the window and collapse the remaining
+        # ignored backlog to its newest row as a cursor watermark.
+        return coalesce_native_events(
+            [rows[key] for key in sorted(rows)], limit=limit)
 
     def list(self):
         tasks = self._call('list', '--archived')

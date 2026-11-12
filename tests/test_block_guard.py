@@ -88,12 +88,14 @@ def test_hook_coerces_the_configured_ceiling(monkeypatch):
     assert seen == [5, guard.DEFAULT_UNBLOCK_CEILING]
 
 
-def registered_hooks(profile):
+def registered_hooks(profile, **overrides):
     hooks = {}
+    config = {'board': 'ancor', **overrides}
     ctx = SimpleNamespace(profile_name=profile,
-                          get_config=lambda key, default=None: default,
+                          get_config=lambda key, default=None: config.get(key, default),
                           register_hook=lambda name, callback: hooks.setdefault(name, []).append(callback),
-                          register_tool=lambda **kwargs: None)
+                          register_tool=lambda **kwargs: None,
+                          register_platform_handler=lambda *_args: None)
     ancor.register(ctx)
     return hooks
 
@@ -105,3 +107,9 @@ def test_coordinator_and_worker_register_the_block_observer():
 
 def test_interactor_does_not_register_the_block_observer():
     assert 'kanban_task_blocked' not in registered_hooks('ancor-interactor')
+
+
+def test_gateway_owner_registers_execution_recovery_and_block_guard():
+    hooks = registered_hooks('default', gateway_owner=True)
+    assert 'on_kanban_worker_exited' in hooks
+    assert 'kanban_task_blocked' in hooks
