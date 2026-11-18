@@ -43,7 +43,8 @@ def long_lived_request(tmp_path, monkeypatch):
         box.close_questions({f'q-{i}': 'resolved'}, closed_by='host')
     store.ack_events([e['id'] for e in store.pending_events()])
     monkeypatch.setattr('ancor.board.NativeBoard.list', lambda self: cards)
-    config = {'store_path': store.path, 'board': 'ancor', 'human_target': 'test:destination'}
+    config = {'store_path': store.path, 'board': 'ancor', 'human_target': 'test:destination',
+              'tool_api': 'legacy'}
 
     def register(role):
         tools = {}

@@ -16,7 +16,8 @@ from ancor.store import Store
 def registered(tmp_path, monkeypatch):
     tools = {}
     config = {'store_path': str(tmp_path / 'db'), 'board': 'test',
-              'human_target': 'test:destination', 'transport_profile': 'test'}
+              'human_target': 'test:destination', 'transport_profile': 'test',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(profile_name='ancor-coordinator',
         get_config=lambda key, default=None: config.get(key, default),
         register_tool=lambda **kw: tools.update({kw['name']: kw}),

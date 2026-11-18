@@ -224,7 +224,8 @@ class NativeBoard:
                 self.guard_state['stopped'].append(task['id'])
         return self.guard_state['stopped']
 
-    def create(self, request_id, revision, key, *, title, body, assignee, parent_ids=(), hold=False):
+    def create(self, request_id, revision, key, *, title, body, assignee, parent_ids=(),
+               hold=False, max_runtime_seconds=None):
         link = {'request_id': request_id, 'revision': revision, 'key': key}
         encoded = json.dumps(link, sort_keys=True, separators=(',', ':'))
         # Native idempotency + in-body metadata survives a crash before store linking.
@@ -233,6 +234,8 @@ class NativeBoard:
                           '--assignee', assignee, '--idempotency-key', token,
                           '--created-by', 'ancor-coordinator', '--initial-status', 'blocked' if hold else 'running',
                           *(flag for parent in parent_ids for flag in ('--parent', parent)),
+                          *([] if max_runtime_seconds is None else
+                            ('--max-runtime', f'{int(max_runtime_seconds)}s')),
                           '--completion-contract', 'local-only')
         detail = self._call('show', task['id'])
         actual = detail['task']

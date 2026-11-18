@@ -147,6 +147,8 @@ class Context(PluginContext):
         if key == 'store_path':
             import os
             return os.path.join(os.environ['HOME'], 'requests.db')
+        if key == 'tool_api':
+            return 'legacy'
         return default
 ctx = Context(PluginManifest(name='ancor'), manager)
 ancor.register(ctx)
@@ -197,34 +199,21 @@ def test_only_ancor_roles_have_business_tools():
         plugin.register(ctx)
         assert bool(tools) is expected
         if role == 'ancor-interactor':
-            assert set(tools) == {'ancor_request', 'ancor_get_context', 'ancor_board', 'ancor_notify', 'ancor_change', 'ancor_question', 'ancor_signal'}
-            assert tools['ancor_request']['schema']['parameters']['properties']['action']['enum'] == [
-                'draft', 'confirm', 'cancel', 'pause', 'resume', 'respond',
-                'accept', 'request_changes']
-            forbidden = json.loads(tools['ancor_request']['handler']({
-                'action': 'advance', 'request_id': 'fixture'}))
-            assert forbidden['code'] == 'forbidden'
-            assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == [
-                'list', 'respond']
-            assert set(tools['ancor_get_context']['schema']['parameters']['properties']) == {
-                'request_id', 'task_limit', 'notification_limit',
-                'attention_limit', 'include_done', 'include_archived',
-                'include_closed_notifications', 'progress_only', 'include_content',
-                'include_history', 'before_id'}
-            assert tools['ancor_board']['schema']['parameters']['properties']['action']['enum'] == ['list', 'show', 'history']
+            assert len(tools) == 21
+            assert {'ancor_overview', 'ancor_request_get', 'ancor_request_draft',
+                    'ancor_change_propose', 'ancor_task_show', 'ancor_signal_propose'} <= set(tools)
+            assert not {'ancor_request_advance', 'ancor_task_create', 'ancor_note_add'} & set(tools)
+            assert set(tools['ancor_request_draft']['schema']['parameters']['properties']) == {
+                'title', 'brief', 'summary', 'replacement_of'}
+            assert 'action' not in tools['ancor_request_draft']['schema']['parameters']['properties']
         elif role == 'ancor-coordinator':
-            assert set(tools) == {'ancor_request', 'ancor_get_context',
-                                  'ancor_ack_events', 'ancor_acceptance',
-                                  'ancor_board', 'ancor_wake', 'ancor_notify',
-                                  'ancor_note', 'ancor_change', 'ancor_question', 'ancor_reconcile'}
-            assert tools['ancor_request']['schema']['parameters']['properties']['action']['enum'] == ['advance']
-            forbidden = json.loads(tools['ancor_request']['handler']({
-                'action': 'draft', 'title': 'No', 'brief': 'No'}))
-            assert forbidden['code'] == 'forbidden'
-            assert tools['ancor_notify']['schema']['parameters']['properties']['action']['enum'] == ['send', 'list', 'withdraw']
-            assert 'contract' in tools['ancor_board']['schema']['parameters']['properties']
-            assert tools['ancor_note']['schema']['parameters']['properties']['action']['enum'] == [
-                'list', 'get', 'add', 'update', 'delete', 'append', 'replace', 'invalidate', 'history']
+            assert len(tools) == 42
+            assert {'ancor_overview', 'ancor_request_advance', 'ancor_task_create',
+                    'ancor_task_contract_update', 'ancor_delivery_verify'} <= set(tools)
+            assert not {'ancor_request_draft', 'ancor_change_propose', 'ancor_signal_propose'} & set(tools)
+            assert set(tools['ancor_task_block']['schema']['parameters']['required']) == {
+                'task_id', 'reason'}
+            assert 'action' not in tools['ancor_task_block']['schema']['parameters']['properties']
         elif role == 'ancor-worker':
             assert not tools
 

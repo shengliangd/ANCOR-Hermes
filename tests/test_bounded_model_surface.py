@@ -13,7 +13,7 @@ class Context:
 
     def __init__(self, path):
         self.config = {'store_path': str(path), 'board': 'ancor',
-                       'coordinator_profile': 'ancor-coordinator'}
+                       'coordinator_profile': 'ancor-coordinator', 'tool_api': 'legacy'}
 
     def get_config(self, key, default=None):
         return self.config.get(key, default)
@@ -63,7 +63,8 @@ def test_default_overview_is_bounded_under_history_heavy_fixture(tmp_path, monke
     tools = {}
     config = {'store_path': str(tmp_path / 'store.db'), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(
         profile_name='ancor-coordinator',
         get_config=lambda key, default=None: config.get(key, default),
@@ -116,7 +117,8 @@ def test_request_expansion_scopes_every_nested_collection(tmp_path, monkeypatch)
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(
         profile_name='ancor-coordinator',
         get_config=lambda key, default=None: config.get(key, default),
@@ -202,7 +204,8 @@ def test_interactor_draft_collection_is_bounded(tmp_path, monkeypatch):
     config = {'store_path': str(tmp_path / 'store.db'), 'board': 'ancor',
               'interactor_profile': 'ancor-interactor',
               'coordinator_profile': 'ancor-coordinator',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(
         profile_name='ancor-interactor',
         get_config=lambda key, default=None: config.get(key, default),

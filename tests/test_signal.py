@@ -15,7 +15,7 @@ from ancor.service import Service
 
 def register(path, role):
     tools = {}
-    config = {'store_path': str(path), 'board': 'test'}
+    config = {'store_path': str(path), 'board': 'test', 'tool_api': 'legacy'}
     ctx = SimpleNamespace(
         profile_name=role,
         get_config=lambda key, default=None: config.get(key, default),

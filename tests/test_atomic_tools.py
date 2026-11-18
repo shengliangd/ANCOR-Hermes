@@ -17,7 +17,8 @@ def registered(tmp_path, monkeypatch, role='ancor-interactor', board=None):
     monkeypatch.setattr('ancor.operations.NativeBoard', lambda *a, **k: board)
     monkeypatch.setattr('ancor.service.Service.native_board', property(lambda self: board))
     tools, hooks = {}, {}
-    config = {'store_path': str(tmp_path / 'store.db'), 'board': 'test', 'human_target': 'test:user'}
+    config = {'store_path': str(tmp_path / 'store.db'), 'board': 'test',
+              'human_target': 'test:user', 'tool_api': 'legacy'}
     ctx = SimpleNamespace(profile_name=role, get_config=lambda key, default=None: config.get(key, default),
                           register_tool=lambda **kw: tools.update({kw['name']: kw}),
                           register_hook=lambda key, fn: hooks.update({key: fn}), register_platform_handler=lambda *a: None)

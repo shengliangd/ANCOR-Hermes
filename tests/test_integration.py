@@ -25,7 +25,8 @@ class Context(PluginContext):
     @property
     def profile_name(self): return self.role
     def get_config(self, key, default=None):
-        return {'store_path': os.path.join(os.environ['HOME'], 'store.db'), 'board': 'test'}.get(key, default)
+        return {'store_path': os.path.join(os.environ['HOME'], 'store.db'), 'board': 'test',
+                'tool_api': 'legacy'}.get(key, default)
 ctx = Context(PluginManifest(name='ancor'), manager)
 ancor.register(ctx)
 def call(name, args):

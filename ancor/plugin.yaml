@@ -1,7 +1,60 @@
 name: ancor
-version: 0.8.1
+version: 0.9.0
 description: Durable requests and interactor/coordinator workflow over native Hermes Kanban.
 provides_tools:
+  - ancor_overview
+  - ancor_request_get
+  - ancor_event_get
+  - ancor_task_list
+  - ancor_task_show
+  - ancor_task_history
+  - ancor_change_get
+  - ancor_change_history
+  - ancor_change_propose
+  - ancor_question_list
+  - ancor_question_get
+  - ancor_question_create
+  - ancor_question_withdraw
+  - ancor_notification_list
+  - ancor_notification_get
+  - ancor_notification_respond
+  - ancor_request_draft
+  - ancor_request_confirm
+  - ancor_request_pause_propose
+  - ancor_request_resume_propose
+  - ancor_request_cancel_propose
+  - ancor_request_accept_propose
+  - ancor_request_changes_propose
+  - ancor_request_advance
+  - ancor_signal_propose
+  - ancor_event_ack
+  - ancor_note_list
+  - ancor_note_get
+  - ancor_note_history
+  - ancor_note_add
+  - ancor_note_update
+  - ancor_note_delete
+  - ancor_wake_list
+  - ancor_wake_schedule
+  - ancor_wake_cancel
+  - ancor_task_create
+  - ancor_task_title_update
+  - ancor_task_priority_update
+  - ancor_task_contract_update
+  - ancor_task_block
+  - ancor_task_unblock
+  - ancor_task_revise
+  - ancor_task_comment
+  - ancor_task_link
+  - ancor_task_unlink
+  - ancor_task_archive
+  - ancor_impact_get
+  - ancor_impact_review
+  - ancor_impact_finish
+  - ancor_delivery_verify
+  - ancor_delivery_reject
+  - ancor_completion_send
+  - ancor_admin_task_associate
   - ancor_request
   - ancor_get_context
   - ancor_ack_events
@@ -42,6 +95,11 @@ config_schema:
   poll_interval:
     type: number
     default: 30
+  event_batch_size:
+    type: integer
+    minimum: 1
+    maximum: 32
+    default: 12
   block_unblock_cycles:
     type: integer
     default: 3
@@ -51,3 +109,10 @@ config_schema:
     type: string
   store_path:
     type: string
+  tool_api:
+    type: string
+    enum: [v2, legacy, dual]
+    default: v2
+  admin_tools:
+    type: boolean
+    default: false

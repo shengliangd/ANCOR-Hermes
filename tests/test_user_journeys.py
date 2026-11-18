@@ -86,7 +86,7 @@ class Journey:
         import tools.clarify_tool  # register the genuine native clarify handler
         self.config = {'store_path': str(Path(os.environ['HOME']) / 'requests.db'),
                        'board': 'default', 'human_target': 'feishu:simulated-human',
-                       'transport_profile': 'default'}
+                       'transport_profile': 'default', 'tool_api': 'legacy'}
         config = self.config
         class Context(PluginContext):
             role = 'ancor-interactor'

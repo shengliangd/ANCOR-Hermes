@@ -115,7 +115,7 @@ Before proposing a request, verify:
 9. Does the title remain accurate after removing the implementation plan?
 10. Would splitting or merging produce a cleaner acceptance boundary?
 
-If these checks fail, revise the draft before calling `ancor_change propose`.
+If these checks fail, revise the draft before calling `ancor_change_propose`.
 
 ## Revision rule
 

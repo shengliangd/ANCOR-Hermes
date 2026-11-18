@@ -23,6 +23,52 @@ log = logging.getLogger(__name__)
 _SCAN_CONNECTION_POLL_SECONDS = 1.0
 
 
+class ToolProtocolError(ValueError):
+    """A provider emitted the wrong outer shape for a tool call."""
+
+
+def _normalize_tool_arguments(name, args):
+    """Normalize the historical DeepSeek tool-call wrapper for one direct call.
+
+    A few compatible providers wrap arguments as
+    ``{"calls": [{"arguments": {...}}], "name": "tool"}``. The wrapper is
+    safe to unwrap only when it identifies this exact tool and contains one
+    call. Batched writes are never split implicitly.
+    """
+    if not isinstance(args, dict) or 'calls' not in args:
+        return args
+    unknown = set(args) - {'calls', 'name'}
+    if unknown:
+        raise ToolProtocolError('tool-call wrapper contains unsupported fields: '
+                                + ', '.join(sorted(unknown)))
+    calls = args.get('calls')
+    if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
+        raise ToolProtocolError('tool-call wrapper must contain exactly one call object')
+    wrapped_name = args.get('name')
+    call = calls[0]
+    call_name = call.get('name')
+    if not wrapped_name and not call_name:
+        raise ToolProtocolError('tool-call wrapper must identify the target tool by name')
+    if wrapped_name not in {None, name}:
+        raise ToolProtocolError(
+            f'tool-call wrapper names {wrapped_name!r}, expected {name!r}')
+    if call_name not in {None, name}:
+        raise ToolProtocolError(
+            f'nested tool-call names {call_name!r}, expected {name!r}')
+    if 'arguments' in call:
+        unknown = set(call) - {'name', 'arguments'}
+        if unknown:
+            raise ToolProtocolError('nested tool-call wrapper contains unsupported fields: '
+                                    + ', '.join(sorted(unknown)))
+        nested = call['arguments']
+    else:
+        nested = {key: value for key, value in call.items()
+                  if key not in {'name', 'arguments'}}
+    if not isinstance(nested, dict):
+        raise ToolProtocolError('nested tool-call arguments must be an object')
+    return dict(nested)
+
+
 _ACTION_FIELDS = {
     'ancor_change': {'propose': ['input', 'operations'], 'get': ['change_id'], 'history': ['request_id']},
     'ancor_question': {'list': [], 'get': ['id'], 'create': ['request_id', 'id', 'body', 'reason'],
@@ -115,6 +161,8 @@ def _invalid_request(name, action, *, missing=(), reason=None, next_step=None,
     if valid_kinds:
         result['valid_kinds'] = list(valid_kinds)
     result['next_step'] = next_step or (
+        f'Provide {", ".join(missing)} and retry {name} directly.'
+        if action is None else
         f'Provide {", ".join(missing)} and retry {name} with action={action}.')
     return result
 
@@ -545,9 +593,9 @@ def register(ctx, *, scan_runner=None):
                     'open_questions': sum(
                         is_open_question(row) for row in notification_rows),
                 },
-                'expand': ('Call ancor_get_context with request_id=<id> for '
+                'expand': ('Call ancor_request_get with request_id=<id> for '
                            'current state; add include_content=true for exact request text, '
-                           'or use ancor_board show for one task.'),
+                           'or use ancor_task_show for one task.'),
                 **extra,
             }
         selected_tasks = select_tasks(
@@ -696,7 +744,7 @@ def register(ctx, *, scan_runner=None):
                 raise PermissionError('interactor profile required to respond')
             existing = box.get(identifier)
             if existing.get('request_id') and service.store.get_request(existing['request_id'])['content_mode'] == 'points':
-                raise ValueError('Use ancor_change with reply, content operations and resolve_question as appropriate')
+                raise ValueError('Use ancor_change_propose with reply, content operations and resolve_question as appropriate')
             if existing['kind'] != 'question':
                 raise ValueError('not a question')
             if existing['answer'] is not None:
@@ -869,6 +917,7 @@ def register(ctx, *, scan_runner=None):
                  'hold': {'type': 'boolean'},
                  'generation': {'type': 'integer', 'minimum': 1, 'description': 'For point requests, create/contract edit requires the current content generation.'},
                  'point_versions': {'type': 'array', 'items': {'type': 'string'}, 'description': 'For point requests, select relevant content.fields points by their version_id, not id.'},
+                 'max_runtime_seconds': {'type': 'integer', 'minimum': 1},
                  'status': {'type': 'string'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
                  'include_archived': {'type': 'boolean'},
@@ -916,7 +965,8 @@ def register(ctx, *, scan_runner=None):
                                     'items': {'type': 'string', 'pattern': r'\S'}}
                             for field in ('verification', 'artifacts', 'task_ids')}},
                      'required': ['verification', 'artifacts', 'task_ids'],
-                     'anyOf': [{'required': ['brief']}, {'required': ['generation', 'coverage']}]},
+                     'anyOf': [{'required': ['brief']}, {'required': ['generation', 'coverage']}],
+                     'additionalProperties': False},
                  'reason': {'type': 'string'}}, ['request_id', 'action']),
         }
 
@@ -926,10 +976,33 @@ def register(ctx, *, scan_runner=None):
         definitions.update(atomic_definitions)
         methods.update(atomic_methods)
 
+    tool_api = str(ctx.get_config('tool_api', 'v2')).lower()
+    if tool_api not in {'v2', 'legacy', 'dual'}:
+        raise ValueError('tool_api must be one of: dual, legacy, v2')
+    v2_mutations = frozenset()
+    if tool_api in {'v2', 'dual'}:
+        from .tool_surface import V2_MUTATION_TOOLS, build_v2_surface
+        v2_mutations = V2_MUTATION_TOOLS
+        role = 'interactor' if interactor else 'coordinator' if coordinator else 'worker'
+        v2_definitions, v2_methods = build_v2_surface(
+            role=role,
+            methods=methods,
+            legacy_definitions=definitions,
+            contract_schema=contract_schema,
+            admin_tools=bool(ctx.get_config('admin_tools', False)),
+        )
+        if tool_api == 'v2':
+            definitions, methods = v2_definitions, v2_methods
+        elif role != 'worker':
+            definitions = {**definitions, **v2_definitions}
+            methods = {**methods, **v2_methods}
+
     for name, (description, properties, required) in definitions.items():
         method = methods[name.removeprefix('ancor_')]
-        def handle(args, _method=method, _name=name, _properties=properties, **kwargs):
+        def handle(args, _method=method, _name=name, _properties=properties,
+                   _required=required, **kwargs):
             try:
+                args = _normalize_tool_arguments(_name, args)
                 if worker:
                     if args:
                         raise PermissionError('worker context is read-only')
@@ -945,6 +1018,7 @@ def register(ctx, *, scan_runner=None):
                     raise PermissionError('coordinator may only advance requests')
                 mutation = (_name == 'ancor_acceptance'
                             or _name == 'ancor_ack_events'
+                            or _name in v2_mutations
                             or (_name == 'ancor_request' and args.get('action') == 'advance')
                             or (_name == 'ancor_wake' and args.get('action') != 'list')
                             or (_name == 'ancor_note' and args.get('action') in {'add', 'update', 'delete'})
@@ -954,6 +1028,10 @@ def register(ctx, *, scan_runner=None):
                 # Cooperation marker, not a shell/process security sandbox.
                 if mutation and not coordinator:
                     raise PermissionError('coordinator profile required')
+                missing = _missing_fields(args, _required)
+                if missing:
+                    return json.dumps(_invalid_request(
+                        _name, args.get('action'), missing=missing), ensure_ascii=False)
                 invalid = _validate_action_request(_name, args)
                 if invalid:
                     return json.dumps(invalid, ensure_ascii=False)
@@ -964,7 +1042,17 @@ def register(ctx, *, scan_runner=None):
                     from .scheduling import Scheduling
                     Scheduling(service.store).started()
                 result = _method(args, **kwargs)
+                if tool_api == 'v2':
+                    from .tool_surface import rewrite_legacy_references
+                    result = rewrite_legacy_references(result, role=role)
                 return json.dumps(result, ensure_ascii=False)
+            except ToolProtocolError as exc:
+                log.warning('ANCOR protocol error in %s: %s', _name, exc)
+                return json.dumps({
+                    'error': str(exc), 'code': 'protocol_error', 'tool': _name,
+                    'next_step': ('Call the tool directly with its declared object schema; '
+                                  'do not wrap tool calls in a calls array.'),
+                }, ensure_ascii=False)
             except Exception as exc:
                 log.exception('ANCOR tool failed')
                 code = ('forbidden' if isinstance(exc, PermissionError) else

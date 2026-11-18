@@ -89,6 +89,7 @@ ANCOR 当前实现为 [Hermes](https://github.com/NousResearch/hermes-agent) 的
 
 - 持久化 request、问题、通知、任务关联和验证证据；
 - Interactor、Coordinator、Worker 三类 profile 的 ANCOR 工具接口；
+- 按角色隔离读写权限、写操作一工具一意图的严格 v2 工具接口；
 - 基于 Hermes 原生 `clarify` 的正式确认流程；
 - 基于原生 Kanban 的任务编排；
 - Gateway 轮询、事件唤醒和通知投递；

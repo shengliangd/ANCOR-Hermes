@@ -58,6 +58,20 @@ Enable ANCOR and `clarify` in the interactor's actual channel toolset (for
 example `platform_toolsets.feishu`), not just its CLI toolset. The coordinator
 needs ANCOR in CLI turns, and native worker turns need Kanban and execution tools.
 
+Set practical per-turn bounds on the role profiles. These are model-loop safety
+limits, not substitutes for per-card contracts:
+
+```yaml
+agent:
+  max_turns: 120
+  run_budget_seconds: 1800
+```
+
+Use a tighter coordinator budget, such as 80 turns and 600 seconds, when its
+event batches are kept small. Lower either cap only after splitting long work
+into bounded cards; an unlimited budget lets a worker or coordinator loop
+through hundreds of API calls without reaching a terminal decision.
+
 ## Configure shared ANCOR settings
 
 Merge the following into the owner's `config.yaml`, using real paths and a
@@ -80,9 +94,17 @@ plugins:
         human_target: "<platform>:<destination>"
         transport_profile: default
         poll_interval: 30
+        event_batch_size: 12
+        tool_api: v2
+        admin_tools: false
 ```
 
 Use the same settings in all role profiles, with `gateway_owner: false` there.
+`tool_api: v2` exposes direct, single-purpose mutation tools with strict
+action-specific schemas. Use `dual` for an in-place rollback while the installed
+v2 prompts remain active, then restore prompts and select `legacy` only as a
+matched release rollback. Keep `admin_tools: false` unless a repair operation
+such as task association must be exposed to the coordinator.
 Only the owner runs the ANCOR background loops. All profiles must share the
 same absolute `store_path` and board; create the store's parent directory with
 appropriate access. Existing installations should keep their actual store

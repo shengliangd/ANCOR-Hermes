@@ -13,7 +13,8 @@ def registered(tmp_path, monkeypatch, profile, tasks):
     config = {'store_path': str(tmp_path / 'store.db'), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
               'interactor_profile': 'ancor-interactor',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(
         profile_name=profile,
         get_config=lambda key, default=None: config.get(key, default),

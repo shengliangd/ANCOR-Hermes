@@ -89,6 +89,7 @@ ANCOR is currently implemented as a plugin for [Hermes](https://github.com/NousR
 
 - durable storage for requests, questions, notifications, task links, and verification evidence;
 - ANCOR tool surfaces for Interactor, Coordinator, and Worker profiles;
+- a strict v2 tool surface with role-scoped reads and direct single-purpose mutations;
 - formal confirmation through Hermes native `clarify`;
 - task orchestration through native Kanban;
 - Gateway polling, event wakes, and notification delivery;

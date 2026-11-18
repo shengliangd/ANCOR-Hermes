@@ -24,6 +24,19 @@ def test_role_skills_reference_available_ancor_interfaces():
         assert references <= available, (path, references - available)
 
 
+def test_reference_docs_use_registered_v2_tools():
+    import re
+    import yaml
+    manifest = yaml.safe_load((ROOT / 'ancor/plugin.yaml').read_text())
+    available = set(manifest['provides_tools'])
+    for path in (ROOT / 'skills/ancor/references/REQUEST_STANDARD.md',
+                 ROOT / 'docs/atomic-requests.md'):
+        references = set(re.findall(r'\bancor_[a-z_]+\b', path.read_text()))
+        assert references <= available, (path, references - available)
+        assert not {'ancor_change', 'ancor_question', 'ancor_get_context',
+                    'ancor_board', 'ancor_note', 'ancor_wake'} & references
+
+
 def test_acceptance_schema_matches_service_contract(tmp_path):
     import pytest
     from ancor.service import Service
@@ -34,7 +47,7 @@ def test_acceptance_schema_matches_service_contract(tmp_path):
                           register_hook=lambda *args: None,
                           register_tool=lambda **kw: tools.update({kw['name']: kw}))
     ancor.register(ctx)
-    schema = tools['ancor_acceptance']['schema']['parameters']['properties']['evidence']
+    schema = tools['ancor_delivery_verify']['schema']['parameters']['properties']['evidence']
     assert set(schema['required']) == {'verification', 'artifacts', 'task_ids'}
     assert schema['anyOf'] == [{'required': ['brief']}, {'required': ['generation', 'coverage']}]
     store = Store(tmp_path / 'store.db')

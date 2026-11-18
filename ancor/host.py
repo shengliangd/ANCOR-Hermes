@@ -69,10 +69,13 @@ class Host:
         self.state_path = path.parent / (path.name + '.host.json')
         self.tasks = []
         self.startup = True
+        event_batch_size = ctx.get_config('event_batch_size', 12)
+        if type(event_batch_size) is not int or not 1 <= event_batch_size <= 32:
+            raise ValueError('event_batch_size must be an integer between 1 and 32')
 
         self.coordinator = Coordinator(path.parent / 'ancor-coordinator.lock',
             pending=self.pending, snapshot=self.wake_packet, scan=self.scan,
-            batch_size=32, retry_base=15,
+            batch_size=event_batch_size, retry_base=15,
             command=lambda prompt: coordinator_command(self.profile, prompt))
 
     def state(self):
@@ -447,7 +450,7 @@ class Host:
             'scheduled_wakes': observation['scheduled_wakes'],
             'progression': observation['progression'],
             'liveness': observation['liveness'],
-            'expand': 'Call ancor_get_context for request detail, or ancor_board show for one card.',
+            'expand': 'Call ancor_request_get for request detail, or ancor_task_show for one card.',
         }
 
 

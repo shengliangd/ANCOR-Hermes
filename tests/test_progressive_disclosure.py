@@ -56,7 +56,8 @@ def test_context_is_compact_and_request_expands(tmp_path, monkeypatch):
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(profile_name='ancor-coordinator',
                           get_config=lambda key, default=None: config.get(key, default),
                           register_tool=lambda **kw: tools.update({kw['name']: kw}),
@@ -100,7 +101,8 @@ def test_progress_only_returns_open_work_including_human_acceptance(tmp_path, mo
     config = {'store_path': str(store_path), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
               'interactor_profile': 'ancor-interactor',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(profile_name='ancor-interactor',
                           get_config=lambda key, default=None: config.get(key, default),
                           register_tool=lambda **kw: tools.update({kw['name']: kw}),
@@ -182,7 +184,8 @@ def test_notification_list_is_compact_and_id_expands(tmp_path):
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(profile_name='ancor-coordinator',
                           get_config=lambda key, default=None: config.get(key, default),
                           register_tool=lambda **kw: tools.update({kw['name']: kw}),
@@ -218,7 +221,8 @@ def test_tool_errors_expose_a_stable_code(tmp_path):
     tools = {}
     config = {'store_path': str(tmp_path / 'store.db'), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(profile_name='ancor-coordinator',
                           get_config=lambda key, default=None: config.get(key, default),
                           register_tool=lambda **kw: tools.update({kw['name']: kw}),
@@ -263,7 +267,8 @@ def test_request_history_requires_explicit_flags(tmp_path, monkeypatch):
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(profile_name='ancor-coordinator',
                           get_config=lambda key, default=None: config.get(key, default),
                           register_tool=lambda **kw: tools.update({kw['name']: kw}),
@@ -318,7 +323,8 @@ def test_context_separates_conditions_from_events_and_hides_history_by_default(t
     store_path = tmp_path / 'store.db'
     config = {'store_path': str(store_path), 'board': 'ancor',
               'coordinator_profile': 'ancor-coordinator',
-              'human_target': 'test:destination', 'transport_profile': 'default'}
+              'human_target': 'test:destination', 'transport_profile': 'default',
+              'tool_api': 'legacy'}
     ctx = SimpleNamespace(profile_name='ancor-coordinator',
                           get_config=lambda key, default=None: config.get(key, default),
                           register_tool=lambda **kw: tools.update({kw['name']: kw}),

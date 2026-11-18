@@ -188,7 +188,7 @@ class Operations:
         basis = next((b for b in state['task_basis'] if b['task_id'] == tid), None)
         if review and (review['state'] != 'applied' or review['decision'] == 'retire'):
             raise RuntimeError('apply the task impact decision before releasing work; after adjusting the stopped card, '
-                               'use ancor_reconcile action=finish with this request_id, generation and task_id, then unblock')
+                               'use ancor_impact_finish with this request_id, generation and task_id, then unblock')
         if not basis or (basis['generation'] != req['generation'] and not (review and review['decision'] == 'unaffected')):
             raise RuntimeError('task requires current basis or explicit unaffected review')
 
@@ -197,14 +197,14 @@ class Operations:
         interactor = self.ctx.get_config('interactor_profile', 'ancor-interactor')
         action = args['action']
         if self.ctx.profile_name != expected and not (
-                self.ctx.profile_name == interactor and action in {'list', 'show'}):
+                self.ctx.profile_name == interactor and action in {'list', 'show', 'history'}):
             raise PermissionError('coordinator profile required')
         if action not in {'create', 'list', 'show', 'history', 'block', 'unblock',
                           'revise', 'comment', 'link', 'unlink', 'edit', 'archive',
                           'associate'}:
             raise ValueError('unknown board action')
         store = self.service.store
-        if action not in {'list', 'show'}:
+        if action not in {'list', 'show', 'history'}:
             self.reconcile()
         if action == 'create':
             req = store.get_request(args['request_id'])
@@ -219,6 +219,10 @@ class Operations:
                 raise ValueError('parent_ids must be a list of task IDs')
             if type(hold) is not bool:
                 raise ValueError('hold must be a boolean')
+            max_runtime_seconds = args.get('max_runtime_seconds')
+            if max_runtime_seconds is not None and (
+                    type(max_runtime_seconds) is not int or max_runtime_seconds < 1):
+                raise ValueError('max_runtime_seconds must be a positive integer')
             linked = {item['task_id']: item['request_id'] for item in store.snapshot()['task_links']}
             for parent in parent_ids:
                 if parent not in linked:
@@ -231,7 +235,8 @@ class Operations:
             task = self.board.create(req['id'], 1, args['key'], title=args['title'],
                                      body=body,
                                      assignee=worker_profile, parent_ids=parent_ids,
-                                     hold=hold or req['content_mode'] == 'points')
+                                     hold=hold or req['content_mode'] == 'points',
+                                     max_runtime_seconds=max_runtime_seconds)
             actual = self.detail(task['id'])
             if req['content_mode'] == 'points' and actual['task']['body'].split('\n', 1)[-1] != body:
                 raise RuntimeError('existing task key has a different contract; review and edit the stopped card')

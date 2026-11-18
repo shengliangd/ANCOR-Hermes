@@ -274,7 +274,7 @@ class Service:
             'question': question,
             'choices': [f"Do not confirm {draft['id']}", f"Confirm ANCOR draft {draft['id']}"],
             'multi_select': False}]},
-            'next_step': 'Call native clarify as an actual agent tool with clarify_args unchanged. Then read ancor_get_context.'}
+            'next_step': 'Call native clarify as an actual agent tool with clarify_args unchanged. Then read ancor_request_get.'}
 
     def cancellation_presentation(self, cancellation):
         """Offer an immutable cancellation proposal without changing state."""
@@ -298,7 +298,7 @@ class Service:
             'choices': [f"Keep ANCOR requests {cancellation['id']}",
                         f"Cancel ANCOR requests {cancellation['id']}"],
             'multi_select': False}]},
-            'next_step': 'Call native clarify as an actual agent tool with clarify_args unchanged. Then read ancor_get_context.'}
+            'next_step': 'Call native clarify as an actual agent tool with clarify_args unchanged. Then read ancor_request_get.'}
 
     def command_presentation(self, command):
         """Offer an immutable transition or human-acceptance proposal."""
@@ -350,7 +350,7 @@ class Service:
         return {**command, 'presentation': text, 'draft_file': path, 'clarify_args': {'questions': [{
             'question': text + f"\n\n{prompt}",
             'choices': [keep, confirm], 'multi_select': False}]},
-            'next_step': 'Call native clarify as an actual agent tool with clarify_args unchanged. Then read ancor_get_context.'}
+            'next_step': 'Call native clarify as an actual agent tool with clarify_args unchanged. Then read ancor_request_get.'}
 
     def _notification_outbox(self):
         from .notification import NotificationOutbox

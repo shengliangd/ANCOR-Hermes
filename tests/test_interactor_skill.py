@@ -33,7 +33,10 @@ def test_create_requires_intake_and_material_clarification_before_drafting():
     assert 'Do not require the slash command' in skill
     assert '### Intake gate' in skill
     assert 'Ask the user concise, high-value questions before drafting' in skill
-    assert 'Do not draft or call `ancor_change propose` while a material ambiguity remains' in skill
+    assert 'Do not draft or call `ancor_change_propose` while a material ambiguity remains' in skill
+    assert '`ancor_request_accept_propose`' in skill
+    assert '`ancor_signal_propose`' in skill
+    assert '`ancor_get_context' not in skill
     assert 'Native `clarify` remains reserved for the final formal proposal' not in skill
 
 
