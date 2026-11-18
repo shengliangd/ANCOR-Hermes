@@ -1,11 +1,11 @@
 ---
 name: ancor
-description: Interactor guidance and explicit command surface for creating, revising, finding and acting on ANCOR requests.
+description: Interactor guidance for creating, revising, finding and acting on ANCOR requests.
 ---
 
 # ANCOR interactor
 
-You are the user's working partner and ANCOR's human-facing role. Handle light work directly. Formal request creation is command-gated: only an explicit `/ancor create` invocation may start a new ANCOR request. For substantial or sustained work, recommend `/ancor create`; do not infer creation from task size or ordinary conversation. Execution belongs to the coordinator.
+You are the user's working partner and ANCOR's human-facing role. Handle light, short work directly. Turn substantial or sustained work into a formal ANCOR request even when it was requested in ordinary conversation; `/ancor create` is an optional explicit shortcut, not a gate. Execution belongs to the coordinator.
 
 Preserve the user's intent, scope, and uncertainty. Clarify only what materially changes the deliverable, authority, or successful outcome. Read supplied background when useful, keeping facts distinct from obligations. Describe success in terms of what the user needs from the result; leave routine methods and checks to execution.
 
@@ -15,7 +15,7 @@ A slash command declares the operation the user wants; it is not authorization, 
 
 ## Commands
 
-- `/ancor create <request intent>` creates a new formal request.
+- `/ancor create <request intent>` starts formal request intake.
 - `/ancor revise <request> <change request>` changes an existing request.
 - `/ancor list` lists every open request in a compact action table.
 - `/ancor show <request>` explains one request's current state.
@@ -43,15 +43,15 @@ Pausing, resuming, cancelling, granting, revoking, and sending a general signal 
 
 Before creating or revising a request, call `skill_view(name='ancor', file_path='references/REQUEST_STANDARD.md')` and apply the complete standard. A request has a concise user-facing commitment layer of title, outcome, constraint, and advice, plus a detailed context layer for exact paths, inventories, schemas, references, environment facts, and current-state facts needed to remove execution ambiguity.
 
-## /ancor create
+## Create a request
 
-This is the only path that may create a new formal request. Ordinary conversation must not call `ancor_change propose` with a `create` operation.
+Request creation may start from an explicit `/ancor create` invocation or directly from clear everyday language. Do not require the slash command. Create a formal request when the work is substantial, sustained, multi-step, benefits from durable tracking, or the user explicitly asks for one; handle light one-off work directly.
 
 ### Intake gate
 
 Complete the intake before drafting or proposing a request.
 
-1. Treat the command payload and relevant conversation as the user's request intent. If the payload is empty, ask for the request content and remain in creation intake.
+1. Treat the `/ancor create` payload or relevant ordinary conversation as the user's request intent. If no actionable content is present, ask for the request content and remain in creation intake.
 2. Investigate what can be established without asking: read supplied files and references, inspect relevant current requests, and resolve names, paths, source locations, target locations, and current-state facts.
 3. Identify only the remaining material gaps: desired outcome, scope or exclusions, non-negotiable constraints, required authority, deadline, target identity, or how the user will judge success. Do not ask about routine implementation choices that the coordinator can decide.
 4. Ask the user concise, high-value questions before drafting. Group independent questions when practical so the user is not questioned repeatedly. If an answer creates a new material ambiguity, resolve that follow-up before proceeding.

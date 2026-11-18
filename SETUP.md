@@ -37,7 +37,7 @@ Use this four-profile inventory for installation and verification:
 | Profile | ANCOR plugin | Installed role prompts | Runtime responsibility |
 | --- | --- | --- | --- |
 | Owner (`default`) | Required | None; preserve owner's existing prompts | Gateway loops, connected `api_server`; shared-bot transport in the example below |
-| `ancor-interactor` | Required | `roles/ancor-interactor/SOUL.md`, `skills/ancor/` | User conversation, explicit `/ancor create` and `/ancor revise`, ANCOR and native `clarify` |
+| `ancor-interactor` | Required | `roles/ancor-interactor/SOUL.md`, `skills/ancor/` | User conversation, natural-language or `/ancor create` request creation, `/ancor revise`, ANCOR and native `clarify` |
 | `ancor-coordinator` | Required | `roles/ancor-coordinator/SOUL.md`, `skills/ancor-coordination/SKILL.md` | ANCOR, investigation and verification |
 | `ancor-worker` | Required | `roles/ancor-worker/SOUL.md`, `skills/ancor-worker/SKILL.md` | Native Kanban, execution and delegation |
 
@@ -223,7 +223,7 @@ show the configured owner, interactor and transport profile served, the
 messaging and `api_server` adapters connected, and no ANCOR startup or delivery
 errors.
 
-Then exercise a small, deliberately authorized `/ancor create` request in the intended chat:
+Then exercise a small, deliberately authorized request through ordinary conversation in the intended chat. `/ancor create` remains an optional explicit shortcut:
 
 1. A user message reaches the interactor, which presents native confirmation.
    Confirming records exactly one request in the shared store.

@@ -1,4 +1,4 @@
-"""The interactor has one role skill with a narrow explicit command surface."""
+"""The interactor supports both natural-language creation and explicit commands."""
 from pathlib import Path
 
 
@@ -10,7 +10,8 @@ def test_ancor_is_the_only_interactor_role_skill():
     standard = (ROOT / 'skills/ancor/references/REQUEST_STANDARD.md').read_text()
     assert not (ROOT / 'skills/ancor-interactor/SKILL.md').exists()
     assert 'name: ancor' in skill
-    assert 'Formal request creation is command-gated' in skill
+    assert 'Turn substantial or sustained work into a formal ANCOR request' in skill
+    assert '`/ancor create` is an optional explicit shortcut, not a gate' in skill
     assert "skill_view(name='ancor', file_path='references/REQUEST_STANDARD.md')" in skill
     assert 'stable commitment boundary' in standard
     assert 'exact source, destination, mount, workspace, and artifact paths' in standard
@@ -28,6 +29,8 @@ def test_interactor_command_surface_is_intentionally_small():
 
 def test_create_requires_intake_and_material_clarification_before_drafting():
     skill = (ROOT / 'skills/ancor/SKILL.md').read_text()
+    assert 'Request creation may start from an explicit `/ancor create` invocation or directly from clear everyday language' in skill
+    assert 'Do not require the slash command' in skill
     assert '### Intake gate' in skill
     assert 'Ask the user concise, high-value questions before drafting' in skill
     assert 'Do not draft or call `ancor_change propose` while a material ambiguity remains' in skill
@@ -36,7 +39,8 @@ def test_create_requires_intake_and_material_clarification_before_drafting():
 
 def test_interactor_soul_preserves_role_boundaries():
     soul = (ROOT / 'roles/ancor-interactor/SOUL.md').read_text()
-    assert 'Formal request creation starts only when the user invokes `/ancor create`' in soul
+    assert 'Turn substantial or sustained work into an ANCOR request automatically' in soul
+    assert '`/ancor create` is an optional explicit shortcut' in soul
     assert 'exact native confirmation' in soul
     assert 'the coordinator owns execution' in soul
     assert "Protect the user's attention" in soul

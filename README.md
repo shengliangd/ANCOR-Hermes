@@ -36,12 +36,12 @@ ANCOR divides the work across three roles.
 The interactor is the user-facing role. It:
 
 - handles light work directly;
-- starts formal intake after the user invokes `/ancor create`;
+- starts formal intake from ordinary conversation or `/ancor create`;
 - performs necessary intake and clarification;
 - records human answers, authorization, pause/resume/cancel requests, and final acceptance;
 - explains current state concisely.
 
-The interactor does not automatically turn ordinary conversation into a formal request. Creating one always requires an explicit user command.
+The interactor turns substantial or sustained work into a formal request when the intent is clear from ordinary conversation. Light work can still be handled directly, and `/ancor create` remains available as an optional explicit shortcut.
 
 ### Coordinator
 
@@ -123,7 +123,7 @@ The interactor supports these commands:
 
 | Command | Purpose |
 | --- | --- |
-| `/ancor create <request>` | Start creating a formal request |
+| `/ancor create <request>` | Optional shortcut to start creating a formal request |
 | `/ancor revise <request> <change>` | Revise an existing request |
 | `/ancor list` | List all open requests and the next required actions |
 | `/ancor show <request>` | Show the current state of one request |
@@ -137,13 +137,13 @@ Pause, resume, cancel, grant, revoke, and general signals remain available throu
 
 Suppose the user wants to clean a set of raw CSV files into a training-ready dataset and produce a quality report. At the same time, another ANCOR request is using the same processing machine and shared mount.
 
-#### 1. Explicitly create a formal request
+#### 1. Request formal work
 
 ```text
-/ancor create Clean the 12 CSV files under /data/raw, deduplicate them, and generate a training-ready dataset and quality report. Do not modify the original data.
+Clean the 12 CSV files under /data/raw, deduplicate them, and generate a training-ready dataset and quality report. Do not modify the original data.
 ```
 
-`/ancor create` only starts formal intake. It does not create the request by itself.
+Ordinary conversation starts formal intake directly. `/ancor create` is an optional way to signal the same intent explicitly. Neither path creates the request without confirmation.
 
 #### 2. Interactor performs intake and clarification
 
@@ -231,7 +231,7 @@ Execution completion, coordinator verification, and human acceptance are three d
 ## Design principles
 
 - **A request is a commitment boundary, not a project diary.** Progress, task decomposition, and evidence belong in execution records.
-- **A command is not confirmation.** `/ancor create` only starts the workflow; formal submission still requires native `clarify`.
+- **A command or chat request is not confirmation.** Either can start the workflow; formal submission still requires native `clarify`.
 - **Human authorization must be specific.** General preferences or chat agreement are never silently treated as permission.
 - **Execution and acceptance are separate.** Worker completion, coordinator verification, and human acceptance are three different events.
 - **Interrupt the user only at consequential points.** Routine retries, queuing, and resource conflicts belong to the coordinator; only new authority, tradeoffs, or material ambiguity require the user.

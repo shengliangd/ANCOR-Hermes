@@ -36,12 +36,12 @@ ANCOR 将工作分成三个角色：
 直接面对用户，负责：
 
 - 处理轻量问题；
-- 在用户执行 `/ancor create` 后发起正式需求；
+- 从普通对话或 `/ancor create` 发起正式需求；
 - 进行必要的 intake 和澄清；
 - 记录用户回答、授权、暂停、恢复、取消和最终验收；
 - 用简洁的方式解释当前状态。
 
-Interactor 不会自动把普通需求变成正式 request。正式创建必须由用户显式发起。
+当普通对话表达了清晰且持续、实质性的工作时，Interactor 会直接发起正式 request。轻量工作仍可直接处理，`/ancor create` 作为可选的显式快捷入口保留。
 
 ### Coordinator
 
@@ -123,7 +123,7 @@ Interactor 支持以下命令：
 
 | 命令 | 作用 |
 | --- | --- |
-| `/ancor create <需求>` | 开始创建一条正式 request |
+| `/ancor create <需求>` | 可选快捷入口：开始创建一条正式 request |
 | `/ancor revise <request> <变更>` | 修改已有 request |
 | `/ancor list` | 查看全部未关闭 request 及下一步操作 |
 | `/ancor show <request>` | 查看一条 request 的当前状态 |
@@ -137,13 +137,13 @@ Interactor 支持以下命令：
 
 假设用户想把一批原始 CSV 清洗成可训练数据，并生成质量报告；同时另一个 ANCOR request 正在使用同一台处理机和共享挂载目录。
 
-#### 1. 显式创建正式 request
+#### 1. 提出正式工作
 
 ```text
-/ancor create 将 /data/raw 下的 12 个 CSV 清洗、去重，生成可训练数据集和质量报告。原始数据不能修改。
+将 /data/raw 下的 12 个 CSV 清洗、去重，生成可训练数据集和质量报告。原始数据不能修改。
 ```
 
-`/ancor create` 只表示开始正式需求，不代表创建已经生效。
+普通对话会直接进入正式 intake；`/ancor create` 只是显式表达同一意图的可选方式。两种方式都必须经过确认，request 才会创建。
 
 #### 2. Interactor 先做 intake 和澄清
 
@@ -231,7 +231,7 @@ Worker 在任务卡范围内执行，不会自行扩大 request 授权。
 ## 设计原则
 
 - **Request 是承诺边界，不是项目流水账。** 进度、任务拆分和证据属于执行记录。
-- **Command 不是确认。** `/ancor create` 只启动流程，正式提交仍由 native `clarify` 完成。
+- **命令或聊天请求都不是确认。** 两者都可以启动流程，正式提交仍由 native `clarify` 完成。
 - **人类授权必须具体。** 一般性偏好或聊天同意不会被自动解释成权限。
 - **执行与验收分离。** Worker 完成、Coordinator 验证和用户 acceptance 是三件事。
 - **只在关键节点打断用户。** 常规重试、排队和资源冲突由 Coordinator 处理；只有新的授权、取舍或实质歧义需要用户回答。
