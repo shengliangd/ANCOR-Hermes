@@ -199,18 +199,17 @@ def test_only_ancor_roles_have_business_tools():
         plugin.register(ctx)
         assert bool(tools) is expected
         if role == 'ancor-interactor':
-            assert len(tools) == 21
-            assert {'ancor_overview', 'ancor_request_get', 'ancor_request_draft',
-                    'ancor_change_propose', 'ancor_task_show', 'ancor_signal_propose'} <= set(tools)
+            assert len(tools) == 19
+            assert {'ancor_overview', 'ancor_request_get', 'ancor_change_propose',
+                    'ancor_task_show', 'ancor_signal_propose'} <= set(tools)
             assert not {'ancor_request_advance', 'ancor_task_create', 'ancor_note_add'} & set(tools)
-            assert set(tools['ancor_request_draft']['schema']['parameters']['properties']) == {
-                'title', 'brief', 'summary', 'replacement_of'}
-            assert 'action' not in tools['ancor_request_draft']['schema']['parameters']['properties']
+            assert not {'ancor_request_draft', 'ancor_request_confirm'} & set(tools)
         elif role == 'ancor-coordinator':
             assert len(tools) == 42
             assert {'ancor_overview', 'ancor_request_advance', 'ancor_task_create',
                     'ancor_task_contract_update', 'ancor_delivery_verify'} <= set(tools)
-            assert not {'ancor_request_draft', 'ancor_change_propose', 'ancor_signal_propose'} & set(tools)
+            assert not {'ancor_request_draft', 'ancor_request_confirm',
+                        'ancor_change_propose', 'ancor_signal_propose'} & set(tools)
             assert set(tools['ancor_task_block']['schema']['parameters']['required']) == {
                 'task_id', 'reason'}
             assert 'action' not in tools['ancor_task_block']['schema']['parameters']['properties']

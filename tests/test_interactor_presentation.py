@@ -137,8 +137,8 @@ def test_creation_and_conversion_present_full_content(tmp_path):
     text = presentation(store, p)['presentation']
     assert text.startswith('**创建请求「新报告」**\n\n')
     assert all(body in text for body in ('生成报告', '不能联网', '参考旧版', '数据在本地'))
-    assert text.index('目标') < text.index('背景') < text.index('建议') < text.index('约束')
-    for label in ('目标', '背景', '建议', '约束'):
+    assert text.index('目标') < text.index('约束') < text.index('建议') < text.index('背景')
+    for label in ('目标', '约束', '建议', '背景'):
         assert text.count(f'\n{label} 1：\n\n') == 1
     legacy = store.confirm(store.create_draft('原始正文\n  保留格式')['id'], 'legacy')
     p = propose(store, legacy['id'], [{'op': 'convert', 'fields': {'outcome': ['新目标']}}])

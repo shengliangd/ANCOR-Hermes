@@ -45,8 +45,6 @@ _ACTION_TO_V2 = {
     ('ancor_change', 'propose'): 'ancor_change_propose',
     ('ancor_change', 'get'): 'ancor_change_get',
     ('ancor_change', 'history'): 'ancor_change_history',
-    ('ancor_request', 'draft'): 'ancor_request_draft',
-    ('ancor_request', 'confirm'): 'ancor_request_confirm',
     ('ancor_request', 'pause'): 'ancor_request_pause_propose',
     ('ancor_request', 'resume'): 'ancor_request_resume_propose',
     ('ancor_request', 'cancel'): 'ancor_request_cancel_propose',
@@ -251,17 +249,6 @@ def build_v2_surface(*, role, methods, legacy_definitions, contract_schema, admi
     )
 
     if role == 'interactor':
-        request_properties = legacy_definitions['ancor_request'][1]
-        add(
-            'ancor_request_draft', 'Prepare a new formal request draft and its exact native confirmation.',
-            {key: deepcopy(request_properties[key]) for key in
-             ('title', 'brief', 'summary', 'replacement_of')},
-            ['title', 'brief'], delegate('request', {'action': 'draft'}),
-        )
-        add(
-            'ancor_request_confirm', 'Prepare confirmation for an existing request draft.',
-            {'draft_id': TEXT}, ['draft_id'], delegate('request', {'action': 'confirm'}),
-        )
         add(
             'ancor_request_pause_propose', 'Prepare a confirmed pause proposal for one stable active request.',
             {'request_id': TEXT, 'reason': TEXT, 'summary': OPTIONAL_TEXT},
@@ -287,7 +274,10 @@ def build_v2_surface(*, role, methods, legacy_definitions, contract_schema, admi
             delegate('request', {'action': 'request_changes'}),
         )
         add(
-            'ancor_change_propose', 'Create one atomic human change proposal and its exact native confirmation.',
+            'ancor_change_propose',
+            'Create one immutable structured request change and its exact native confirmation. '
+            'Use the create operation with title and fields; do not propose a legacy brief. '
+            'Scope and non-goals belong in constraint, while exact disambiguating facts belong in context.',
             {key: deepcopy(change_properties[key]) for key in
              ('request_id', 'input', 'base', 'operations')},
             ['input', 'operations'], delegate('change', {'action': 'propose'}),

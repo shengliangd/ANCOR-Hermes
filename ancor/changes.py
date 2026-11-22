@@ -7,7 +7,8 @@ import json
 import time
 from uuid import uuid4
 
-FIELDS = ('outcome', 'constraint', 'advice', 'context')
+from .request_contract import FIELDS
+
 POINT_OPS = {'append', 'replace', 'invalidate'}
 CONTROL_OPS = {'pause', 'resume', 'cancel', 'accept', 'request_changes', 'grant', 'revoke'}
 

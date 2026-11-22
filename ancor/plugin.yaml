@@ -18,8 +18,6 @@ provides_tools:
   - ancor_notification_list
   - ancor_notification_get
   - ancor_notification_respond
-  - ancor_request_draft
-  - ancor_request_confirm
   - ancor_request_pause_propose
   - ancor_request_resume_propose
   - ancor_request_cancel_propose

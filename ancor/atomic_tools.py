@@ -1,5 +1,6 @@
 """Role-scoped interface to changes, questions, and incremental coordination."""
-from .changes import FIELDS, envelope
+from .changes import envelope
+from .request_contract import DESCRIPTIONS, FIELDS
 
 TEXT = {'type': 'string', 'minLength': 1}
 INTEGER = {'type': 'integer', 'minimum': 1}
@@ -7,7 +8,13 @@ STRINGS = {'type': 'array', 'items': TEXT}
 
 
 def interfaces(service, operations, *, interactor, coordinator):
-    fields = {'type': 'object', 'properties': {f: STRINGS for f in FIELDS}, 'additionalProperties': False}
+    fields = {
+        'type': 'object',
+        'properties': {
+            field: {**STRINGS, 'description': DESCRIPTIONS[field]} for field in FIELDS
+        },
+        'additionalProperties': False,
+    }
     def operation(name, properties, required):
         return {'type': 'object', 'properties': {'op': {'const': name}, **properties},
                 'required': ['op', *required], 'additionalProperties': False}

@@ -3,8 +3,9 @@ from collections import Counter
 import json
 import re
 
-LABELS = {'outcome': '目标', 'constraint': '约束', 'advice': '建议', 'context': '背景'}
-FIELD_ORDER = ('outcome', 'context', 'advice', 'constraint')
+from .request_contract import FIELDS, LABELS
+
+FIELD_ORDER = FIELDS
 CONTENT_OPS = {'create', 'convert', 'append', 'replace', 'invalidate', 'title'}
 
 

@@ -8,6 +8,7 @@ from test_operations import Board, contract
 
 import ancor
 from ancor.host import Host
+from ancor.request_contract import DESCRIPTIONS, FIELDS
 from ancor.store import Store
 from ancor.tool_surface import rewrite_legacy_references
 
@@ -55,10 +56,12 @@ def test_v2_surface_is_role_scoped_and_mutations_have_direct_schemas(tmp_path, m
         tmp_path, monkeypatch, 'ancor-coordinator', mode='v2')
     _, worker, _, _ = registered(tmp_path, monkeypatch, 'ancor-worker', mode='v2')
 
-    assert 'ancor_request_draft' in interactor
+    assert 'ancor_request_draft' not in interactor
+    assert 'ancor_request_confirm' not in interactor
+    assert 'ancor_change_propose' in interactor
     assert 'ancor_task_create' not in interactor
     assert 'ancor_request_advance' in coordinator
-    assert 'ancor_request_draft' not in coordinator
+    assert 'ancor_change_propose' not in coordinator
     assert 'ancor_task_block' in coordinator
     assert not worker
 
@@ -78,8 +81,10 @@ def test_v2_surface_is_role_scoped_and_mutations_have_direct_schemas(tmp_path, m
     assert 'action=' not in missing['next_step']
 
     interactor_ctx.profile_name = 'ancor-coordinator'
-    forbidden = call(interactor, 'ancor_request_draft', {
-        'title': 'Wrong role', 'brief': 'Must not create'})
+    forbidden = call(interactor, 'ancor_change_propose', {
+        'input': 'Wrong role',
+        'operations': [{'op': 'create', 'title': 'Wrong role',
+                        'fields': {'outcome': ['Must not create']}}]})
     assert forbidden['code'] == 'forbidden'
     coordinator_ctx.profile_name = 'ancor-interactor'
     forbidden = call(coordinator, 'ancor_task_block', {
@@ -110,62 +115,67 @@ def test_v2_schema_contract_is_closed_and_manifested(tmp_path, monkeypatch):
     assert all_tools['ancor_task_history']['schema']['parameters'][
         'properties']['limit']['maximum'] == 100
 
+    operations = all_tools['ancor_change_propose']['schema']['parameters'][
+        'properties']['operations']['items']['oneOf']
+    create = next(op for op in operations if op['properties']['op']['const'] == 'create')
+    fields = create['properties']['fields']['properties']
+    assert tuple(fields) == FIELDS
+    assert {field: schema['description'] for field, schema in fields.items()} == DESCRIPTIONS
+
 
 def test_v2_single_call_wrapper_is_normalized_and_batches_are_rejected(tmp_path, monkeypatch):
     _, tools, _, _ = registered(tmp_path, monkeypatch, 'ancor-interactor', mode='v2')
-    def drafts():
-        return Store(tmp_path / 'store.db').snapshot()['drafts']
+    def events():
+        return Store(tmp_path / 'store.db').snapshot()['pending_events']
 
     wrapped = {
-        'calls': [{'name': 'ancor_request_draft', 'arguments': {
-            'title': 'Wrapped request', 'brief': 'Deliver the wrapped result'}}],
-        'name': 'ancor_request_draft',
+        'calls': [{'name': 'ancor_signal_propose', 'arguments': {
+            'text': 'Wrapped signal'}}],
+        'name': 'ancor_signal_propose',
     }
-    result = call(tools, 'ancor_request_draft', wrapped)
+    result = call(tools, 'ancor_signal_propose', wrapped)
     assert result['clarify_args']
     assert result['id']
-    outer_only = call(tools, 'ancor_request_draft', {
-        'calls': [{'title': 'Outer name', 'brief': 'Valid direct call payload'}],
-        'name': 'ancor_request_draft',
+    outer_only = call(tools, 'ancor_signal_propose', {
+        'calls': [{'text': 'Outer-name signal'}],
+        'name': 'ancor_signal_propose',
     })
     assert outer_only['id'] != result['id']
-    inner_only = call(tools, 'ancor_request_draft', {
-        'calls': [{'name': 'ancor_request_draft', 'arguments': {
-            'title': 'Inner name', 'brief': 'Valid wrapped call payload'}}],
+    inner_only = call(tools, 'ancor_signal_propose', {
+        'calls': [{'name': 'ancor_signal_propose', 'arguments': {
+            'text': 'Inner-name signal'}}],
     })
     assert inner_only['id'] not in {result['id'], outer_only['id']}
 
-    before = drafts()
-    unnamed = call(tools, 'ancor_request_draft', {
-        'calls': [{'arguments': {'title': 'No name', 'brief': 'Must not write'}}]})
+    before = events()
+    unnamed = call(tools, 'ancor_signal_propose', {
+        'calls': [{'arguments': {'text': 'Must not write'}}]})
     assert unnamed['code'] == 'protocol_error'
-    assert drafts() == before
-    extra = call(tools, 'ancor_request_draft', {
-        'calls': [{'arguments': {'title': 'Extra', 'brief': 'Must not write'},
+    assert events() == before
+    extra = call(tools, 'ancor_signal_propose', {
+        'calls': [{'arguments': {'text': 'Must not write'},
                    'unexpected': True}],
-        'name': 'ancor_request_draft'})
+        'name': 'ancor_signal_propose'})
     assert extra['code'] == 'protocol_error'
-    assert drafts() == before
-    null_arguments = call(tools, 'ancor_request_draft', {
-        'calls': [{'name': 'ancor_request_draft', 'arguments': None}],
-        'name': 'ancor_request_draft'})
+    assert events() == before
+    null_arguments = call(tools, 'ancor_signal_propose', {
+        'calls': [{'name': 'ancor_signal_propose', 'arguments': None}],
+        'name': 'ancor_signal_propose'})
     assert null_arguments['code'] == 'protocol_error'
-    mismatch = call(tools, 'ancor_request_draft', {
+    mismatch = call(tools, 'ancor_signal_propose', {
         'calls': [{'name': 'ancor_task_block', 'arguments': {}}],
-        'name': 'ancor_request_draft'})
+        'name': 'ancor_signal_propose'})
     assert mismatch['code'] == 'protocol_error'
-    assert drafts() == before
+    assert events() == before
 
-    rejected = call(tools, 'ancor_request_draft', {
+    rejected = call(tools, 'ancor_signal_propose', {
         'calls': [
-            {'name': 'ancor_request_draft', 'arguments': {
-                'title': 'First', 'brief': 'Must not write'}},
-            {'name': 'ancor_request_draft', 'arguments': {
-                'title': 'Second', 'brief': 'Must not write'}},
+            {'name': 'ancor_signal_propose', 'arguments': {'text': 'Must not write'}},
+            {'name': 'ancor_signal_propose', 'arguments': {'text': 'Must not write'}},
         ],
-        'name': 'ancor_request_draft'})
+        'name': 'ancor_signal_propose'})
     assert rejected['code'] == 'protocol_error'
-    assert drafts() == before
+    assert events() == before
 
 
 def test_v2_direct_tools_drive_structured_request_and_task(tmp_path, monkeypatch):

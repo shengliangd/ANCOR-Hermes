@@ -28,6 +28,7 @@ if not __package__:
         sys.modules[namespace] = package
     __package__ = namespace + ".dashboard"
 
+from ..request_contract import FIELDS, LABELS
 from ..views import event_summary, notification_detail, notification_selection, notification_summary, request_detail, request_ref, task_detail, task_ref
 
 router = APIRouter()
@@ -196,7 +197,8 @@ def request(request_id: str):
         result = {"request": request_detail(row), "task_ids": [item["task_id"] for item in links]}
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='point_versions'").fetchone():
             points = _rows(conn, "SELECT * FROM point_versions WHERE request_id=? AND invalidated_at IS NULL ORDER BY position,point_id", (request_id,))
-            result["fields"] = {field: [p for p in points if p["field"] == field] for field in ("outcome", "constraint", "advice", "context")}
+            result["fields"] = {field: [p for p in points if p["field"] == field] for field in FIELDS}
+            result["field_labels"] = LABELS
             result["questions"] = _rows(conn, "SELECT * FROM questions WHERE request_id=? ORDER BY created_at", (request_id,))
             result["coordination"] = _rows(conn, "SELECT * FROM impact_reviews WHERE request_id=? AND generation=? ORDER BY task_id", (request_id, row["generation"]))
             changes = _rows(conn, "SELECT id,actor,operations,created_at,committed_at FROM changes WHERE request_id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note' ORDER BY committed_at DESC LIMIT 50", (request_id,))

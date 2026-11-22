@@ -19,7 +19,14 @@ def page():
           events: {count: 0, items: []}
         };
         var detail = {request: {title: "Report detail", status: "active", generation: 1,
-          observed_generation: 1}, fields: {outcome: [{version_id: "v1", body: "Deliver report"}]}};
+          observed_generation: 1},
+          fields: {
+            outcome: [{version_id: "v1", body: "Deliver report"}],
+            constraint: [{version_id: "v2", body: "Do not publish"}],
+            advice: [{version_id: "v3", body: "Use the existing template"}],
+            context: [{version_id: "v4", body: "Source is local"}]
+          },
+          field_labels: {outcome: "目标", constraint: "约束", advice: "建议", context: "背景"}};
         function response(url) { return url.endsWith("/overview") ? overview : detail; }
         function fetch() { rawFetchCalls++; throw new Error("Unauthenticated fetch used"); }
         function setInterval() { return 1; }
@@ -103,6 +110,8 @@ def test_overview_and_detail_use_authenticated_host_requests(page, helper):
         {'helper': helper, 'url': '/api/plugins/ancor/requests/request%20%2F%E4%B8%AD%E6%96%87'},
     ]
     assert 'Deliver report' in page.eval('JSON.stringify(tree)')
+    rendered = page.eval('JSON.stringify(tree)')
+    assert rendered.index('目标') < rendered.index('约束') < rendered.index('建议') < rendered.index('背景')
     assert page.eval('rawFetchCalls') == 0
 
 

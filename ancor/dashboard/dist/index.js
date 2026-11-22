@@ -33,13 +33,13 @@
     if (!detail) return null;
     const req = detail.request;
     if (!req) return h("section", null, h(Button, { onClick: props.onClose }, "关闭详情"), h("pre", { style: { whiteSpace: "pre-wrap" } }, JSON.stringify(detail, null, 2)));
-    const labels = { outcome: "目标", constraint: "约束", advice: "建议", context: "背景" };
+    const labels = detail.field_labels || { outcome: "目标", constraint: "约束", advice: "建议", context: "背景" };
     return h("section", { className: "ancor-card" },
       h(Button, { onClick: props.onClose }, "关闭详情"), h("h2", null, req.title),
       h("p", null, "状态：" + req.status + " · 请求版本：" + req.generation + " · 已评估：" + req.observed_generation),
       req.content_mode === "legacy" ? h("pre", { style: { whiteSpace: "pre-wrap" } }, req.brief) :
-        Object.entries(labels).map(([key, label]) => h("section", { key }, h("h3", null, label),
-          h("ul", null, (detail.fields[key] || []).map((point) => h("li", { key: point.version_id }, point.body))))),
+        Object.entries(detail.fields || {}).map(([key, points]) => h("section", { key }, h("h3", null, labels[key] || key),
+          h("ul", null, points.map((point) => h("li", { key: point.version_id }, point.body))))),
       h("h3", null, "问题"), h("ul", null, (detail.questions || []).map((q) => h("li", { key: q.id }, q.body + " · " + q.state))),
       h("h3", null, "任务调整"), h("ul", null, (detail.coordination || []).map((r) => h("li", { key: r.task_id }, r.decision + " · " + r.state + " · " + r.reason))),
       h("h3", null, "改动历史"), h("ul", null, ((detail.changes || {}).items || []).map((c) => h("li", { key: c.id },
