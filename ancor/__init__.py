@@ -1,6 +1,7 @@
 """Thin profile-scoped Hermes integration. No provisioning during registration."""
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 
@@ -999,8 +1000,14 @@ def register(ctx, *, scan_runner=None):
 
     for name, (description, properties, required) in definitions.items():
         method = methods[name.removeprefix('ancor_')]
+        try:
+            accepts_native_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in inspect.signature(method).parameters.values())
+        except (TypeError, ValueError):
+            accepts_native_kwargs = False
         def handle(args, _method=method, _name=name, _properties=properties,
-                   _required=required, **kwargs):
+                   _required=required, _accepts_native_kwargs=accepts_native_kwargs, **kwargs):
             try:
                 args = _normalize_tool_arguments(_name, args)
                 if worker:
@@ -1041,7 +1048,8 @@ def register(ctx, *, scan_runner=None):
                 if coordinator:
                     from .scheduling import Scheduling
                     Scheduling(service.store).started()
-                result = _method(args, **kwargs)
+                result = (_method(args, **kwargs) if _accepts_native_kwargs
+                          else _method(args))
                 if tool_api == 'v2':
                     from .tool_surface import rewrite_legacy_references
                     result = rewrite_legacy_references(result, role=role)

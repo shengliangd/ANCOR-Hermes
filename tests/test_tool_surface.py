@@ -35,8 +35,8 @@ def registered(tmp_path, monkeypatch, role, *, mode='v2', board=None, admin=Fals
     return ctx, tools, hooks, board
 
 
-def call(tools, name, args):
-    return json.loads(tools[name]['handler'](args))
+def call(tools, name, args, **kwargs):
+    return json.loads(tools[name]['handler'](args, **kwargs))
 
 
 def confirm(hooks, proposal, call_id):
@@ -114,6 +114,11 @@ def test_v2_schema_contract_is_closed_and_manifested(tmp_path, monkeypatch):
     assert evidence['additionalProperties'] is False
     assert all_tools['ancor_task_history']['schema']['parameters'][
         'properties']['limit']['maximum'] == 100
+
+    native_read = call(interactor, 'ancor_overview', {}, task_id='native-task')
+    assert 'error' not in native_read
+    native_tasks = call(coordinator, 'ancor_task_list', {}, task_id='native-task')
+    assert 'error' not in native_tasks
 
     operations = all_tools['ancor_change_propose']['schema']['parameters'][
         'properties']['operations']['items']['oneOf']
