@@ -146,20 +146,29 @@ class Service:
 
     def _open_desktop_preview(self, path, digest):
         """Open the immutable Markdown file when its short clarify is submitted."""
+        return self._dispatch_desktop_preview({
+            'action': 'open', 'url': path,
+            'label': f'ANCOR 确认 · {digest[:12]}',
+        }, unavailable_message='ANCOR Desktop Markdown preview unavailable')
+
+    def _close_desktop_preview(self, path):
+        """Close only the confirmed ANCOR preview tab, leaving other tabs open."""
+        return self._dispatch_desktop_preview(
+            {'action': 'close', 'url': path},
+            unavailable_message='ANCOR Desktop Markdown preview close unavailable')
+
+    def _dispatch_desktop_preview(self, args, *, unavailable_message):
         dispatch = getattr(self.ctx, 'dispatch_tool', None)
         if not callable(dispatch):
             return False
         try:
-            raw = dispatch('desktop_preview', {
-                'action': 'open', 'url': path,
-                'label': f'ANCOR 确认 · {digest[:12]}',
-            })
+            raw = dispatch('desktop_preview', args)
             payload = json.loads(raw) if isinstance(raw, str) else raw
             return (bool(payload.get('success')) and not payload.get('error')
                     if isinstance(payload, dict) and 'success' in payload
                     else not (isinstance(payload, dict) and payload.get('error')))
         except Exception:
-            log.debug('ANCOR Desktop Markdown preview unavailable', exc_info=True)
+            log.debug(unavailable_message, exc_info=True)
             return False
 
     def _desktop_clarify_args(self, kind, target, full_args, path, digest):
@@ -531,6 +540,10 @@ class Service:
                 if expected_args is None:
                     raise RuntimeError('clarify arguments no longer match the immutable proposal')
                 question = expected_args['questions'][0]
+                preview_to_close = None
+                if (self._session_surface() in {'desktop', 'webapp'}
+                        and len(candidates) > 1 and expected_args == candidates[1]):
+                    preview_to_close = self._raw_confirmation(kind, target).get('draft_file')
                 if kind in {'signal', 'change'}:
                     answer = question['choices'][1]
                 elif kind == 'draft':
@@ -593,6 +606,8 @@ class Service:
                 log.exception('ANCOR confirmation commit failed for %s', target)
                 return
             self._finish_confirmation(db, session_id, tool_call_id, 'confirmed')
+        if preview_to_close:
+            self._close_desktop_preview(preview_to_close)
 
     def get_context(self, args):
         ids = args.get('ack_event_ids', [])

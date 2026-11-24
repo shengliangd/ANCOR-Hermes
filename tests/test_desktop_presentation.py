@@ -153,6 +153,24 @@ def test_desktop_clarify_binds_to_markdown_file_without_opening_it(tmp_path, mon
     })]
     service.post_tool_call('clarify', args, submitted(question), session_id='s', tool_call_id='c')
     assert store.get_change(proposal['id'])['committed_at'] is not None
+    assert ctx.calls[-1] == ('desktop_preview', {'action': 'close', 'url': str(path)})
+
+
+def test_rejected_desktop_confirmation_keeps_the_preview_open(tmp_path, monkeypatch):
+    service, store, ctx, proposal = create_change(tmp_path, monkeypatch)
+    args = proposal['clarify_args']
+    question = args['questions'][0]
+    assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
+
+    result = submitted(question)
+    result['responses'][0]['user_response'] = question['choices'][0]
+    service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
+
+    assert store.get_change(proposal['id'])['committed_at'] is None
+    assert ctx.calls == [('desktop_preview', {
+        'action': 'open', 'url': proposal['draft_file'],
+        'label': f'ANCOR 确认 · {proposal["presentation_digest"][:12]}',
+    })]
 
 
 def test_preview_failure_blocks_the_short_desktop_confirmation(tmp_path, monkeypatch):
@@ -213,6 +231,9 @@ def test_every_ancor_confirmation_gets_a_bound_desktop_file(tmp_path, monkeypatc
     })]
     service.post_tool_call(
         'clarify', response['clarify_args'], submitted(question), session_id='s', tool_call_id='c')
+    assert ctx.calls[-1] == ('desktop_preview', {
+        'action': 'close', 'url': response['draft_file'],
+    })
     with sqlite3.connect(service.store.path + '.confirmations.db') as db:
         assert db.execute(
             'SELECT consumed,outcome FROM confirmations WHERE session=? AND call=?',
