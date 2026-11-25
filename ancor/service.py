@@ -12,6 +12,8 @@ from .views import collection, note_detail, note_summary
 
 log = logging.getLogger(__name__)
 
+DESKTOP_SURFACES = frozenset({'desktop', 'webapp', 'gui'})
+
 
 class Service:
     def __init__(self, ctx, store=None, board=None):
@@ -140,6 +142,10 @@ class Service:
         except Exception:
             return ''
 
+    def _uses_desktop_preview(self):
+        """Whether this turn can address a local Desktop/Webapp preview pane."""
+        return self._session_surface() in DESKTOP_SURFACES
+
     @staticmethod
     def _presentation_digest(text):
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
@@ -174,11 +180,16 @@ class Service:
     def _desktop_clarify_args(self, kind, target, full_args, path, digest):
         """Concise Desktop clarify bound to the immutable Markdown file."""
         question = full_args['questions'][0]
+        try:
+            draft_link = f'打开确认草稿：[点击打开]({Path(path).as_uri()})'
+        except ValueError:
+            draft_link = '打开确认草稿：请复制上面的文件路径。'
         return {'questions': [{
             **question,
             'question': ('请打开以下 Markdown 文件核对完整 ANCOR 确认内容。\n'
                          f'文件：{path}\n'
-                         '如无法直接打开，可复制上面的路径。\n'
+                         f'{draft_link}\n'
+                         '如未自动打开，可点击链接或复制上面的路径。\n'
                          f'内容摘要：{digest[:12]}\n'
                          f'确认单：{kind}:{target}'),
         }]}
@@ -192,7 +203,7 @@ class Service:
             return response
         digest = self._presentation_digest(text)
         response['presentation_digest'] = digest
-        if self._session_surface() in {'desktop', 'webapp'}:
+        if self._uses_desktop_preview():
             response['clarify_args'] = self._desktop_clarify_args(
                 kind, identifier, response['clarify_args'], path, digest)
             response['next_step'] = ('Use the unchanged concise clarify_args. The immutable Markdown file '
@@ -223,7 +234,7 @@ class Service:
         path = response.get('draft_file') or self._write_presentation(kind, target, text)
         digest = self._presentation_digest(text)
         candidates = [full]
-        if self._session_surface() in {'desktop', 'webapp'}:
+        if self._uses_desktop_preview():
             candidates.append(self._desktop_clarify_args(kind, target, full, path, digest))
         return candidates
 
@@ -494,21 +505,32 @@ class Service:
             expected = self._clarify_candidates(kind, target)
             if args not in expected:
                 raise ValueError('native clarify arguments must match the complete immutable proposal exactly')
-            if self._session_surface() in {'desktop', 'webapp'} and len(expected) > 1 and args == expected[1]:
+            result = None
+            registered_args = args
+            if self._uses_desktop_preview() and len(expected) > 1 and args == expected[1]:
                 response = self._raw_confirmation(kind, target)
                 digest = self._presentation_digest(response['presentation'])
                 if not self._open_desktop_preview(response['draft_file'], digest):
-                    raise ValueError('ANCOR Markdown preview could not be opened; open the file path manually and retry')
+                    # The preview pane has no delivery acknowledgement. If dispatch
+                    # itself is unavailable, keep confirmation usable by replacing
+                    # the file-only prompt with its full inline form.
+                    registered_args = expected[0]
+                    result = {'action': 'modify', 'args': registered_args}
+                    log.warning(
+                        'ANCOR Desktop preview unavailable for %s:%s; using inline confirmation',
+                        kind, target)
+            registered_encoded = json.dumps(registered_args, sort_keys=True, ensure_ascii=False)
             with self._confirmations() as db:
                 existing = db.execute('SELECT kind, target, args, consumed FROM confirmations '
                                       'WHERE session=? AND call=?',
                                       (session_id, tool_call_id)).fetchone()
-                if existing and existing != (kind, target, encoded, 0):
+                if existing and existing != (kind, target, registered_encoded, 0):
                     raise ValueError('confirmation call identity already used')
                 db.execute('INSERT OR IGNORE INTO confirmations('
                            'session, call, kind, target, args, outcome) '
                            'VALUES (?, ?, ?, ?, ?, ?)',
-                           (session_id, tool_call_id, kind, target, encoded, 'pending'))
+                           (session_id, tool_call_id, kind, target, registered_encoded, 'pending'))
+            return result
         except Exception as exc:
             return {'action': 'block', 'message': str(exc)}
 
@@ -541,7 +563,7 @@ class Service:
                     raise RuntimeError('clarify arguments no longer match the immutable proposal')
                 question = expected_args['questions'][0]
                 preview_to_close = None
-                if (self._session_surface() in {'desktop', 'webapp'}
+                if (self._uses_desktop_preview()
                         and len(candidates) > 1 and expected_args == candidates[1]):
                     preview_to_close = self._raw_confirmation(kind, target).get('draft_file')
                 if kind in {'signal', 'change'}:

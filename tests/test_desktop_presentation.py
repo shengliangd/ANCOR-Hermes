@@ -129,7 +129,7 @@ def make_case(tmp_path, monkeypatch, kind, *, surface='desktop', preview_respons
     return service, store, ctx, response, target
 
 
-@pytest.mark.parametrize('surface', ['desktop', 'webapp'])
+@pytest.mark.parametrize('surface', ['desktop', 'webapp', 'gui'])
 def test_desktop_clarify_binds_to_markdown_file_without_opening_it(tmp_path, monkeypatch, surface):
     service, store, ctx, proposal = create_change(tmp_path, monkeypatch, surface=surface)
     question = proposal['clarify_args']['questions'][0]
@@ -141,7 +141,8 @@ def test_desktop_clarify_binds_to_markdown_file_without_opening_it(tmp_path, mon
     assert path.read_text(encoding='utf-8') == proposal['presentation']
     assert path.stat().st_mode & 0o777 == 0o600
     assert f'文件：{path}' in question['question']
-    assert '如无法直接打开，可复制上面的路径。' in question['question']
+    assert f'打开确认草稿：[点击打开]({path.as_uri()})' in question['question']
+    assert '如未自动打开，可点击链接或复制上面的路径。' in question['question']
     assert f'内容摘要：{digest[:12]}' in question['question']
     assert f'确认单：change:{proposal["id"]}' in question['question']
     assert 'Render **Markdown**' not in question['question']
@@ -173,16 +174,23 @@ def test_rejected_desktop_confirmation_keeps_the_preview_open(tmp_path, monkeypa
     })]
 
 
-def test_preview_failure_blocks_the_short_desktop_confirmation(tmp_path, monkeypatch):
-    service, store, _, proposal = create_change(
+def test_preview_failure_falls_back_to_the_full_inline_confirmation(tmp_path, monkeypatch):
+    service, store, ctx, proposal = create_change(
         tmp_path, monkeypatch, preview_response={'success': False, 'message': 'declined'})
 
-    blocked = service.pre_tool_call(
+    fallback = service.pre_tool_call(
         'clarify', proposal['clarify_args'], session_id='s', tool_call_id='c')
 
-    assert blocked['action'] == 'block'
-    assert 'preview could not be opened' in blocked['message']
-    assert store.get_change(proposal['id'])['committed_at'] is None
+    full_args = service._raw_confirmation('change', proposal['id'])['clarify_args']
+    assert fallback == {'action': 'modify', 'args': full_args}
+    assert ctx.calls == [('desktop_preview', {
+        'action': 'open', 'url': proposal['draft_file'],
+        'label': f'ANCOR 确认 · {proposal["presentation_digest"][:12]}',
+    })]
+    service.post_tool_call(
+        'clarify', full_args, submitted(full_args['questions'][0]),
+        session_id='s', tool_call_id='c')
+    assert store.get_change(proposal['id'])['committed_at'] is not None
 
 
 def test_messaging_surface_uses_the_full_clarify(tmp_path, monkeypatch):
@@ -211,6 +219,27 @@ CONFIRMATION_KINDS = [
     'change', 'draft', 'cancellation', 'pause', 'resume',
     'human_decision', 'signal', 'response',
 ]
+
+
+@pytest.mark.parametrize('kind', CONFIRMATION_KINDS)
+def test_every_preview_failure_falls_back_to_full_inline_confirmation(
+        tmp_path, monkeypatch, kind):
+    service, _, _, response, target = make_case(
+        tmp_path, monkeypatch, kind,
+        preview_response={'success': False, 'message': 'declined'})
+
+    fallback = service.pre_tool_call(
+        'clarify', response['clarify_args'], session_id='s', tool_call_id='c')
+    full_args = service._raw_confirmation(kind, target)['clarify_args']
+
+    assert fallback == {'action': 'modify', 'args': full_args}
+    service.post_tool_call(
+        'clarify', full_args, submitted(full_args['questions'][0]),
+        session_id='s', tool_call_id='c')
+    with sqlite3.connect(service.store.path + '.confirmations.db') as db:
+        assert db.execute(
+            'SELECT consumed,outcome FROM confirmations WHERE session=? AND call=?',
+            ('s', 'c')).fetchone() == (1, 'confirmed')
 
 
 @pytest.mark.parametrize('kind', CONFIRMATION_KINDS)
