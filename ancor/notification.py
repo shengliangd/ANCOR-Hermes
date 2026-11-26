@@ -10,6 +10,7 @@ cannot be promised across a process crash or transport timeout.
 from contextlib import contextmanager
 import asyncio
 import hashlib
+import importlib
 import json
 import logging
 import sqlite3
@@ -30,6 +31,17 @@ class SenderError(RuntimeError):
 
 class TransportUnavailable(SenderError):
     """No outbound attempt was made, so the durable item may remain pending."""
+
+
+def _load_send_message_tool():
+    """Load Hermes' outbound sender across its module-path move."""
+    for module_name in ('gateway.outbound.send', 'tools.send_message_tool'):
+        try:
+            return importlib.import_module(module_name).send_message_tool
+        except ModuleNotFoundError as exc:
+            if not (exc.name == module_name or module_name.startswith(f'{exc.name}.')):
+                raise
+    raise ModuleNotFoundError('send_message_tool bridge unavailable')
 
 
 class NativeSender:
@@ -75,7 +87,7 @@ class NativeSender:
         try:
             from gateway.run import _profile_runtime_scope
             from hermes_cli.profiles import get_profile_dir
-            from tools.send_message_tool import send_message_tool
+            send_message_tool = _load_send_message_tool()
         except Exception as exc:
             raise TransportUnavailable('native_send_bridge_unavailable',
                                        exception_class=type(exc).__name__) from None

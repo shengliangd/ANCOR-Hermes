@@ -1,8 +1,10 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
+import ancor.notification as notification_module
 from ancor.notification import (NativeSender, NotificationDispatcher, NotificationOutbox,
                                 TransportUnavailable)
 
@@ -297,3 +299,29 @@ def test_answer_is_immutable_and_not_completion_acceptance(tmp_path):
 def test_native_sender_requires_explicit_profile():
     with pytest.raises(ValueError):
         NativeSender('')
+
+
+def test_send_message_tool_prefers_current_gateway_module(monkeypatch):
+    sender = object()
+
+    def import_module(name):
+        assert name == 'gateway.outbound.send'
+        return SimpleNamespace(send_message_tool=sender)
+
+    monkeypatch.setattr(notification_module.importlib, 'import_module', import_module)
+    assert notification_module._load_send_message_tool() is sender
+
+
+def test_send_message_tool_falls_back_to_legacy_module(monkeypatch):
+    sender = object()
+
+    def import_module(name):
+        if name == 'gateway.outbound.send':
+            error = ModuleNotFoundError(name)
+            error.name = 'gateway'
+            raise error
+        assert name == 'tools.send_message_tool'
+        return SimpleNamespace(send_message_tool=sender)
+
+    monkeypatch.setattr(notification_module.importlib, 'import_module', import_module)
+    assert notification_module._load_send_message_tool() is sender

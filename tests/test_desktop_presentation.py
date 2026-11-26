@@ -1,4 +1,4 @@
-"""Desktop confirmations bind to Markdown files while native clarify stays authoritative."""
+"""Desktop/Webapp use Markdown file cards; other surfaces use full native clarify."""
 import json
 from pathlib import Path
 import sqlite3
@@ -130,7 +130,7 @@ def make_case(tmp_path, monkeypatch, kind, *, surface='desktop', preview_respons
 
 
 @pytest.mark.parametrize('surface', ['desktop', 'webapp', 'gui'])
-def test_desktop_clarify_binds_to_markdown_file_without_opening_it(tmp_path, monkeypatch, surface):
+def test_desktop_clarify_uses_media_file_confirmation(tmp_path, monkeypatch, surface):
     service, store, ctx, proposal = create_change(tmp_path, monkeypatch, surface=surface)
     question = proposal['clarify_args']['questions'][0]
     path = Path(proposal['draft_file'])
@@ -140,24 +140,25 @@ def test_desktop_clarify_binds_to_markdown_file_without_opening_it(tmp_path, mon
     assert path.suffix == '.md' and digest[:12] in path.name
     assert path.read_text(encoding='utf-8') == proposal['presentation']
     assert path.stat().st_mode & 0o777 == 0o600
-    assert f'文件：{path}' in question['question']
-    assert f'打开确认草稿：[点击打开]({path.as_uri()})' in question['question']
-    assert '如未自动打开，可点击链接或复制上面的路径。' in question['question']
+    assert question['question'].startswith('请打开上方 ANCOR 确认文件')
     assert f'内容摘要：{digest[:12]}' in question['question']
     assert f'确认单：change:{proposal["id"]}' in question['question']
-    assert 'Render **Markdown**' not in question['question']
+    assert proposal['presentation'] not in question['question']
+    assert proposal['confirmation_media'] == f'MEDIA:{path}'
+    assert proposal['confirmation_media'] in proposal['next_step']
+    assert proposal['clarify_args']['timeout_seconds'] == 3600
+    assert str(path) not in question['question']
+    assert 'file://' not in question['question']
 
     args = proposal['clarify_args']
     assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
-    assert ctx.calls == [('desktop_preview', {
-        'action': 'open', 'url': str(path), 'label': f'ANCOR 确认 · {digest[:12]}',
-    })]
+    assert ctx.calls == []
     service.post_tool_call('clarify', args, submitted(question), session_id='s', tool_call_id='c')
     assert store.get_change(proposal['id'])['committed_at'] is not None
-    assert ctx.calls[-1] == ('desktop_preview', {'action': 'close', 'url': str(path)})
+    assert ctx.calls == []
 
 
-def test_rejected_desktop_confirmation_keeps_the_preview_open(tmp_path, monkeypatch):
+def test_rejected_desktop_confirmation_does_not_commit(tmp_path, monkeypatch):
     service, store, ctx, proposal = create_change(tmp_path, monkeypatch)
     args = proposal['clarify_args']
     question = args['questions'][0]
@@ -168,38 +169,34 @@ def test_rejected_desktop_confirmation_keeps_the_preview_open(tmp_path, monkeypa
     service.post_tool_call('clarify', args, result, session_id='s', tool_call_id='c')
 
     assert store.get_change(proposal['id'])['committed_at'] is None
-    assert ctx.calls == [('desktop_preview', {
-        'action': 'open', 'url': proposal['draft_file'],
-        'label': f'ANCOR 确认 · {proposal["presentation_digest"][:12]}',
-    })]
+    assert ctx.calls == []
 
 
-def test_preview_failure_falls_back_to_the_full_inline_confirmation(tmp_path, monkeypatch):
+def test_preview_tool_is_not_used_for_file_confirmation(tmp_path, monkeypatch):
     service, store, ctx, proposal = create_change(
         tmp_path, monkeypatch, preview_response={'success': False, 'message': 'declined'})
 
-    fallback = service.pre_tool_call(
-        'clarify', proposal['clarify_args'], session_id='s', tool_call_id='c')
+    assert service.pre_tool_call(
+        'clarify', proposal['clarify_args'], session_id='s', tool_call_id='c') is None
 
-    full_args = service._raw_confirmation('change', proposal['id'])['clarify_args']
-    assert fallback == {'action': 'modify', 'args': full_args}
-    assert ctx.calls == [('desktop_preview', {
-        'action': 'open', 'url': proposal['draft_file'],
-        'label': f'ANCOR 确认 · {proposal["presentation_digest"][:12]}',
-    })]
+    assert ctx.calls == []
     service.post_tool_call(
-        'clarify', full_args, submitted(full_args['questions'][0]),
+        'clarify', proposal['clarify_args'], submitted(proposal['clarify_args']['questions'][0]),
         session_id='s', tool_call_id='c')
     assert store.get_change(proposal['id'])['committed_at'] is not None
 
 
-def test_messaging_surface_uses_the_full_clarify(tmp_path, monkeypatch):
+def test_messaging_surface_uses_full_markdown_clarify(tmp_path, monkeypatch):
     _, _, ctx, proposal = create_change(tmp_path, monkeypatch, surface='feishu')
     question = proposal['clarify_args']['questions'][0]['question']
 
     assert ctx.calls == []
-    assert question.startswith('**创建请求')
+    assert question.startswith('**创建请求「Desktop request」**')
+    assert '### 内容变更' in question
     assert '> Render \\*\\*Markdown\\*\\*' in question
+    assert proposal['presentation'] in question
+    assert 'confirmation_media' not in proposal
+    assert proposal['clarify_args']['timeout_seconds'] == 3600
     assert Path(proposal['draft_file']).suffix == '.md'
 
 
@@ -222,47 +219,25 @@ CONFIRMATION_KINDS = [
 
 
 @pytest.mark.parametrize('kind', CONFIRMATION_KINDS)
-def test_every_preview_failure_falls_back_to_full_inline_confirmation(
-        tmp_path, monkeypatch, kind):
-    service, _, _, response, target = make_case(
-        tmp_path, monkeypatch, kind,
-        preview_response={'success': False, 'message': 'declined'})
-
-    fallback = service.pre_tool_call(
-        'clarify', response['clarify_args'], session_id='s', tool_call_id='c')
-    full_args = service._raw_confirmation(kind, target)['clarify_args']
-
-    assert fallback == {'action': 'modify', 'args': full_args}
-    service.post_tool_call(
-        'clarify', full_args, submitted(full_args['questions'][0]),
-        session_id='s', tool_call_id='c')
-    with sqlite3.connect(service.store.path + '.confirmations.db') as db:
-        assert db.execute(
-            'SELECT consumed,outcome FROM confirmations WHERE session=? AND call=?',
-            ('s', 'c')).fetchone() == (1, 'confirmed')
-
-
-@pytest.mark.parametrize('kind', CONFIRMATION_KINDS)
-def test_every_ancor_confirmation_gets_a_bound_desktop_file(tmp_path, monkeypatch, kind):
+def test_every_desktop_confirmation_uses_a_media_file(tmp_path, monkeypatch, kind):
     service, _, ctx, response, target = make_case(tmp_path, monkeypatch, kind)
     question = response['clarify_args']['questions'][0]
 
     assert ctx.calls == []
     assert Path(response['draft_file']).suffix == '.md'
-    assert f'文件：{response["draft_file"]}' in question['question']
-    assert f'内容摘要：{response["presentation_digest"][:12]}' in question['question']
+    assert question['question'].startswith('请打开上方 ANCOR 确认文件')
+    assert response['presentation'] not in question['question']
     assert f'确认单：{kind}:{target}' in question['question']
+    assert response['confirmation_media'] == f'MEDIA:{response["draft_file"]}'
+    assert response['confirmation_media'] in response['next_step']
+    assert response['clarify_args']['timeout_seconds'] == 3600
+    assert response['draft_file'] not in question['question']
+    assert 'file://' not in question['question']
     assert service.pre_tool_call(
         'clarify', response['clarify_args'], session_id='s', tool_call_id='c') is None
-    assert ctx.calls == [('desktop_preview', {
-        'action': 'open', 'url': response['draft_file'],
-        'label': f'ANCOR 确认 · {response["presentation_digest"][:12]}',
-    })]
+    assert ctx.calls == []
     service.post_tool_call(
         'clarify', response['clarify_args'], submitted(question), session_id='s', tool_call_id='c')
-    assert ctx.calls[-1] == ('desktop_preview', {
-        'action': 'close', 'url': response['draft_file'],
-    })
     with sqlite3.connect(service.store.path + '.confirmations.db') as db:
         assert db.execute(
             'SELECT consumed,outcome FROM confirmations WHERE session=? AND call=?',
@@ -270,10 +245,13 @@ def test_every_ancor_confirmation_gets_a_bound_desktop_file(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize('kind', CONFIRMATION_KINDS)
-def test_every_messaging_confirmation_keeps_the_full_clarify(tmp_path, monkeypatch, kind):
+def test_every_messaging_confirmation_uses_full_markdown_clarify(tmp_path, monkeypatch, kind):
     _, _, ctx, response, target = make_case(tmp_path, monkeypatch, kind, surface='feishu')
     question = response['clarify_args']['questions'][0]['question']
 
     assert ctx.calls == []
     assert f'确认单：{kind}:{target}' not in question
     assert response['presentation'] in question
+    assert 'confirmation_media' not in response
+    assert response['clarify_args']['timeout_seconds'] == 3600
+    assert 'MEDIA:' not in question

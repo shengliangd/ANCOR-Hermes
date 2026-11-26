@@ -12,7 +12,8 @@ from .views import collection, note_detail, note_summary
 
 log = logging.getLogger(__name__)
 
-DESKTOP_SURFACES = frozenset({'desktop', 'webapp', 'gui'})
+ATTACHMENT_CONFIRMATION_SURFACES = frozenset({'desktop', 'webapp', 'gui'})
+CONFIRMATION_TIMEOUT_SECONDS = 3600
 
 
 class Service:
@@ -142,60 +143,32 @@ class Service:
         except Exception:
             return ''
 
-    def _uses_desktop_preview(self):
-        """Whether this turn can address a local Desktop/Webapp preview pane."""
-        return self._session_surface() in DESKTOP_SURFACES
+    def _uses_confirmation_file(self):
+        """Whether the surface renders a MEDIA: local-file card with preview."""
+        return self._session_surface() in ATTACHMENT_CONFIRMATION_SURFACES
 
     @staticmethod
     def _presentation_digest(text):
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-    def _open_desktop_preview(self, path, digest):
-        """Open the immutable Markdown file when its short clarify is submitted."""
-        return self._dispatch_desktop_preview({
-            'action': 'open', 'url': path,
-            'label': f'ANCOR 确认 · {digest[:12]}',
-        }, unavailable_message='ANCOR Desktop Markdown preview unavailable')
+    @staticmethod
+    def _media_directive(path):
+        text = str(path)
+        return f'MEDIA:"{text}"' if re.search(r'\s', text) else f'MEDIA:{text}'
 
-    def _close_desktop_preview(self, path):
-        """Close only the confirmed ANCOR preview tab, leaving other tabs open."""
-        return self._dispatch_desktop_preview(
-            {'action': 'close', 'url': path},
-            unavailable_message='ANCOR Desktop Markdown preview close unavailable')
-
-    def _dispatch_desktop_preview(self, args, *, unavailable_message):
-        dispatch = getattr(self.ctx, 'dispatch_tool', None)
-        if not callable(dispatch):
-            return False
-        try:
-            raw = dispatch('desktop_preview', args)
-            payload = json.loads(raw) if isinstance(raw, str) else raw
-            return (bool(payload.get('success')) and not payload.get('error')
-                    if isinstance(payload, dict) and 'success' in payload
-                    else not (isinstance(payload, dict) and payload.get('error')))
-        except Exception:
-            log.debug(unavailable_message, exc_info=True)
-            return False
-
-    def _desktop_clarify_args(self, kind, target, full_args, path, digest):
-        """Concise Desktop clarify bound to the immutable Markdown file."""
+    @staticmethod
+    def _file_clarify_args(kind, target, full_args, digest):
+        """Short Clarify for a confirmation already shown as a MEDIA: file card."""
         question = full_args['questions'][0]
-        try:
-            draft_link = f'打开确认草稿：[点击打开]({Path(path).as_uri()})'
-        except ValueError:
-            draft_link = '打开确认草稿：请复制上面的文件路径。'
-        return {'questions': [{
+        return {**full_args, 'questions': [{
             **question,
-            'question': ('请打开以下 Markdown 文件核对完整 ANCOR 确认内容。\n'
-                         f'文件：{path}\n'
-                         f'{draft_link}\n'
-                         '如未自动打开，可点击链接或复制上面的路径。\n'
+            'question': ('请打开上方 ANCOR 确认文件，核对完整内容后选择是否提交。\n'
                          f'内容摘要：{digest[:12]}\n'
                          f'确认单：{kind}:{target}'),
         }]}
 
     def _prepare_confirmation(self, kind, response):
-        """Bind a Desktop confirmation to its immutable Markdown file."""
+        """Prepare a Markdown file card on Desktop/Webapp, full Clarify elsewhere."""
         text = response.get('presentation')
         path = response.get('draft_file')
         identifier = response.get('id')
@@ -203,39 +176,61 @@ class Service:
             return response
         digest = self._presentation_digest(text)
         response['presentation_digest'] = digest
-        if self._uses_desktop_preview():
-            response['clarify_args'] = self._desktop_clarify_args(
-                kind, identifier, response['clarify_args'], path, digest)
-            response['next_step'] = ('Use the unchanged concise clarify_args. The immutable Markdown file '
-                                     'is the complete confirmation content; only the native confirmation commits it.')
+        response['clarify_args'] = {
+            **response['clarify_args'],
+            'timeout_seconds': CONFIRMATION_TIMEOUT_SECONDS,
+        }
+        if self._uses_confirmation_file():
+            response['confirmation_media'] = self._media_directive(path)
+            response['clarify_args'] = self._file_clarify_args(
+                kind, identifier, response['clarify_args'], digest)
+            response['next_step'] = (f'First send one ordinary assistant message containing exactly '
+                                     f'{response["confirmation_media"]}. The file card is the complete Markdown confirmation. '
+                                     'Then call native clarify with the unchanged concise clarify_args. '
+                                     'Do not paste the full presentation into clarify or use a file:// link.')
+        else:
+            response['next_step'] = ('Call native clarify with clarify_args unchanged. The full Markdown '
+                                     'confirmation renders on this surface. Only exact native confirmation '
+                                     'commits the proposal.')
         return response
 
     def _raw_confirmation(self, kind, target):
         if kind == 'signal':
-            return self.signal_presentation(self.store.get_signal_proposal(target))
-        if kind == 'change':
-            return self.change_presentation(self.store.get_change(target))
-        if kind == 'draft':
-            return self.presentation(self.store.get_draft(target))
-        if kind == 'cancellation':
-            return self.cancellation_presentation(self.store.get_cancellation(target))
-        if kind == 'response':
+            response = self.signal_presentation(self.store.get_signal_proposal(target))
+        elif kind == 'change':
+            response = self.change_presentation(self.store.get_change(target))
+        elif kind == 'draft':
+            response = self.presentation(self.store.get_draft(target))
+        elif kind == 'cancellation':
+            response = self.cancellation_presentation(self.store.get_cancellation(target))
+        elif kind == 'response':
             proposal = self._notification_outbox().get_response_proposal(target)
-            return self.response_presentation(proposal)
-        if kind in {'human_decision', 'pause', 'resume'}:
-            return self.command_presentation(self.store.get_request_command(target))
-        raise ValueError(f'unknown ANCOR confirmation kind {kind!r}')
+            response = self.response_presentation(proposal)
+        elif kind in {'human_decision', 'pause', 'resume'}:
+            response = self.command_presentation(self.store.get_request_command(target))
+        else:
+            raise ValueError(f'unknown ANCOR confirmation kind {kind!r}')
+        response['clarify_args'] = {
+            **response['clarify_args'],
+            'timeout_seconds': CONFIRMATION_TIMEOUT_SECONDS,
+        }
+        return response
 
     def _clarify_candidates(self, kind, target):
-        """Full clarify plus the digest-bound Desktop variant."""
+        """Accepted Clarify forms for the current confirmation delivery surface."""
         response = self._raw_confirmation(kind, target)
         full = response['clarify_args']
-        text = response['presentation']
-        path = response.get('draft_file') or self._write_presentation(kind, target, text)
-        digest = self._presentation_digest(text)
         candidates = [full]
-        if self._uses_desktop_preview():
-            candidates.append(self._desktop_clarify_args(kind, target, full, path, digest))
+        if self._uses_confirmation_file():
+            digest = self._presentation_digest(response['presentation'])
+            abbreviated = self._file_clarify_args(kind, target, full, digest)
+            # A proposal prepared before this surface split may still submit
+            # its complete inline form. Newly returned proposals use the file form.
+            candidates.insert(0, abbreviated)
+        without_override = {key: value for key, value in full.items()
+                            if key != 'timeout_seconds'}
+        if without_override not in candidates:
+            candidates.append(without_override)
         return candidates
 
     def change_presentation(self, proposal):
@@ -505,21 +500,7 @@ class Service:
             expected = self._clarify_candidates(kind, target)
             if args not in expected:
                 raise ValueError('native clarify arguments must match the complete immutable proposal exactly')
-            result = None
-            registered_args = args
-            if self._uses_desktop_preview() and len(expected) > 1 and args == expected[1]:
-                response = self._raw_confirmation(kind, target)
-                digest = self._presentation_digest(response['presentation'])
-                if not self._open_desktop_preview(response['draft_file'], digest):
-                    # The preview pane has no delivery acknowledgement. If dispatch
-                    # itself is unavailable, keep confirmation usable by replacing
-                    # the file-only prompt with its full inline form.
-                    registered_args = expected[0]
-                    result = {'action': 'modify', 'args': registered_args}
-                    log.warning(
-                        'ANCOR Desktop preview unavailable for %s:%s; using inline confirmation',
-                        kind, target)
-            registered_encoded = json.dumps(registered_args, sort_keys=True, ensure_ascii=False)
+            registered_encoded = json.dumps(args, sort_keys=True, ensure_ascii=False)
             with self._confirmations() as db:
                 existing = db.execute('SELECT kind, target, args, consumed FROM confirmations '
                                       'WHERE session=? AND call=?',
@@ -530,7 +511,7 @@ class Service:
                            'session, call, kind, target, args, outcome) '
                            'VALUES (?, ?, ?, ?, ?, ?)',
                            (session_id, tool_call_id, kind, target, registered_encoded, 'pending'))
-            return result
+            return None
         except Exception as exc:
             return {'action': 'block', 'message': str(exc)}
 
@@ -562,10 +543,6 @@ class Service:
                 if expected_args is None:
                     raise RuntimeError('clarify arguments no longer match the immutable proposal')
                 question = expected_args['questions'][0]
-                preview_to_close = None
-                if (self._uses_desktop_preview()
-                        and len(candidates) > 1 and expected_args == candidates[1]):
-                    preview_to_close = self._raw_confirmation(kind, target).get('draft_file')
                 if kind in {'signal', 'change'}:
                     answer = question['choices'][1]
                 elif kind == 'draft':
@@ -628,8 +605,6 @@ class Service:
                 log.exception('ANCOR confirmation commit failed for %s', target)
                 return
             self._finish_confirmation(db, session_id, tool_call_id, 'confirmed')
-        if preview_to_close:
-            self._close_desktop_preview(preview_to_close)
 
     def get_context(self, args):
         ids = args.get('ack_event_ids', [])

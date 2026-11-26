@@ -72,6 +72,11 @@ event batches are kept small. Lower either cap only after splitting long work
 into bounded cards; an unlimited budget lets a worker or coordinator loop
 through hundreds of API calls without reaching a terminal decision.
 
+Keep the interactor's general `agent.clarify_timeout` short, such as `600`
+seconds. ANCOR formal confirmations carry their own one-hour native Clarify
+timeout, so widening the profile-wide value is unnecessary and would also delay
+every ordinary clarification.
+
 ## Configure shared ANCOR settings
 
 Merge the following into the owner's `config.yaml`, using real paths and a
