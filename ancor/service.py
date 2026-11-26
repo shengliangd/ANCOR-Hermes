@@ -220,17 +220,23 @@ class Service:
         """Accepted Clarify forms for the current confirmation delivery surface."""
         response = self._raw_confirmation(kind, target)
         full = response['clarify_args']
-        candidates = [full]
+        forms = [full]
         if self._uses_confirmation_file():
             digest = self._presentation_digest(response['presentation'])
             abbreviated = self._file_clarify_args(kind, target, full, digest)
             # A proposal prepared before this surface split may still submit
             # its complete inline form. Newly returned proposals use the file form.
-            candidates.insert(0, abbreviated)
-        without_override = {key: value for key, value in full.items()
-                            if key != 'timeout_seconds'}
-        if without_override not in candidates:
-            candidates.append(without_override)
+            forms.insert(0, abbreviated)
+        # Older Clarify schemas do not expose timeout_seconds. Accept that field's
+        # omission for every delivery form, including the shortened file card.
+        candidates = []
+        for form in forms:
+            if form not in candidates:
+                candidates.append(form)
+            without_override = {key: value for key, value in form.items()
+                                if key != 'timeout_seconds'}
+            if without_override not in candidates:
+                candidates.append(without_override)
         return candidates
 
     def change_presentation(self, proposal):

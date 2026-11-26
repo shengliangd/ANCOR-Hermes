@@ -172,6 +172,20 @@ def test_rejected_desktop_confirmation_does_not_commit(tmp_path, monkeypatch):
     assert ctx.calls == []
 
 
+def test_desktop_confirmation_accepts_clarify_without_timeout(tmp_path, monkeypatch):
+    service, store, ctx, proposal = create_change(tmp_path, monkeypatch, surface='desktop')
+    args = {key: value for key, value in proposal['clarify_args'].items()
+            if key != 'timeout_seconds'}
+    question = args['questions'][0]
+
+    assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
+    service.post_tool_call(
+        'clarify', args, submitted(question), session_id='s', tool_call_id='c')
+
+    assert store.get_change(proposal['id'])['committed_at'] is not None
+    assert ctx.calls == []
+
+
 def test_preview_tool_is_not_used_for_file_confirmation(tmp_path, monkeypatch):
     service, store, ctx, proposal = create_change(
         tmp_path, monkeypatch, preview_response={'success': False, 'message': 'declined'})
@@ -198,6 +212,20 @@ def test_messaging_surface_uses_full_markdown_clarify(tmp_path, monkeypatch):
     assert 'confirmation_media' not in proposal
     assert proposal['clarify_args']['timeout_seconds'] == 3600
     assert Path(proposal['draft_file']).suffix == '.md'
+
+
+def test_messaging_confirmation_accepts_clarify_without_timeout(tmp_path, monkeypatch):
+    service, store, ctx, proposal = create_change(tmp_path, monkeypatch, surface='feishu')
+    args = {key: value for key, value in proposal['clarify_args'].items()
+            if key != 'timeout_seconds'}
+    question = args['questions'][0]
+
+    assert service.pre_tool_call('clarify', args, session_id='s', tool_call_id='c') is None
+    service.post_tool_call(
+        'clarify', args, submitted(question), session_id='s', tool_call_id='c')
+
+    assert store.get_change(proposal['id'])['committed_at'] is not None
+    assert ctx.calls == []
 
 
 def test_changed_markdown_file_cannot_be_confirmed(tmp_path, monkeypatch):
