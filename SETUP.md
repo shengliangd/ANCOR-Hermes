@@ -58,6 +58,53 @@ Enable ANCOR and `clarify` in the interactor's actual channel toolset (for
 example `platform_toolsets.feishu`), not just its CLI toolset. The coordinator
 needs ANCOR in CLI turns, and native worker turns need Kanban and execution tools.
 
+### Avoid long-context pricing tiers
+
+Some providers and models raise prices, reduce cache savings, or consume more
+credits after a single prompt crosses a model-specific context length. ANCOR
+turns can make hundreds of model calls, and every call resends the active
+conversation. A long worker card can therefore cross that boundary repeatedly
+even when its output is small.
+
+Check the current provider documentation for every model and route used by a
+role profile. Do not assume a family-wide threshold or copy one from this
+document. If a model has a long-context pricing boundary, set the profile's
+`compression.threshold_tokens` below it, with headroom for token-estimation
+differences, system prompts, tool schemas, images, output reservation, and
+provider-specific tokenization:
+
+```yaml
+compression:
+  threshold_tokens: <profile-specific-safe-token-limit>
+```
+
+Use an integer value in the actual configuration. `target_ratio` is not a hard
+limit; it is a theoretical compaction target relative to `threshold_tokens`.
+The result also contains system, tool, summary, and protected tail content.
+
+For the OpenAI Codex route only, `codex_gpt55_autoraise` may raise the compaction
+trigger to a larger fraction of the model window. If that would put the trigger
+above the applicable pricing boundary, disable it in that profile:
+
+```yaml
+compression:
+  codex_gpt55_autoraise: false
+```
+
+This key is not a general recommendation for other providers. Configure and
+verify each role profile separately; settings in the Hermes root configuration
+are not a substitute for profile configuration:
+
+```sh
+hermes -p <profile> config set compression.threshold_tokens <profile-specific-safe-token-limit>
+hermes -p <profile> config get compression.threshold_tokens
+```
+
+Compression settings are adopted when a new turn or session starts. A turn that
+is already running can continue with its previous threshold. When the provider
+exposes an account usage endpoint, check it with `hermes -p <profile> usage
+--json`; do not infer an exact token threshold from the reported percentage.
+
 Set practical per-turn bounds on the role profiles. These are model-loop safety
 limits, not substitutes for per-card contracts:
 
