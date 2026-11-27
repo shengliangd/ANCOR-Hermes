@@ -65,13 +65,26 @@ def exec_profile_config_path(profile: str, override: str | None = None) -> Path 
         return None
 
 
+def _load_yaml_dict(text: str) -> dict:
+    try:
+        import hermes_yaml as yaml
+        data = yaml.safe_load(text)
+    except ModuleNotFoundError:
+        try:
+            import yaml
+            data = yaml.safe_load(text)
+        except ModuleNotFoundError:
+            from ruamel.yaml import YAML
+            data = YAML(typ='safe').load(text)
+    return data if isinstance(data, dict) else {}
+
+
 def load_alias_names(path: Path | None) -> frozenset[str] | None:
     """Read only alias names from a profile config. ``None`` means routing is unknown."""
     if path is None or not path.exists():
         return None
-    import yaml
     try:
-        config = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+        config = _load_yaml_dict(path.read_text(encoding='utf-8'))
     except Exception:
         return None
     return alias_names_from_config(config)

@@ -42,11 +42,17 @@ def _settings() -> dict:
     path = _home() / "config.yaml"
     if not path.exists():
         return {}
+    text = path.read_text(encoding="utf-8-sig")
     try:
         import hermes_yaml as yaml
+        config = yaml.safe_load(text) or {}
     except ImportError:
-        import yaml
-    config = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
+        try:
+            import yaml
+            config = yaml.safe_load(text) or {}
+        except ImportError:
+            from ruamel.yaml import YAML
+            config = YAML(typ="safe").load(text) or {}
     return config.get("plugins", {}).get("entries", {}).get("ancor", {}).get("settings", {})
 
 

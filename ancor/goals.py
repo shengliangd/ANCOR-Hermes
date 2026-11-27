@@ -263,8 +263,16 @@ def _parse_budget(raw_budget: dict | None, extra_writable_paths: list[str] | Non
 def parse_goal_spec(spec, *, caller_goal_id: str = 'root') -> dict:
     """Parse and validate a structured /goal contract (dict or YAML string)."""
     if isinstance(spec, str):
-        import yaml
-        loaded = yaml.safe_load(spec)
+        try:
+            import hermes_yaml as yaml
+            loaded = yaml.safe_load(spec)
+        except ModuleNotFoundError:
+            try:
+                import yaml
+                loaded = yaml.safe_load(spec)
+            except ModuleNotFoundError:
+                from ruamel.yaml import YAML
+                loaded = YAML(typ='safe').load(spec)
         if not isinstance(loaded, dict):
             raise ValueError('goal YAML must decode to an object')
         data = dict(loaded)
