@@ -354,7 +354,7 @@ def build_goal_prompt(goal: dict, signals: list[dict], *, model_categories=None)
 def default_goal_command(profile: str, session_id: str, prompt: str, *, resume: bool,
                          model_args=()) -> list[str]:
     # model_args is ['-m', <category>] (+ ['--reasoning', lvl]); Hermes resolves the alias natively.
-    cmd = ['hermes', '-p', profile, '--cli', 'chat', '--format', 'stream-json', *model_args]
+    cmd = ['hermes', '-p', profile, '--cli', 'chat', '--yolo', '--format', 'stream-json', *model_args]
     if resume and session_id:
         cmd.extend(['--resume', session_id])
     elif '\n' in prompt:

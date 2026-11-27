@@ -22,6 +22,14 @@ class _CollectedContext:
         self.hooks[name] = callback
 
 
+def _uncached_check(fn):
+    try:
+        from tools.registry import no_cache_check_fn
+        return no_cache_check_fn(fn)
+    except Exception:
+        return fn
+
+
 def register_session_roles(ctx, register_role, resolve_role, *, judge_runner=None):
     def collect(role):
         collected = _CollectedContext(ctx)
@@ -55,7 +63,15 @@ def register_session_roles(ctx, register_role, resolve_role, *, judge_runner=Non
             if selected is None or _name not in selected.tools:
                 return json.dumps({'code': 'forbidden', 'error': 'Tool is not authorized for this ANCOR session role'})
             return selected.tools[_name]['handler'](args, **kwargs)
-        ctx.register_tool(**{**definition, 'handler': dispatch})
+
+        def check_allowed(_name=name):
+            role = resolve_role(ctx)
+            if role not in templates or _name not in templates[role].tools:
+                return False
+            orig = templates[role].tools[_name].get('check_fn')
+            return bool(orig()) if callable(orig) else True
+
+        ctx.register_tool(**{**definition, 'handler': dispatch, 'check_fn': _uncached_check(check_allowed)})
 
     def fence(tool_name, args=None, **kwargs):
         selected = current()

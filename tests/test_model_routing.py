@@ -69,7 +69,7 @@ def test_cli_args_pass_alias_only_never_provider():
     assert router.cli_args('local') == ['-m', 'local']
     assert router.cli_args(None) == []
     cmd = default_goal_command('ancor-exec', 's1', 'hi', resume=False, model_args=router.cli_args('coding'))
-    assert cmd == ['hermes', '-p', 'ancor-exec', '--cli', 'chat', '--format', 'stream-json', '-m', 'coding', '-q', 'hi']
+    assert cmd == ['hermes', '-p', 'ancor-exec', '--cli', 'chat', '--yolo', '--format', 'stream-json', '-m', 'coding', '-q', 'hi']
     assert '--provider' not in cmd
     with pytest.raises(ValueError):
         CategoryRouter(alias_names=set(), reasoning={'fast': 'turbo'})

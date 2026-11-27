@@ -33,8 +33,8 @@ class FakeContext:
     def get_config(self, key, default=None):
         return self.config.get(key, default)
 
-    def register_tool(self, *, name, toolset, schema, handler):
-        self.tools[name] = {'toolset': toolset, 'schema': schema, 'handler': handler}
+    def register_tool(self, *, name, toolset, schema, handler, check_fn=None):
+        self.tools[name] = {'toolset': toolset, 'schema': schema, 'handler': handler, 'check_fn': check_fn}
 
     def register_hook(self, name, fn):
         self.hooks[name] = fn

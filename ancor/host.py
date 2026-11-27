@@ -47,7 +47,7 @@ def _exec_role_command(role: str, exec_profile: str, prompt: str, model_args=())
     return ['env', *[part for key in removed for part in ('-u', key)],
             f'ANCOR_ROLE={role}',
             f'HERMES_EPHEMERAL_SYSTEM_PROMPT={launch_identity(role)}',
-            'hermes', '-p', exec_profile, '--cli', 'chat', *model_args, '-q', prompt]
+            'hermes', '-p', exec_profile, '--cli', 'chat', '--yolo', *model_args, '-q', prompt]
 
 
 def root_command(exec_profile: str, prompt: str, model_args=()):
