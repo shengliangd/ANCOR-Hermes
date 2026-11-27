@@ -66,7 +66,12 @@ def register_session_roles(ctx, register_role, resolve_role, *, judge_runner=Non
 
         def check_allowed(_name=name):
             role = resolve_role(ctx)
-            if role not in templates or _name not in templates[role].tools:
+            if role not in templates:
+                # If session identity is not bound yet during tool-schema assembly
+                # (e.g. --resume / background turn setup), avoid hiding required tools;
+                # dispatch() and pre_tool_call fence still enforce strict role isolation.
+                return True
+            if _name not in templates[role].tools:
                 return False
             orig = templates[role].tools[_name].get('check_fn')
             return bool(orig()) if callable(orig) else True
