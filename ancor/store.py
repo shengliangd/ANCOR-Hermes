@@ -74,6 +74,8 @@ class Store(Changes):
             self._drop_retired_columns(db)
             self._migrate_legacy_acceptances(db)
             self._init_changes(db)
+            from .goals import init_goal_tables
+            init_goal_tables(db)
 
     @staticmethod
     def _migrate_legacy_acceptances(db):

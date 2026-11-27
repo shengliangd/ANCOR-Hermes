@@ -1,0 +1,133 @@
+"""Tests for zero-LLM GoalWatcher, Crash-Safe GoalReconciler, and GoalRunner (2-profile Plan A)."""
+import json
+import sys
+
+from ancor.goals import GoalStore
+from ancor.quota_guard import QuotaGuard
+from ancor.store import Store
+from ancor.watcher import FileClusterBackend, GoalReconciler, GoalRunner, GoalWatcher
+
+
+def _create_goal(tmp_path, now_box):
+    store = Store(tmp_path / 'requests.db')
+    p = store.propose_change(
+        None,
+        [{'op': 'create', 'title': 'Watcher Test', 'fields': {'outcome': ['Run cluster job']}}],
+        actor='default',
+        source={'kind': 'interactor_proposal', 'input': 'run job'},
+    )
+    rid = store.commit_change(p['id'], 'confirm-1')['request_id']
+    goals = GoalStore(store, clock=lambda: now_box[0])
+    backend = FileClusterBackend(tmp_path / 'cluster.json', clock=lambda: now_box[0])
+    g = goals.spawn_goal({
+        'goal_id': 'g_watch',
+        'request_ref': {'id': rid, 'generation': 1},
+        'objective': 'Train & eval',
+        'done_criteria': 'Eval done',
+        'scope': {'readable_requests': [rid], 'can_ask_human': False},
+        'budget': {'limits': {'gpu.alaya': 2, 'wall_hours': 2}, 'allowed': {'clusters': ['alaya']}},
+    })
+    return store, goals, backend, g
+
+
+def test_watcher_zero_llm_poll_and_drain_pause_semantics(tmp_path):
+    now = [1000.0]
+    _store, goals, backend, _g = _create_goal(tmp_path, now)
+    guard = QuotaGuard(goals, backend)
+    guard.acquire(usage={'gpu.alaya': 2}, tags={'clusters': 'alaya'}, handle_id='dlc_1', goal_id='g_watch')
+    goals.mark_waiting_external('g_watch')
+
+    watcher = GoalWatcher(goals, backend, clock=lambda: now[0])
+    assert watcher.poll() == {'transitions': [], 'timeouts': [], 'woken_goals': []}
+
+    goals.pause_goal('g_watch', mode='drain', process_killer=lambda _: True)
+    backend.set_status('dlc_1', 'succeeded', detail='val_sr=0.74')
+    poll2 = watcher.poll()
+    assert len(poll2['transitions']) == 1
+    assert poll2['woken_goals'] == []
+    paused_goal = goals.get_goal('g_watch')
+    assert paused_goal['status'] == 'paused'
+    assert paused_goal['needs_wake'] is False
+    assert paused_goal['pending_signals'][-1]['payload']['handle_id'] == 'dlc_1'
+
+    goals.resume_goal('g_watch')
+    resumed = goals.get_goal('g_watch')
+    assert resumed['status'] == 'running'
+    assert resumed['needs_wake'] is True
+
+
+def test_watcher_wakes_on_handle_transition_and_wall_clock_timeout(tmp_path):
+    now = [1000.0]
+    _store, goals, backend, _g = _create_goal(tmp_path, now)
+    guard = QuotaGuard(goals, backend)
+    guard.acquire(usage={'gpu.alaya': 1}, tags={'clusters': 'alaya'}, handle_id='dlc_2', goal_id='g_watch')
+    goals.mark_waiting_external('g_watch')
+
+    watcher = GoalWatcher(goals, backend, clock=lambda: now[0])
+    backend.set_status('dlc_2', 'failed', detail='OOM')
+    poll = watcher.poll()
+    assert poll['woken_goals'] == ['g_watch']
+    g = goals.get_goal('g_watch')
+    assert g['status'] == 'running'
+    assert g['pending_signals'][-1]['payload']['status'] == 'failed'
+
+    goals.consume_signals('g_watch')
+    now[0] += 3 * 3600
+    assert len(watcher.poll()['timeouts']) == 1
+    assert watcher.poll()['timeouts'] == []
+
+
+def test_crash_safe_reconciler(tmp_path):
+    now = [2000.0]
+    _store, goals, backend, _g = _create_goal(tmp_path, now)
+    rid = goals.get_goal('g_watch')['request_id']
+    guard = QuotaGuard(goals, backend)
+
+    guard.acquire(usage={'gpu.alaya': 1}, tags={'clusters': 'alaya'}, handle_id='cloud_j1', goal_id='g_watch')
+    goals.mark_waiting_external('g_watch')
+
+    goals.spawn_goal({
+        'goal_id': 'g_crashed',
+        'request_ref': {'id': rid, 'generation': 1},
+        'objective': 'Mid-turn script',
+        'done_criteria': 'Done',
+        'scope': {'readable_requests': [rid], 'can_ask_human': False},
+        'budget': {'limits': {'gpu.alaya': 1, 'wall_hours': 4}, 'allowed': {'clusters': ['alaya']}},
+    })
+    guard.acquire(usage={'gpu.alaya': 1}, tags={'clusters': 'alaya'}, handle_id='cloud_j2', goal_id='g_crashed')
+    goals.set_process('g_crashed', 999999)
+
+    reconciler = GoalReconciler(goals, backend, clock=lambda: now[0], pid_alive=lambda pid: False)
+    report = reconciler.reconcile()
+    assert report['waiting_external'] == ['g_watch']
+    assert report['recovered_running'] == ['g_crashed']
+    g_rec = goals.get_goal('g_crashed')
+    assert g_rec['pid'] is None and g_rec['needs_wake'] is True
+    assert g_rec['pending_signals'][-1]['payload']['external_handles'][0]['handle_id'] == 'cloud_j2'
+
+
+def test_goal_runner_launches_under_ancor_exec_with_role_and_goal_id(tmp_path):
+    now = [3000.0]
+    _store, goals, _backend, _g = _create_goal(tmp_path, now)
+    out_file = tmp_path / 'child_env.json'
+
+    def toy_cmd(profile, session_id, prompt, *, resume, model_args=()):
+        code = (
+            'import json, os, pathlib; '
+            f'pathlib.Path({str(out_file)!r}).write_text(json.dumps({{'
+            '"goal_id": os.environ.get("GOAL_ID"), '
+            '"ancor_role": os.environ.get("ANCOR_ROLE"), '
+            f'"profile": {profile!r}, "session_id": {session_id!r}'
+            '}))'
+        )
+        return [sys.executable, '-c', code]
+
+    runner = GoalRunner(goals, command_builder=toy_cmd)
+    assert runner.run_goal_sync('g_watch') == 0
+    recorded = json.loads(out_file.read_text())
+    assert recorded == {
+        'goal_id': 'g_watch',
+        'ancor_role': 'goal',
+        'profile': 'ancor-exec',
+        'session_id': 'goal-g_watch',
+    }

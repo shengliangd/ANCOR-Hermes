@@ -1,8 +1,6 @@
-"""Read-only ANCOR dashboard API.
+"""Read-only ANCOR dashboard API over requirements.db, active_goals, and judge_verdicts.
 
-The router is mounted by Hermes at ``/api/plugins/ancor``.  All SQLite
-connections use the URI read-only mode and every route is GET-only: this
-module intentionally has no mutation endpoint or write transaction.
+All SQLite connections use URI read-only mode and every route is GET-only.
 """
 from __future__ import annotations
 
@@ -16,9 +14,6 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-# Hermes imports this file directly, outside the agent plugin's namespace.
-# Resolve siblings under an installation-specific package without executing the
-# plugin entrypoint or adding unrelated installed plugins to sys.path.
 if not __package__:
     root = Path(__file__).resolve().parents[1]
     namespace = "_ancor_dashboard_" + hashlib.sha256(str(root).encode()).hexdigest()[:16]
@@ -29,7 +24,8 @@ if not __package__:
     __package__ = namespace + ".dashboard"
 
 from ..request_contract import FIELDS, LABELS
-from ..views import event_summary, notification_detail, notification_selection, notification_summary, request_detail, request_ref, task_detail, task_ref
+from ..views import (event_summary, notification_detail, notification_selection,
+                     notification_summary, request_detail, request_ref)
 
 router = APIRouter()
 
@@ -43,7 +39,6 @@ def _home() -> Path:
 
 
 def _settings() -> dict:
-    # Read configuration without initializing Hermes or the request store.
     path = _home() / "config.yaml"
     if not path.exists():
         return {}
@@ -59,15 +54,6 @@ def _store_path() -> Path:
     raw = (os.environ.get("ANCOR_STORE_PATH") or os.environ.get("ANCOR_DB_PATH")
            or _settings().get("store_path"))
     return Path(raw).expanduser() if raw else _home() / "ancor" / "requests.db"
-
-
-def _board():
-    from ..board import NativeBoard
-    settings = _settings()
-    env = dict(os.environ, HERMES_HOME=str(_home()))
-    return NativeBoard(
-        os.environ.get("HERMES_KANBAN_BOARD") or settings.get("board", "ancor"),
-        profile=settings.get("coordinator_profile", "ancor-coordinator"), env=env)
 
 
 def _notifications_path() -> Path:
@@ -115,24 +101,15 @@ def _safe_event(row: dict) -> dict:
     return event_summary(row)
 
 
-def _requests(conn):
-    return _rows(conn, "SELECT * FROM requests ORDER BY rowid")
-
-
-def _links(conn):
-    return _rows(conn, "SELECT request_id,task_id FROM task_links ORDER BY request_id,task_id")
-
-
-def _read_tasks():
-    """Native board listing is a read-only CLI bridge; failures yield an empty board."""
-    try:
-        return _board().list()
-    except Exception:
-        return []
-
-
-def _task_map(tasks):
-    return {task.get("id"): task for task in tasks if task.get("id")}
+def _decode_goal_row(row: dict) -> dict:
+    out = dict(row)
+    for field in ("scope", "budget", "external_job_ids", "pending_signals", "observed_models"):
+        if isinstance(out.get(field), str):
+            out[field] = json.loads(out[field])
+    if isinstance(out.get("result_json"), str):
+        out["result"] = json.loads(out["result_json"])
+    out.pop("result_json", None)
+    return _redact(out)
 
 
 def _notifications():
@@ -142,9 +119,7 @@ def _notifications():
         return []
     try:
         rows = _rows(conn, "SELECT * FROM human_notifications ORDER BY rowid")
-        # Only display fields cross into the browser; confirmation bindings and
-        # transport receipts remain in the durable store.
-        visible = {"id", "kind", "message", "state", "answer", "request_id", "task_id",
+        visible = {"id", "kind", "message", "state", "answer", "request_id",
                    "queued_at", "delivery_started_at", "next_attempt_at", "closed_at",
                    "closed_by", "close_reason", "error"}
         return [{key: value for key, value in row.items() if key in visible} for row in rows]
@@ -155,20 +130,17 @@ def _notifications():
 @router.get("/overview")
 def overview():
     conn = _ro(_store_path())
-    requests, links, events, questions = [], [], [], []
+    requests, goals, events, questions = [], [], [], []
     if conn is not None:
         try:
-            requests = _requests(conn)
-            links = _links(conn)
+            requests = _rows(conn, "SELECT * FROM requests ORDER BY rowid")
             events = _rows(conn, "SELECT id,kind,payload,source_key FROM events ORDER BY id")
             if conn.execute("SELECT 1 FROM sqlite_master WHERE name='questions'").fetchone():
                 questions = _rows(conn, "SELECT id,request_id,body,state,revision FROM questions ORDER BY created_at")
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='active_goals'").fetchone():
+                goals = [_decode_goal_row(r) for r in _rows(conn, "SELECT * FROM active_goals ORDER BY created_at")]
         finally:
             conn.close()
-    tasks = _read_tasks()
-    by_req = {link["task_id"]: link["request_id"] for link in links}
-    titles = {row["id"]: row["title"] for row in requests}
-    task_items = [task_ref(task, by_req.get(task.get("id")), titles.get(by_req.get(task.get("id")))) for task in tasks]
     notifications = _notifications()
     visible = notification_selection(notifications)
     question_ids = {q["id"] for q in questions}
@@ -178,7 +150,7 @@ def overview():
                           for n in visible if n["kind"] == "question" and n["id"] not in question_ids)
     return {
         "requests": {"items": [request_ref(row) for row in requests], "count": len(requests), "returned": len(requests), "truncated": False},
-        "tasks": {"items": task_items, "count": len(task_items), "returned": len(task_items), "truncated": False},
+        "goals": {"items": goals, "count": len(goals), "returned": len(goals), "truncated": False},
         "questions": {"items": question_items[:50], "count": len(question_items), "returned": min(50, len(question_items)), "truncated": len(question_items) > 50},
         "notifications": {"items": [notification_summary(row) for row in visible], "count": len(notifications), "returned": len(visible), "truncated": len(visible) < len(notifications)},
         "events": {"items": [_safe_event(row) for row in events[-50:]], "count": len(events), "returned": min(50, len(events)), "truncated": len(events) > 50},
@@ -193,14 +165,25 @@ def request(request_id: str):
         raise HTTPException(status_code=404, detail="request not found")
     try:
         row = _one(conn, "SELECT * FROM requests WHERE id=?", (request_id,), "request")
-        links = _rows(conn, "SELECT task_id FROM task_links WHERE request_id=? ORDER BY task_id", (request_id,))
-        result = {"request": request_detail(row), "task_ids": [item["task_id"] for item in links]}
+        result = {"request": request_detail(row)}
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='active_goals'").fetchone():
+            result["goals"] = [
+                _decode_goal_row(g)
+                for g in _rows(conn, "SELECT * FROM active_goals WHERE request_id=? ORDER BY created_at", (request_id,))
+            ]
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='judge_verdicts'").fetchone():
+            verdicts = _rows(conn, "SELECT * FROM judge_verdicts WHERE request_id=? ORDER BY id", (request_id,))
+            for v in verdicts:
+                v["feedback"] = json.loads(v["feedback"])
+                v["artifacts"] = json.loads(v["artifacts"])
+                v["evidence"] = json.loads(v["evidence"]) if v["evidence"] else None
+                v["runtime"] = json.loads(v["runtime"]) if v.get("runtime") else []
+            result["judge_verdicts"] = verdicts
         if conn.execute("SELECT 1 FROM sqlite_master WHERE name='point_versions'").fetchone():
             points = _rows(conn, "SELECT * FROM point_versions WHERE request_id=? AND invalidated_at IS NULL ORDER BY position,point_id", (request_id,))
             result["fields"] = {field: [p for p in points if p["field"] == field] for field in FIELDS}
             result["field_labels"] = LABELS
             result["questions"] = _rows(conn, "SELECT * FROM questions WHERE request_id=? ORDER BY created_at", (request_id,))
-            result["coordination"] = _rows(conn, "SELECT * FROM impact_reviews WHERE request_id=? AND generation=? ORDER BY task_id", (request_id, row["generation"]))
             changes = _rows(conn, "SELECT id,actor,operations,created_at,committed_at FROM changes WHERE request_id=? AND committed_at IS NOT NULL AND json_extract(source,'$.kind') IS NOT 'coordinator_note' ORDER BY committed_at DESC LIMIT 50", (request_id,))
             for change in changes:
                 change["operations"] = json.loads(change["operations"])
@@ -211,17 +194,16 @@ def request(request_id: str):
         conn.close()
 
 
-@router.get("/tasks/{task_id}")
-def task(task_id: str):
-    tasks = _task_map(_read_tasks())
-    row = tasks.get(task_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="task not found")
+@router.get("/goals/{goal_id}")
+def goal(goal_id: str):
+    conn = _ro(_store_path())
+    if conn is None:
+        raise HTTPException(status_code=404, detail="goal not found")
     try:
-        detail = _board()._call("show", task_id)
-    except Exception:
-        detail = {"task": row, "comments": [], "events": [], "runs": [], "parents": [], "children": []}
-    return {"task": task_detail(detail)}
+        row = _one(conn, "SELECT * FROM active_goals WHERE goal_id=?", (goal_id,), "goal")
+        return {"goal": _decode_goal_row(row)}
+    finally:
+        conn.close()
 
 
 @router.get("/notifications/{notification_id}")

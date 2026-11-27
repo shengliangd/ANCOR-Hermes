@@ -1,10 +1,12 @@
-"""Gateway-owned polling bridge; no model calls without durable pending work.
+"""Gateway-owned thin deterministic host: Reconciler, Watcher, GoalRunner, Root Agent.
 
-Native boundary: adapter.is_connected, NativeBoard CLI, and read-only native
-list_events/kanban_db_path. No native SQL or guard overrides. Retry budget is
-persisted beside the store: three attempts per event, then a one-hour
-cooldown (not an acknowledgement). New events can run immediately.
+2-profile architecture (Plan A):
+  - ``default``: user's everyday profile (Interactor + Gateway owner)
+  - ``ancor-exec``: single headless execution profile; role is selected per
+    process via ``ANCOR_ROLE=root|goal|judge`` (plus ``GOAL_ID`` for goal nodes).
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -12,18 +14,15 @@ import os
 from pathlib import Path
 import time
 
-from .board import NativeBoard
-from .event_policy import is_wake_event, payload_dict
-from .execution_guard import (freeze_execution_unknown, is_execution_unknown,
-                              is_execution_unknown_hold)
+from .goals import ACTIVE_HANDLE_STATUSES, GoalStore
+from .judge import DEFAULT_MAX_JUDGE_REJECTS, JudgeGate
+from .model_routing import CategoryRouter
 from .runtime import Coordinator
-from .views import completion_id
 from .store import Store
-from .views import (actionable_notifications, collection,
-                    conditions_with_state, is_terminal_task,
+from .views import (actionable_notifications, collection, completion_id,
                     notification_counts, notification_selection,
-                    notification_summary, preview, request_ref, task_counts,
-                    task_ref)
+                    notification_summary, request_ref)
+from .watcher import FileClusterBackend, GoalReconciler, GoalRunner, GoalWatcher
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ CONDITION_BACKOFF_SECONDS = 3600
 
 
 def child_environment(environ=None):
-    """Drop routing identity only; retain ALL native task/delegation fences."""
+    """Drop routing identity only; retain ALL native delegation fences."""
     source = dict(os.environ if environ is None else environ)
     return {k: v for k, v in source.items()
             if not k.startswith('HERMES_SESSION_') and k not in {
@@ -39,44 +38,95 @@ def child_environment(environ=None):
                 'HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY', 'HERMES_CRON_SESSION'}}
 
 
-def coordinator_command(profile, prompt):
-    # env -u affects only the child, never concurrent Gateway sessions. Explicit
-    # -p is resolved by the native CLI before importing profile-scoped modules.
+def _exec_role_command(role: str, exec_profile: str, prompt: str, model_args=()):
     clean = child_environment()
-    removed = sorted(set(os.environ) - set(clean))
+    removed = sorted((set(os.environ) - set(clean)) | {'GOAL_ID', 'ANCOR_GOAL_ID'})
     return ['env', *[part for key in removed for part in ('-u', key)],
-            'hermes', '-p', profile, '--cli', 'chat', '-q', prompt]
+            f'ANCOR_ROLE={role}',
+            'hermes', '-p', exec_profile, '--cli', 'chat', *model_args, '-q', prompt]
 
 
+def root_command(exec_profile: str, prompt: str, model_args=()):
+    """Launch Root Agent under ancor-exec with ANCOR_ROLE=root (no GOAL_ID).
 
+    model_args is ``['-m', 'root']`` when ancor-exec defines a ``root`` alias, else empty.
+    """
+    return _exec_role_command('root', exec_profile, prompt, model_args)
+
+
+def judge_command(exec_profile: str, prompt: str, model_args=()):
+    """Launch independent Judge Agent under ancor-exec with ANCOR_ROLE=judge (clean context)."""
+    return _exec_role_command('judge', exec_profile, prompt, model_args)
+
+
+def goal_summary(goal: dict) -> dict:
+    """Compact summary of one active_goals node for Root Agent wake packets."""
+    return {
+        'goal_id': goal['goal_id'],
+        'parent_goal_id': goal['parent_goal_id'],
+        'request_id': goal['request_id'],
+        'generation': goal['generation'],
+        'status': goal['status'],
+        'paused_by_ancestor': goal['paused_by_ancestor'],
+        'objective': goal['objective'][:160],
+        'budget': goal['budget'],
+        'category': goal.get('category'),
+        'observed_models': goal.get('observed_models') or [],
+        'active_handles': sum(
+            1 for h in goal['external_job_ids']
+            if h.get('status', 'running') in ACTIVE_HANDLE_STATUSES
+        ),
+        'needs_wake': goal['needs_wake'],
+        'pid': goal['pid'],
+    }
 
 
 class Host:
-    def __init__(self, ctx, *, board=None, store=None, db_path=None, clock=time.time):
+    def __init__(self, ctx, *, store=None, cluster_backend=None, clock=time.time,
+                 goal_command_builder=None, coordinator_cmd=None, category_router=None,
+                 judge_launcher=None):
         path = Path(ctx.get_config('store_path', ''))
         if not path.is_absolute():
             raise ValueError('configure shared absolute store_path for ANCOR')
         self.ctx = ctx
-        self.profile = ctx.get_config('coordinator_profile', 'ancor-coordinator')
-        self.board_name = ctx.get_config('board', 'ancor')
+        self.exec_profile = ctx.get_config('exec_profile', 'ancor-exec')
         self.store = store or Store(path)
-        self.board = board or NativeBoard(self.board_name, profile=self.profile,
-                                          env=child_environment())
-        self.db_path = db_path
         self.clock = clock
-        from .scheduling import Scheduling
-        self.scheduling = Scheduling(self.store, clock)
         self.state_path = path.parent / (path.name + '.host.json')
-        self.tasks = []
+        cluster_path = ctx.get_config('cluster_state_path')
+        self.cluster = cluster_backend or FileClusterBackend(
+            Path(cluster_path) if cluster_path else path.parent / 'cluster.json',
+            clock=clock)
+        self.router = category_router or CategoryRouter.from_ctx(ctx)
+        self.goals = GoalStore(
+            self.store, clock=clock,
+            global_limits=ctx.get_config('global_limits'),
+            category_router=self.router)
+        self.watcher = GoalWatcher(self.goals, self.cluster, clock=clock)
+        self.reconciler = GoalReconciler(self.goals, self.cluster, clock=clock)
+        self.runner = GoalRunner(
+            self.goals, profile=self.exec_profile,
+            command_builder=goal_command_builder,
+            env_builder=child_environment)
+        self.judge = JudgeGate(
+            self.store, self.goals,
+            max_rejects=ctx.get_config('max_judge_rejects', DEFAULT_MAX_JUDGE_REJECTS),
+            clock=clock)
+        self.judge_launcher = judge_launcher or self._launch_judge_process
         self.startup = True
+        self.last_reconcile = None
+        self.last_watch = None
+
         event_batch_size = ctx.get_config('event_batch_size', 12)
         if type(event_batch_size) is not int or not 1 <= event_batch_size <= 32:
             raise ValueError('event_batch_size must be an integer between 1 and 32')
 
-        self.coordinator = Coordinator(path.parent / 'ancor-coordinator.lock',
+        cmd = coordinator_cmd or (lambda prompt: root_command(
+            self.exec_profile, prompt, self.router.cli_args(self.router.role_category('root'))))
+        self.coordinator = Coordinator(
+            path.parent / 'ancor-root.lock',
             pending=self.pending, snapshot=self.wake_packet, scan=self.scan,
-            batch_size=event_batch_size, retry_base=15,
-            command=lambda prompt: coordinator_command(self.profile, prompt))
+            batch_size=event_batch_size, retry_base=15, command=cmd)
 
     def state(self):
         try:
@@ -85,122 +135,52 @@ class Host:
             return {}
 
     def save(self, state):
-        # Called only under the coordinator's shared flock.
         temporary = self.state_path.with_suffix('.tmp')
         temporary.write_text(json.dumps(state))
         temporary.replace(self.state_path)
 
-    def update_conditions(self, states):
-        """Retain one backoff ledger entry per stalled request."""
-        state = self.state()
-        conditions = state.get('conditions')
-        if not isinstance(conditions, dict):
-            conditions = state['conditions'] = {}
-        stalled = {item['request_id']: item.get('reason')
-                   for item in states if item.get('state') == 'stalled'
-                   and item.get('request_id')}
-        now = self.clock()
-        changed = False
-        for request_id, reason in stalled.items():
-            key = 'stalled:' + request_id
-            current = conditions.get(key)
-            if current is None:
-                conditions[key] = {'reason': reason, 'since': now, 'generation': 1,
-                                   'last_woken_at': None}
-                changed = True
-            elif current.get('reason') != reason:
-                conditions[key] = {
-                    'reason': reason, 'since': now,
-                    'generation': int(current.get('generation') or 0) + 1,
-                    'last_woken_at': None}
-                changed = True
-        for key in list(conditions):
-            if key.startswith('stalled:') and key[8:] not in stalled:
-                del conditions[key]
-                changed = True
-        if changed:
-            self.save(state)
-        return state
-
     def scan(self):
-        self.scheduling.scan()
+        """Deterministic scan: crash-safe startup reconcile + zero-LLM Watcher + stale notices."""
+        if self.startup:
+            self.last_reconcile = self.reconciler.reconcile()
+        self.last_watch = self.watcher.poll()
         snapshot = self.store.snapshot()
-        known = {r['id']: r for r in snapshot['requests']}
-        # Invalidation is a durable coordination event, not an automatic stop.
-        # Only the coordinator decides whether affected native tasks should be blocked.
-        try:
-            self.tasks = self.board.list()
-        except Exception:
-            log.exception('ANCOR task discovery failed; ingesting known tasks')
-            self.tasks = []
-        tracked = {link['task_id'] for link in snapshot['task_links']}
-        for task in self.tasks:
-            link = self.board.link(task)
-            if link and link['request_id'] in known:
-                self.store.link_task(link['request_id'], task['id'])
-                tracked.add(task['id'])
-        notifications = self.close_stale_notifications(snapshot)
-        if not tracked:
-            states = self.scheduling.sync_health(snapshot, self.tasks, notifications)
-            self.update_conditions(states)
-            return
-        if self.db_path is None:
-            from hermes_cli.kanban_db import kanban_db_path
-            self.db_path = kanban_db_path(board=self.board_name)
-        state = self.state()
-        # Never reuse the legacy global cursor: late-discovered histories and
-        # writes between independent task reads can be older than that cursor.
-        cursors = state.setdefault('task_cursors', {})
-        for task_id in sorted(tracked):
-            try:
-                events = self.board.events(self.db_path, [task_id],
-                                           after=cursors.get(task_id, 0), limit=100)
-            except Exception:
-                log.exception('ANCOR event read failed for task %s', task_id)
+        self.close_stale_notifications(snapshot)
+
+    def judge_command_for(self, packet: dict) -> list[str]:
+        prompt = (
+            'You are the independent ANCOR delivery Judge. Review this delivery packet against the '
+            'authoritative requirement (read it with ancor_request_read), then call ancor_judge_verdict '
+            'exactly once with accept, reject (with structured feedback), or escalate.\n'
+            + json.dumps(packet, ensure_ascii=False, separators=(',', ':')))
+        return judge_command(self.exec_profile, prompt,
+                             self.router.cli_args(self.router.role_category('judge')))
+
+    async def _launch_judge_process(self, packet: dict) -> int:
+        proc = await asyncio.create_subprocess_exec(
+            *self.judge_command_for(packet),
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+        return await proc.wait()
+
+    async def dispatch_judges(self) -> list[int]:
+        """Deterministically hand each delivery.submitted event to a fresh Judge process."""
+        events = [e for e in self.store.pending_events() if e['kind'] == 'delivery.submitted']
+        if not events:
+            return []
+        self.store.ack_events([e['id'] for e in events])
+        launched = []
+        for event in events:
+            packet = (event.get('payload') or {}).get('judge_packet')
+            if not packet:
+                log.error('ANCOR delivery.submitted event %s has no judge_packet', event['id'])
                 continue
-            for event in events:
-                # Outcome/anomaly events, not every native state mutation. In
-                # particular respawn_guarded repeats every dispatcher tick, while
-                # rate_limited records an actual ended attempt. Comments, edits,
-                # heartbeats and scheduling bookkeeping must not self-wake.
-                # Native auto_blocked is a DispatchResult field; its durable
-                # circuit-breaker event is gave_up (not auto_blocked).
-                details = payload_dict(event)
-                unknown = (event['kind'] == 'crashed'
-                           and is_execution_unknown(details))
-                if unknown:
-                    # The owner hook normally freezes before the next dispatch.
-                    # Repeating the guard here covers plugin reloads, older
-                    # dispatchers, and a hook write that raced with shutdown.
-                    try:
-                        freeze_execution_unknown(
-                            task_id, board=self.board_name, run_id=event.get('run_id'))
-                    except Exception:
-                        log.exception('ANCOR execution freeze failed for task %s', task_id)
-                    event = {
-                        **event,
-                        'payload': {
-                            **details,
-                            'ancor_classification': 'execution_unknown',
-                            'reconcile_before_retry': True,
-                        },
-                    }
-                    self.store.add_event(
-                        'native.execution_unknown', event,
-                        source_key=f"native:{self.board_name}:{event['id']}")
-                elif not is_execution_unknown_hold(event) and is_wake_event(event):
-                    # Heartbeats and bookkeeping reach this cursor only as the
-                    # ignored page watermark; they never create model work.
-                    self.store.add_event('native.' + event['kind'], event,
-                        source_key=f"native:{self.board_name}:{event['id']}")
-                # Advance only this task after durable ingestion. Store source
-                # keys make replay after a crash (or migration) harmless.
-                cursors[task_id] = event['id']
-            if events:
-                self.save(state)
-        states = self.scheduling.sync_health(
-            self.store.snapshot(), self.tasks, notifications)
-        self.update_conditions(states)
+            try:
+                await self.judge_launcher(packet)
+                launched.append(event['id'])
+            except Exception:
+                log.exception('ANCOR Judge launch failed for event %s', event['id'])
+        return launched
 
     def notification_outbox(self):
         from .notification import NotificationOutbox
@@ -210,7 +190,7 @@ class Host:
             return None
         return NotificationOutbox(
             self.store.path + '.notifications.db',
-            coordinator_profile=self.profile, target=target, clock=self.clock)
+            coordinator_profile=self.exec_profile, target=target, clock=self.clock)
 
     def close_stale_notifications(self, snapshot=None):
         """Close questions and completion notices whose structural reason disappeared."""
@@ -220,12 +200,10 @@ class Host:
             return []
         snapshot = snapshot or self.store.snapshot()
         requests = {row['id']: row for row in snapshot['requests']}
-        tasks = {task['id']: task for task in self.tasks}
         box = self.notification_outbox()
         if box is None:
             return NotificationOutbox.read_existing(path)
         self.store.sync_questions(box)
-        managed = {q['id']: q for q in self.store.questions()}
         decisions = {}
         for row in box.list():
             if row['kind'] != 'question' or row['answer'] is not None or row['closed_at'] is not None:
@@ -244,32 +222,23 @@ class Host:
             if status in {'cancelled', 'invalidated', 'accepted'}:
                 decisions[row['id']] = 'request_' + status
                 continue
-            task = tasks.get(row.get('task_id'))
-            if task is not None and task.get('status') != 'blocked':
-                decisions[row['id']] = 'task_not_blocked'
-                if row['id'] in managed:
-                    self.store.withdraw_question(row['id'], 'task_not_blocked', 'host')
         if decisions:
             box.close_questions(decisions, closed_by='host')
-            log.info('ANCOR closed %d stale question(s): %s', len(decisions),
-                     ', '.join(f'{key}={value}' for key, value in sorted(decisions.items())))
         completion_requests = {}
         orphaned_completions = {}
         for row in box.list():
-            if (row['kind'] != 'completion' or row.get('closed_at') is not None):
+            if row['kind'] != 'completion' or row.get('closed_at') is not None:
                 continue
             request = requests.get(row.get('request_id'))
             if request is None:
                 if row.get('request_id'):
-                    completion_requests.setdefault(
-                        row.get('request_id'), 'request_missing')
+                    completion_requests.setdefault(row.get('request_id'), 'request_missing')
                 else:
                     orphaned_completions[row['id']] = 'request_missing'
             elif request.get('content_mode') == 'points' and row['id'] != completion_id(request):
                 orphaned_completions[row['id']] = 'verification_superseded'
             elif request.get('status') != 'awaiting_acceptance' or request.get('target_status'):
-                completion_requests.setdefault(
-                    row.get('request_id'), 'completion_no_longer_pending')
+                completion_requests.setdefault(row.get('request_id'), 'completion_no_longer_pending')
         for notification_id, reason in orphaned_completions.items():
             box.close_delivery(notification_id, closed_by='host', reason=reason)
         for request_id, reason in completion_requests.items():
@@ -280,58 +249,39 @@ class Host:
     def notification_dispatcher(self):
         from .notification import NativeSender, NotificationDispatcher
         box = self.notification_outbox()
-        profile = self.ctx.get_config('transport_profile')
+        profile = self.ctx.get_config('transport_profile', 'default')
         if box is None or not isinstance(profile, str) or not profile.strip():
             raise ValueError('human_target and transport_profile required for notification delivery')
-        def resolve_task(task_id):
-            if not task_id:
-                return None
-            return self.board.show(task_id)
         interval = max(30, float(self.ctx.get_config('poll_interval', 30)))
         return NotificationDispatcher(
             box, NativeSender(profile), resolve_request=self.store.get_request,
-            resolve_task=resolve_task, retry_seconds=interval, clock=self.clock)
+            resolve_task=lambda _tid: None, retry_seconds=interval, clock=self.clock)
 
     def pending(self, limit):
         if self.startup:
-            # Runs under the SAME inherited coordinator flock, after discovery.
-            # A pending inbox already wakes the coordinator with this current snapshot.
-            data = self.wake_packet()
-            pending = [e for e in self.store.pending_events() if e['kind'] != 'host.stalled']
-            if (data['requests']['items'] or data['notifications']['items']
-                    or data['invalidated_tasks']['items']) and not pending:
-                self.store.add_event('host.recovery', {
-                    'reason': 'Reconcile durable state after host startup; inspect current context. '
-                              'Reuse task keys and notification IDs; never resend sending/uncertain notices. '
-                              'No automatic stop: the coordinator decides how to resolve invalidated tasks.'})
             self.startup = False
         pending = self.store.pending_events()
         for work in self.store.pending_coordination():
             key = f"coordination:{work['id']}:{work['generation']}"
             existing = next((e for e in pending if e.get('source_key') == key), None)
             if existing is None:
-                event = self.store.add_event('request.reconcile_needed', {
-                    'request_id': work['id'], 'generation': work['generation']}, source_key=key)
+                event = self.store.add_event('request.generation_changed', {
+                    'request_id': work['id'], 'generation': work['generation'],
+                    'observed_generation': work['observed_generation']}, source_key=key)
                 if event['acknowledged']:
                     with self.store._transaction() as db:
                         db.execute('UPDATE events SET acknowledged=0 WHERE id=?', (event['id'],))
-        pending = self.store.pending_events()
+        # delivery.submitted belongs to the Judge dispatcher, never to Root.
+        pending = [e for e in self.store.pending_events() if e['kind'] != 'delivery.submitted']
         state = self.state()
-        conditions = state.get('conditions')
-        conditions = conditions if isinstance(conditions, dict) else {}
-        stalled_events = [event for event in pending if event['kind'] == 'host.stalled']
-        ordinary = [event for event in pending if event['kind'] != 'host.stalled']
         now = self.clock()
-        # Each event keeps its budget when another event joins or leaves the batch.
         retries = state.setdefault('event_retries', {})
-        pending_ids = {str(event['id']) for event in ordinary}
+        pending_ids = {str(event['id']) for event in pending}
         for key in list(retries):
             if key not in pending_ids:
                 del retries[key]
-        for key in ('batch', 'attempts', 'retry_at'):
-            state.pop(key, None)
         eligible = []
-        for event in ordinary:
+        for event in pending:
             retry = retries.setdefault(str(event['id']), {'attempts': 0, 'retry_at': 0})
             if now < retry['retry_at']:
                 continue
@@ -340,63 +290,12 @@ class Host:
                 log.warning('ANCOR pending event %s exhausted three attempts; retry in one hour', event['id'])
                 continue
             eligible.append(event)
-        ordinary = eligible
-        due_conditions = []
-        for event in stalled_events:
-            key = event.get('source_key')
-            condition = conditions.get(key) if key else None
-            last = condition.get('last_woken_at') if condition else None
-            if condition is None or last is None or now - float(last) >= CONDITION_BACKOFF_SECONDS:
-                due_conditions.append(event)
-        # Reserve one slot for newest input: a full unchanged head batch must
-        # not hide human replies/completions behind its hour-long cooldown.
-        events = (ordinary[:limit] if len(ordinary) <= limit
-                  else ordinary[:limit - 1] + ordinary[-1:])
-        # Reserve slots for due stalled conditions and liveness even behind a
-        # large input backlog. A recovering condition simply disappears.
-        reserved = due_conditions + [
-            next((row for row in ordinary if row['kind'] == 'host.liveness'), None)]
-        reserved = [event for event in reserved if event is not None]
-        missing = [event for event in reserved if event not in events]
-        if missing:
-            events = events[:max(0, limit - len(missing))] + missing
-            events = events[:limit]
+        events = (eligible[:limit] if len(eligible) <= limit
+                  else eligible[:limit - 1] + eligible[-1:])
         for event in events:
-            if event['kind'] != 'host.stalled':
-                retries[str(event['id'])]['attempts'] += 1
-            if event['kind'] == 'host.stalled' and event.get('source_key') in conditions:
-                conditions[event['source_key']]['last_woken_at'] = now
+            retries[str(event['id'])]['attempts'] += 1
         self.save(state)
         return events
-
-    def invalidated_tasks(self, data):
-        """Surface residual drift after an invalidated request should be terminal."""
-        invalidated = {r['id']: r for r in data['requests'] if r['status'] == 'invalidated'}
-        tasks = {t['id']: t for t in self.tasks}
-        unresolved = []
-        for link in data['task_links']:
-            rid, tid = link['request_id'], link['task_id']
-            if rid not in invalidated:
-                continue
-            task = tasks.get(tid, {})
-            status = task.get('status')
-            if status == 'archived':
-                continue
-            reason = ('Invalidated request has a linked native task that is not archived'
-                      if status else 'Invalidated request linked task is unreadable')
-            shown, truncated = preview(reason, 160)
-            item = {
-                'task_id': tid,
-                'task_title': task.get('title'),
-                'task_status': status,
-                'request_id': rid,
-                'request_title': invalidated[rid]['title'],
-                'reason_preview': shown,
-            }
-            if truncated:
-                item['reason_truncated'] = True
-            unresolved.append(item)
-        return unresolved
 
     def wake_packet(self):
         from .notification import NotificationOutbox
@@ -408,49 +307,35 @@ class Host:
                               if n['kind'] == 'completion'
                               and n.get('closed_at') is None
                               and n.get('request_id')}
-        requests = [r for r in data['requests']
-                        if r['status'] in {'active', 'paused', 'pending'}
-                        or r.get('target_status') is not None or
-                        (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)
-                        or (r['status'] == 'awaiting_acceptance'
-                            and r['id'] not in pending_completion)]
-        relevant = {r['id'] for r in requests}
-        scoped = {**data, 'requests': requests}
-        observation = self.scheduling.observation(scoped, self.tasks, notifications)
-        progression = {item['request_id']: item for item in observation['progression']}
-        titles = {r['id']: r['title'] for r in data['requests']}
-        links = {link['task_id']: link['request_id'] for link in data['task_links']
-                 if link['request_id'] in relevant}
-        linked_tasks = [task for task in self.tasks if task['id'] in links]
-        board = [task_ref(task, links[task['id']], titles.get(links[task['id']]))
-                 for task in linked_tasks if not is_terminal_task(task)]
+        requests = [
+            r for r in data['requests']
+            if r['status'] in {'active', 'paused', 'pending'}
+            or r.get('target_status') is not None
+            or (r['status'] == 'accepted' and 'accept:' + r['id'] not in delivered)
+            or (r['status'] == 'awaiting_acceptance' and r['id'] not in pending_completion)
+        ]
+        active_goals = self.goals.list_goals(include_terminal=False)
         visible_notifications = actionable_notifications(notifications)
         selected = notification_selection(visible_notifications, 10)
-        condition_state = self.state().get('conditions')
-        conditions = conditions_with_state(
-            observation['progression'],
-            condition_state if isinstance(condition_state, dict) else {})
-        for condition in conditions:
-            condition['request_title'] = titles.get(condition['request_id'])
         return {
-            'requests': collection(
-                [request_ref(r, progression.get(r['id'])) for r in requests]),
-            'invalidated_tasks': collection(self.invalidated_tasks(data)),
+            'requests': collection([request_ref(r) for r in requests]),
+            'active_goals': collection([goal_summary(g) for g in active_goals]),
+            'resources': {
+                **self.goals.total_active_usage(),
+                'backend': self.cluster.summary(),
+            },
             'pending_coordination': collection(self.store.pending_coordination()),
-            'questions': collection([{'id': q['id'], 'request_id': q['request_id'],
-                'task_id': q['task_id'], 'revision': q['revision'], 'state': q['state']}
-                for q in self.store.questions() if q['state'] == 'open']),
-            'conditions': collection(conditions),
+            'model_categories': sorted(self.router.alias_names() or []),
+            'questions': collection([
+                {'id': q['id'], 'request_id': q['request_id'],
+                 'revision': q['revision'], 'state': q['state']}
+                for q in self.store.questions() if q['state'] == 'open'
+            ]),
             'notifications': collection(
                 [notification_summary(row) for row in selected],
                 total=len(visible_notifications)),
             'notification_counts': notification_counts(notifications),
-            'board': collection(board),
-            'board_counts': task_counts(linked_tasks),
-            'scheduled_wakes': observation['scheduled_wakes'],
-            'progression': observation['progression'],
-            'liveness': observation['liveness'],
-            'expand': 'Call ancor_request_get for request detail, or ancor_task_show for one card.',
+            'expand': 'Call ancor_request_get for request detail, or ancor_goal_get for one goal.',
         }
 
 
@@ -458,11 +343,9 @@ async def scan_runner(ctx, adapter):
     """Public plugin lifecycle callback; cancellation is owned by PluginContext."""
     if ctx.profile_name != ctx.get_config('owner_profile', 'default') or not ctx.get_config('gateway_owner', False):
         raise PermissionError('only the configured Gateway owner may run ANCOR')
-    # Never reinterpret an agent/delegated context as trusted Gateway ownership.
-    if (os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT') or
-            os.environ.get('HERMES_KANBAN_TASK') or os.environ.get('HERMES_KANBAN_RUN_ID')):
-        raise PermissionError('ANCOR host cannot run inside a native worker/delegation')
-    interval = max(30, float(ctx.get_config('poll_interval', 30)))
+    if os.environ.get('HERMES_DELEGATED_CHILD_CONTEXT') or os.environ.get('ANCOR_ROLE') or os.environ.get('GOAL_ID'):
+        raise PermissionError('ANCOR host cannot run inside a delegated or execution child process')
+    interval = max(5, float(ctx.get_config('poll_interval', 15)))
     while not adapter.is_connected:
         await asyncio.sleep(interval)
     host = Host(ctx)
@@ -476,26 +359,12 @@ async def scan_runner(ctx, adapter):
             delivery = asyncio.create_task(
                 dispatcher.run(lambda: adapter.is_connected), name='ancor:notifications')
         while adapter.is_connected:
-            tick = asyncio.create_task(host.coordinator.tick())
-            try:
-                while not tick.done():
-                    done, _ = await asyncio.wait({tick}, timeout=interval)
-                    if not done and host.scheduling.observation(host.store.snapshot())['liveness']['overdue']:
-                        log.error('ANCOR liveness overdue: coordinator still running; no overlapping launch')
-                outcome = await tick
-            finally:
-                if not tick.done():
-                    tick.cancel()
-                    try:
-                        await tick
-                    except asyncio.CancelledError:
-                        pass
-            if outcome == 'busy':
-                observation = host.scheduling.observation(host.store.snapshot())
-                if observation['liveness']['overdue']:
-                    log.error('ANCOR liveness overdue: coordinator lock remains held; inspect stuck/surviving coordinator, no overlapping launch')
+            await asyncio.to_thread(host.scan)
+            await host.runner.dispatch_ready()
+            await host.dispatch_judges()
+            outcome = await host.coordinator.tick()
             if outcome == 'failed':
-                log.error('ANCOR coordinator infrastructure failure: %s', host.coordinator.last_error)
+                log.error('ANCOR Root Agent infrastructure failure: %s', host.coordinator.last_error)
             await asyncio.sleep(interval)
     finally:
         if delivery is not None:

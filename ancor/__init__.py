@@ -1,27 +1,42 @@
-"""Thin profile-scoped Hermes integration. No provisioning during registration."""
+"""Thin 2-profile Hermes integration for ANCOR (Plan A: default + ancor-exec).
+
+- ``default`` profile: user's everyday Interactor (plus Gateway owner when
+  ``gateway_owner=True``).
+- ``ancor-exec`` profile: single headless execution sandbox; exact role is
+  selected per process by ``ANCOR_ROLE=root|goal|judge`` (plus ``GOAL_ID`` for
+  ``goal`` nodes), with a ``pre_tool_call`` fence enforcing tool isolation.
+"""
+from __future__ import annotations
+
 import asyncio
-import hashlib
 import inspect
 import json
 import logging
+import os
+from pathlib import Path
 
-from .atomic_tools import question_ref
+from .atomic_tools import interfaces as atomic_interfaces, question_ref
+from .goals import AttenuationError, QuotaExceededError
 from .notification import COMPLETION_MAX_CHARS
-from .views import completion_id
-
-from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, acceptance_ref,
-                    actionable_notifications, attention_items, awaiting_acceptances,
-                    bounded_latest, collection, conditions_with_state, draft_summary,
-                    event_counts, event_summaries, host_condition_state,
+from .quota_guard import QuotaGuard
+from .views import (DRAFT_LIMIT, TRANSITION_LIMIT, actionable_notifications,
+                    awaiting_acceptances, bounded_latest, collection,
+                    completion_id, event_counts, event_summaries,
                     is_open_question, notification_counts, notification_detail,
-                    notification_selection, notification_summary, omitted_groups,
-                    progression_detail, request_content, request_counts, request_detail, request_progress,
-                    request_ref,
-                    select_tasks, task_counts, task_exact_via, transition_summary)
+                    notification_selection, notification_summary,
+                    request_content, request_counts, request_detail,
+                    request_ref, transition_summary)
+from .visualizer import render_html, render_text_tree
 
 log = logging.getLogger(__name__)
 
 _SCAN_CONNECTION_POLL_SECONDS = 1.0
+
+_ROLE_FORBIDDEN_TOOLS = {
+    'root': frozenset({'terminal', 'execute_code', 'write_file', 'patch', 'delegate_task', 'clarify'}),
+    'goal': frozenset({'clarify', 'send_message', 'delegate_task'}),
+    'judge': frozenset({'terminal', 'execute_code', 'write_file', 'patch', 'clarify', 'send_message', 'delegate_task'}),
+}
 
 
 class ToolProtocolError(ValueError):
@@ -29,13 +44,6 @@ class ToolProtocolError(ValueError):
 
 
 def _normalize_tool_arguments(name, args):
-    """Normalize the historical DeepSeek tool-call wrapper for one direct call.
-
-    A few compatible providers wrap arguments as
-    ``{"calls": [{"arguments": {...}}], "name": "tool"}``. The wrapper is
-    safe to unwrap only when it identifies this exact tool and contains one
-    call. Batched writes are never split implicitly.
-    """
     if not isinstance(args, dict) or 'calls' not in args:
         return args
     unknown = set(args) - {'calls', 'name'}
@@ -51,11 +59,9 @@ def _normalize_tool_arguments(name, args):
     if not wrapped_name and not call_name:
         raise ToolProtocolError('tool-call wrapper must identify the target tool by name')
     if wrapped_name not in {None, name}:
-        raise ToolProtocolError(
-            f'tool-call wrapper names {wrapped_name!r}, expected {name!r}')
+        raise ToolProtocolError(f'tool-call wrapper names {wrapped_name!r}, expected {name!r}')
     if call_name not in {None, name}:
-        raise ToolProtocolError(
-            f'nested tool-call names {call_name!r}, expected {name!r}')
+        raise ToolProtocolError(f'nested tool-call names {call_name!r}, expected {name!r}')
     if 'arguments' in call:
         unknown = set(call) - {'name', 'arguments'}
         if unknown:
@@ -63,74 +69,10 @@ def _normalize_tool_arguments(name, args):
                                     + ', '.join(sorted(unknown)))
         nested = call['arguments']
     else:
-        nested = {key: value for key, value in call.items()
-                  if key not in {'name', 'arguments'}}
+        nested = {k: v for k, v in call.items() if k not in {'name', 'arguments'}}
     if not isinstance(nested, dict):
         raise ToolProtocolError('nested tool-call arguments must be an object')
     return dict(nested)
-
-
-_ACTION_FIELDS = {
-    'ancor_change': {'propose': ['input', 'operations'], 'get': ['change_id'], 'history': ['request_id']},
-    'ancor_question': {'list': [], 'get': ['id'], 'create': ['request_id', 'id', 'body', 'reason'],
-                       'withdraw': ['id', 'reason']},
-    'ancor_reconcile': {'get': ['request_id'], 'review': ['request_id', 'generation', 'coverage_reason'],
-                        'finish': ['request_id', 'generation', 'task_id']},
-    'ancor_request': {
-        'draft': ['title', 'brief'],
-        'confirm': ['draft_id'],
-        'cancel': ['request_ids'],
-        'pause': ['request_id', 'reason'],
-        'resume': ['request_id', 'reason'],
-        'advance': ['request_id'],
-        'respond': ['request_id', 'body'],
-        'accept': ['request_id'],
-        'request_changes': ['request_id', 'feedback'],
-    },
-    'ancor_notify': {
-        'send': ['id', 'kind', 'message'],
-        'withdraw': ['id', 'reason'],
-        'list': [],
-        'respond': ['id', 'answer'],
-    },
-    'ancor_board': {
-        'create': ['request_id', 'key', 'title', 'contract'],
-        'list': [],
-        'show': ['task_id'],
-        'history': ['task_id', 'kind'],
-        'block': ['task_id', 'reason'],
-        'unblock': ['task_id', 'reason'],
-        'comment': ['task_id', 'body'],
-        'link': ['parent_id', 'child_id'],
-        'unlink': ['parent_id', 'child_id'],
-        'edit': ['task_id'],
-        'revise': ['task_id', 'reason'],
-        'archive': ['task_id', 'reason'],
-        'associate': ['task_id', 'request_id', 'reason'],
-    },
-    'ancor_wake': {
-        'schedule': ['request_id', 'reason', 'due_at'],
-        'list': [],
-        'cancel': ['wake_id'],
-        'replace': ['wake_id', 'reason', 'due_at'],
-    },
-    'ancor_acceptance': {
-        'verify': ['request_id', 'evidence'],
-        'accept': ['request_id', 'evidence'],
-        'reject': ['request_id', 'reason'],
-    },
-    'ancor_note': {
-        'list': ['request_id'],
-        'get': ['request_id', 'note_id'],
-        'add': ['request_id', 'body'],
-        'update': ['request_id', 'note_id', 'body'],
-        'delete': ['request_id', 'note_id'],
-        'append': ['request_id', 'body'],
-        'replace': ['request_id', 'note_id', 'body'],
-        'invalidate': ['request_id', 'note_id'],
-        'history': ['request_id', 'note_id'],
-    },
-}
 
 
 def _missing_fields(args, fields):
@@ -144,97 +86,79 @@ def _missing_fields(args, fields):
     return missing
 
 
-def _invalid_request(name, action, *, missing=(), reason=None, next_step=None,
-                     valid_actions=None, required_any=None, valid_kinds=None):
+def _invalid_request(name, *, missing=(), reason=None, next_step=None):
     missing = list(missing)
     result = {
-        'error': reason or f'{name} {action} is missing required fields: {", ".join(missing)}',
+        'error': reason or f'{name} is missing required fields: {", ".join(missing)}',
         'code': 'invalid_request',
         'tool': name,
-        'action': action,
     }
     if missing:
         result['missing_fields'] = missing
-    if required_any:
-        result['required_any'] = list(required_any)
-    if valid_actions:
-        result['valid_actions'] = list(valid_actions)
-    if valid_kinds:
-        result['valid_kinds'] = list(valid_kinds)
-    result['next_step'] = next_step or (
-        f'Provide {", ".join(missing)} and retry {name} directly.'
-        if action is None else
-        f'Provide {", ".join(missing)} and retry {name} with action={action}.')
+    result['next_step'] = next_step or f'Provide {", ".join(missing)} and retry {name} directly.'
     return result
 
 
-def _validate_action_request(name, args):
-    """Return a model-actionable error before any business method runs."""
-    fields = _ACTION_FIELDS.get(name)
-    if fields is None:
-        return None
-    action = args.get('action')
-    if not isinstance(action, str) or not action.strip():
-        return _invalid_request(
-            name, action, missing=['action'],
-            reason=f'{name} requires action',
-            next_step=f'Choose one of: {", ".join(sorted(fields))}.',
-            valid_actions=sorted(fields))
-    if action not in fields:
-        return _invalid_request(
-            name, action,
-            reason=f'{name} does not support action {action!r}',
-            next_step=f'Choose one of: {", ".join(sorted(fields))}.',
-            valid_actions=sorted(fields))
-    missing = _missing_fields(args, fields[action])
-    if missing:
-        return _invalid_request(name, action, missing=missing)
-    if name == 'ancor_board' and action == 'edit':
-        editable = ['title', 'body', 'priority', 'contract']
-        if not any(field in args and args[field] is not None
-                   and not (isinstance(args[field], str) and not args[field].strip())
-                   for field in editable):
-            return _invalid_request(
-                name, action,
-                reason='ancor_board edit requires at least one of title, body or priority',
-                next_step='Provide title, body or priority, then retry ancor_board edit.',
-                required_any=editable)
-    if name == 'ancor_notify' and action == 'send':
-        kind = args.get('kind')
-        if kind == 'question':
-            missing = _missing_fields(args, ['request_id', 'task_id'])
-            if missing:
-                return _invalid_request(name, action, missing=missing)
-        elif kind == 'completion':
-            missing = _missing_fields(args, ['request_id'])
-            if missing:
-                return _invalid_request(name, action, missing=missing)
-        elif kind not in {'question', 'completion'}:
-            return _invalid_request(
-                name, action,
-                reason=f'ancor_notify send does not support kind {kind!r}',
-                next_step='Choose kind=question or kind=completion.',
-                valid_kinds=['question', 'completion'])
+def _resolve_role(ctx) -> str | None:
+    """Resolve ANCOR role from 2-profile config (default vs ancor-exec + ANCOR_ROLE)."""
+    interactor_profile = ctx.get_config('interactor_profile', 'default')
+    exec_profile = ctx.get_config('exec_profile', 'ancor-exec')
+    env_role = (os.environ.get('ANCOR_ROLE') or '').strip().lower()
+
+    if ctx.profile_name == exec_profile:
+        if env_role in {'root', 'goal', 'judge'}:
+            return env_role
+        if os.environ.get('GOAL_ID') or os.environ.get('ANCOR_GOAL_ID'):
+            return 'goal'
+        return 'root'
+
+    if ctx.profile_name == interactor_profile:
+        return 'interactor'
     return None
 
 
-def register(ctx, *, scan_runner=None):
+def _role_fence_hook(role: str):
+    forbidden = _ROLE_FORBIDDEN_TOOLS.get(role, frozenset())
+
+    def pre_tool_call(tool_name, args=None, **kwargs):
+        if tool_name in forbidden:
+            return {
+                'action': 'block',
+                'message': f'ANCOR role {role!r} is not permitted to call tool {tool_name!r}.',
+            }
+        return None
+
+    return pre_tool_call
+
+
+def _observed_model_hook(sink: list, *, on_new=None):
+    def post_api_request(model=None, provider=None, response_model=None, **_kwargs):
+        name = (model or response_model or '').strip() if isinstance(model or response_model, str) else ''
+        if not name:
+            return None
+        entry = {'model': name, 'provider': (provider or None) if isinstance(provider, str) else None}
+        if entry in sink:
+            return None
+        sink.append(entry)
+        if on_new is not None:
+            try:
+                on_new(entry['model'], entry['provider'])
+            except Exception:
+                log.exception('ANCOR failed to record observed model %s', entry)
+        return None
+
+    return post_api_request
+
+
+def register(ctx, *, scan_runner=None, judge_runner=None):
     if scan_runner is None:
         from .host import scan_runner
-    owner = (ctx.profile_name == ctx.get_config('owner_profile', 'default')
-             and ctx.get_config('gateway_owner', False))
-    if owner and hasattr(ctx, 'register_hook'):
-        from .execution_guard import execution_recovery_hook
-        ctx.register_hook('on_kanban_worker_exited', execution_recovery_hook(
-            ctx.get_config('board')))
 
+    owner = (ctx.profile_name == ctx.get_config('owner_profile', 'default')
+             and ctx.get_config('gateway_owner', False)
+             and not os.environ.get('ANCOR_ROLE'))
     if owner:
         def connected(native, adapter):
-            # Hermes owns plugin registrations per discovery generation: force re-discovery
-            # disposes them (including supervised tasks), while same-key plugins are not
-            # re-wired. A Gateway-lifetime task attached to the long-lived adapter keeps the
-            # durable inbox flowing across plugin updates. A Gateway restart still owns the
-            # final lifecycle and reloads the scanner code.
             current = getattr(adapter, '_ancor_scan_task', None)
             if current is not None and not current.done():
                 return
@@ -258,36 +182,30 @@ def register(ctx, *, scan_runner=None):
             task = loop.create_task(supervise(), name='ancor:scan')
             setattr(adapter, '_ancor_scan_task', task)
         ctx.register_platform_handler('api_server', connected)
-    interactor_profile = ctx.get_config('interactor_profile', 'ancor-interactor')
-    coordinator_profile = ctx.get_config('coordinator_profile', 'ancor-coordinator')
-    interactor = ctx.profile_name == interactor_profile
-    coordinator = ctx.profile_name == coordinator_profile
-    worker = ctx.profile_name == ctx.get_config('worker_profile', 'ancor-worker')
-    if not interactor and not coordinator and not worker:
-        if owner and hasattr(ctx, 'register_hook'):
-            from .block_guard import block_guard_hook
-            ctx.register_hook('kanban_task_blocked', block_guard_hook(
-                ctx.get_config('board'), ctx.get_config('block_unblock_cycles', 3)))
+
+    role = _resolve_role(ctx)
+    if role is None:
         return
-    # Native locale layers are available on newer Hermes hosts. The layer is
-    # gateway-wide: confirmations already offer an explicit 'do not submit' choice.
+
+    interactor = role == 'interactor'
+    root_role = role == 'root'
+    goal_role = role == 'goal'
+    exec_profile = ctx.get_config('exec_profile', 'ancor-exec')
+
     if interactor and hasattr(ctx, 'register_locale'):
         from agent.i18n import supported_languages
         for language in supported_languages():
             ctx.register_locale(language, {'gateway.clarify.skip_hint': ''})
+
     from .service import Service
     service = Service(ctx)
-    from .operations import Operations
-    operations = Operations(ctx)
-    # One lazy store for all registered business handlers.
-    operations.service = service
+    observed_models: list[dict] = []
 
     def outbox():
         from .notification import NotificationOutbox
-        # Fail closed: destination is explicit. Delivery is Gateway-owned.
         return NotificationOutbox(
             service.store.path + '.notifications.db',
-            coordinator_profile=coordinator_profile,
+            coordinator_profile=exec_profile,
             target=ctx.get_config('human_target'))
 
     def response_event(row):
@@ -299,151 +217,64 @@ def register(ctx, *, scan_runner=None):
         confirmed = meta.get('source') == 'native_clarify_response'
         return service.store.add_event('notification.response', {
             'notification_id': row['id'], 'body': row['answer'],
-            'request_id': row.get('request_id'), 'task_id': row.get('task_id'),
+            'request_id': row.get('request_id'),
             'reference': row['answer_reference'],
-            'source': ('native_clarify_response' if confirmed
-                       else 'interactor_transcription'),
+            'source': ('native_clarify_response' if confirmed else 'interactor_transcription'),
             'confirmed': confirmed,
             'authorization': False},
             source_key='notification.response:' + row['id'])
 
     def notifications():
         rows = outbox().list()
-        # Idempotent input ingestion, not a coordination decision.
         for row in rows:
             if row['answer'] is not None:
                 response_event(row)
         return rows
 
-    def wake(args, **_native):
-        from .scheduling import Scheduling
-        return Scheduling(service.store).call(args)
-
-    def validate_acks(event_ids, snapshot, tasks):
-        pending = {event['id']: event for event in snapshot['pending_events']}
-        task_by_id = {task['id']: task for task in tasks or ()}
-        for identifier in event_ids:
-            event = pending.get(identifier)
-            if event is None:
-                continue
-            if event['kind'] in {'host.stalled', 'host.liveness'}:
-                raise ValueError(f'event {identifier} is host-owned and clears only when the request recovers')
-            payload = event.get('payload') or {}
-            task_id = payload.get('task_id')
-            task = task_by_id.get(task_id, {})
-            if event['kind'] == 'native.block_loop_detected' and task.get('status') == 'triage':
-                raise ValueError(f'event {identifier} cannot be acknowledged while {task_id} is in triage')
-
-    def ack_rejections(event_ids, retained, tasks):
-        """Validate an entire ack batch without writing any acknowledgement."""
-        by_id = {event['id']: event for event in retained}
-        task_by_id = {task['id']: task for task in tasks or ()}
-        rejected = []
-        for identifier in event_ids:
-            event = by_id.get(identifier)
-            if event is None:
-                rejected.append({'id': identifier, 'reason': 'not_found',
-                                 'message': f'event {identifier} does not exist'})
-                continue
-            if event['kind'] in {'host.stalled', 'host.liveness'}:
-                rejected.append({
-                    'id': identifier, 'reason': 'host_owned',
-                    'message': f'event {identifier} is host-owned and clears only through host state'})
-                continue
-            payload = event.get('payload') or {}
-            task_id = payload.get('task_id')
-            task = task_by_id.get(task_id, {})
-            if event['kind'] == 'native.block_loop_detected' and task.get('status') == 'triage':
-                rejected.append({
-                    'id': identifier, 'reason': 'triage_block_loop',
-                    'message': f'event {identifier} cannot be acknowledged while {task_id} is in triage'})
-        return rejected
-
     def ack_events(args, **_native):
         event_ids = args.get('event_ids')
         if (not isinstance(event_ids, list) or not event_ids
-                or any(type(identifier) is not int or identifier < 1
-                       for identifier in event_ids)):
+                or any(type(i) is not int or i < 1 for i in event_ids)):
             raise ValueError('event_ids must contain positive integer IDs')
         retained = service.store.events_by_ids(event_ids)
-        tasks = operations.tasks(include_archived=True)
-        rejected = ack_rejections(event_ids, retained, tasks)
-        if rejected:
-            return {'acked': [], 'already_acked': [], 'rejected': rejected,
-                    'remaining_pending': len(service.store.pending_events())}
         by_id = {event['id']: event for event in retained}
+        missing = [i for i in event_ids if i not in by_id]
+        if missing:
+            return {'acked': [], 'already_acked': [],
+                    'rejected': [{'id': i, 'reason': 'not_found'} for i in missing],
+                    'remaining_pending': len(service.store.pending_events())}
         acked, already = [], []
-        for identifier in dict.fromkeys(event_ids):
-            if by_id[identifier]['acknowledged']:
-                already.append(identifier)
+        for i in dict.fromkeys(event_ids):
+            if by_id[i]['acknowledged']:
+                already.append(i)
             else:
-                acked.append(identifier)
+                acked.append(i)
         if acked:
             service.store.ack_events(acked)
-        reason = args.get('reason')
-        if reason is not None:
-            log.info('ANCOR acknowledged %d event(s): %s', len(acked), reason)
         result = {'acked': acked, 'already_acked': already, 'rejected': [],
                   'remaining_pending': len(service.store.pending_events())}
-        if reason is not None:
-            result['reason'] = reason
+        if args.get('reason') is not None:
+            result['reason'] = args['reason']
         return result
 
     def get_context(args, **_native):
+        from .host import goal_summary
         request_id = args.get('request_id')
-        task_limit = args.get('task_limit', 50)
-        if type(task_limit) is not int or not 1 <= task_limit <= 200:
-            raise ValueError('task_limit must be an integer between 1 and 200')
-        notification_limit = args.get('notification_limit', 10)
-        if type(notification_limit) is not int or not 1 <= notification_limit <= 200:
-            raise ValueError('notification_limit must be an integer between 1 and 200')
-        attention_limit = args.get('attention_limit', 8)
-        if type(attention_limit) is not int or not 0 <= attention_limit <= 50:
-            raise ValueError('attention_limit must be an integer between 0 and 50')
-        event_limit = args.get('event_limit', 100)
-        if type(event_limit) is not int or not 1 <= event_limit <= 500:
-            raise ValueError('event_limit must be an integer between 1 and 500')
-        note_limit = args.get('note_limit', 20)
-        if coordinator and (type(note_limit) is not int or not 1 <= note_limit <= 200):
-            raise ValueError('note_limit must be an integer between 1 and 200')
         event_id = args.get('event_id')
-        if event_id is not None and (type(event_id) is not int or event_id < 1):
-            raise ValueError('event_id must be a positive integer')
-        include_done = args.get('include_done', False)
-        include_archived = args.get('include_archived', False)
-        include_closed_notifications = args.get('include_closed_notifications', False)
-        include_content = args.get('include_content', False)
-        include_history = args.get('include_history', False)
-        progress_only = args.get('progress_only', False)
-        for name, value in (
-                ('include_done', include_done),
-                ('include_archived', include_archived),
-                ('include_closed_notifications', include_closed_notifications),
-                ('include_content', include_content),
-                ('include_history', include_history),
-                ('progress_only', progress_only)):
-            if type(value) is not bool:
-                raise ValueError(f'{name} must be a boolean')
-        if progress_only and request_id:
-            raise ValueError('progress_only cannot be combined with request_id')
-        if include_content and (not request_id or progress_only or event_id is not None):
-            raise ValueError('include_content requires request_id without event_id or progress_only')
-        if include_history and (not request_id or progress_only or event_id is not None):
-            raise ValueError('include_history requires request_id without event_id or progress_only')
+        include_content = bool(args.get('include_content', False))
+        include_history = bool(args.get('include_history', False))
+        include_closed = bool(args.get('include_closed_notifications', False))
+        notification_limit = args.get('notification_limit', 10)
         before_id = args.get('before_id')
-        if before_id is not None and (not include_history or type(before_id) is not int or before_id < 1):
-            raise ValueError('before_id requires include_history and a positive integer')
+
         if event_id is not None:
-            if not coordinator:
-                raise PermissionError('coordinator profile required to inspect events')
+            if not root_role:
+                raise PermissionError('Root Agent role required to inspect events')
             retained = service.store.events_by_ids([event_id])
             if not retained:
                 raise KeyError(event_id)
-            result = {'event': retained[0]}
-            task_id = (retained[0].get('payload') or {}).get('task_id')
-            if task_id:
-                result['task'] = {'exact_via': task_exact_via(task_id)}
-            return result
+            return {'event': retained[0]}
+
         try:
             notification_rows = notifications()
         except ValueError as exc:
@@ -452,209 +283,101 @@ def register(ctx, *, scan_runner=None):
         else:
             notification_error = None
         extra = {'notifications_error': notification_error} if notification_error else {}
-        all_tasks = None
-        try:
-            all_tasks = operations.tasks(include_archived=True)
-        except Exception as exc:
-            extra['board_error'] = str(exc)
-        if args.get('ack_event_ids'):
-            validate_acks(args['ack_event_ids'], service.store.snapshot(), all_tasks or [])
-        data = service.get_context(args if coordinator else {})
-        from .scheduling import Scheduling
-        observation = Scheduling(service.store).observation(
-            data, all_tasks, notification_rows)
-        progression = {item['request_id']: item
-                       for item in observation['progression']}
-        deprecated = ({'deprecated': 'use ancor_ack_events'}
-                      if args.get('ack_event_ids') else {})
-        ordinary_events = [event for event in data['pending_events']
-                           if event['kind'] != 'host.stalled']
+        data = service.store.snapshot()
+        pending = data['pending_events']
+
         if request_id:
             request = service.store.get_request(request_id)
-            linked = [task for task in all_tasks or []
-                      if task.get('request_id') == request_id]
-            selected_tasks = select_tasks(
-                linked, include_done=include_done, include_archived=include_archived)
-            visible = selected_tasks[:task_limit]
-            relevant = [row for row in notification_rows
-                        if row.get('request_id') == request_id]
-            task_ids = {task['id'] for task in linked}
-            events = [event for event in ordinary_events
-                      if (event.get('payload') or {}).get('request_id') == request_id
-                      or (event.get('payload') or {}).get('task_id') in task_ids]
-            filtered = {**data, 'requests': [request],
-                        'task_links': [link for link in data['task_links']
-                                       if link['request_id'] == request_id]}
-            scoped = Scheduling(service.store).observation(
-                filtered, linked, notification_rows)
-            conditions = conditions_with_state(
-                scoped['progression'], host_condition_state(service.store.path))
-            conditions_by_request = {item['request_id']: item for item in conditions}
-            acceptance_events = [event for event in service.store.acceptances()
-                                 if (event.get('payload') or {}).get('request_id') == request_id]
-            eligible_notifications = (relevant if include_closed_notifications
-                                      else actionable_notifications(relevant))
-            selected_notifications = notification_selection(eligible_notifications, notification_limit)
+            goals = service.goal_store.list_goals(request_id=request_id, include_terminal=True)
+            verdicts = service.judge_gate.list_verdicts(request_id)
+            relevant = [row for row in notification_rows if row.get('request_id') == request_id]
+            eligible = relevant if include_closed else actionable_notifications(relevant)
+            selected = notification_selection(eligible, notification_limit)
             content = request_content(service.store.content(request_id), request['brief'],
                                       expanded=include_content)
-            content_via = {'tool': 'ancor_get_context', 'args': {
-                'request_id': request_id, 'include_content': True}}
             if not include_content:
-                content['exact_via'] = content_via
+                content['exact_via'] = {'tool': 'ancor_request_get',
+                                        'args': {'request_id': request_id, 'include_content': True}}
             grants = service.store.active_grants(request_id)
-            coordination = service.store.coordination(request_id)
             result = {
+                'request': request_detail(request, include_text=False, include_audit=include_history),
                 'content': content,
-                'grants': (collection([{key: grant[key] for key in ('id', 'action', 'target', 'scope')}
-                                       for grant in grants]) if include_content else {
-                    'count': len(grants)}),
-                'coordination': {'needs_review': coordination['needs_review']},
+                'grants': (collection([{k: g[k] for k in ('id', 'action', 'target', 'scope')}
+                                       for g in grants]) if include_content else {'count': len(grants)}),
+                'goals': collection([goal_summary(g) for g in goals]),
+                'judge_verdicts': collection(verdicts[-5:], total=len(verdicts)),
                 'questions': collection([question_ref(q)
-                    for q in service.store.questions(request_id) if q['state'] == 'open']),
-                'request': request_detail(
-                    request, include_text=False, include_audit=include_history),
-                'tasks': collection(
-                    [{**{key: value for key, value in task.items()
-                         if key not in {'request_id', 'request_title'}},
-                      'exact_via': task_exact_via(task['id'])} for task in visible],
-                    total=len(selected_tasks)),
-                'counts': {'tasks': task_counts(linked),
-                           'notifications': notification_counts(relevant)},
+                                         for q in service.store.questions(request_id) if q['state'] == 'open']),
                 'notifications': collection(
-                    [notification_summary(row, exact_via=True)
-                     for row in selected_notifications],
-                    total=len(eligible_notifications)),
-                'omitted': omitted_groups(
-                    [task for task in linked if task not in selected_tasks],
-                    [row for row in relevant if row not in eligible_notifications],
-                    request_id=request_id),
-                'liveness': scoped['liveness'],
-                'scheduled_wakes': scoped['scheduled_wakes'],
+                    [notification_summary(row, exact_via=True) for row in selected],
+                    total=len(eligible)),
+                'counts': {'notifications': notification_counts(relevant), 'goals': len(goals)},
                 **extra,
-                **deprecated,
             }
-            from .host import CONDITION_BACKOFF_SECONDS
-            result['progression'] = [progression_detail(
-                item, conditions_by_request.get(item['request_id']),
-                retry_seconds=CONDITION_BACKOFF_SECONDS) for item in scoped['progression']]
-            acceptance = acceptance_ref(
-                request, linked, acceptance_events[-1] if acceptance_events else None)
-            if acceptance['status'] != 'not_ready' or include_history:
-                result['acceptance'] = acceptance
             transitions = service.store.request_transitions(request_id)
             if transitions:
-                result['transitions'] = (bounded_latest(
-                    [transition_summary(event) for event in transitions], TRANSITION_LIMIT,
-                    before_id=before_id)
-                    if include_history else {'count': len(transitions), 'exact_via': {
-                        'tool': 'ancor_get_context', 'args': {
-                            'request_id': request_id, 'include_history': True}}})
-                if include_history and result['transitions']['truncated']:
-                    result['transitions']['next'] = {'tool': 'ancor_get_context', 'args': {
-                        'request_id': request_id, 'include_history': True,
-                        'before_id': result['transitions']['items'][0]['id']}}
-            if coordinator:
-                result['coordination']['pending_adjustments'] = sum(
-                    review['state'] != 'applied' for review in coordination['reviews'])
-                result['coordination']['exact_via'] = {
-                    'tool': 'ancor_reconcile', 'args': {'action': 'get', 'request_id': request_id}}
-                result['pending_events'] = collection(
-                    event_summaries(events, event_limit, exact_via=True), total=len(events))
-                notes = service.note({
-                    'action': 'list', 'request_id': request_id,
-                    'limit': note_limit if 'note_limit' in args else 1})
-                result['notes'] = (notes if 'note_limit' in args else {
-                    'count': notes['count'], 'exact_via': {
-                        'tool': 'ancor_note', 'args': {'action': 'list', 'request_id': request_id}}})
-            else:
-                result['pending_events'] = collection([], total=len(events))
+                result['transitions'] = (
+                    bounded_latest([transition_summary(e) for e in transitions], TRANSITION_LIMIT, before_id=before_id)
+                    if include_history else
+                    {'count': len(transitions),
+                     'exact_via': {'tool': 'ancor_request_get', 'args': {'request_id': request_id, 'include_history': True}}}
+                )
+            if root_role:
+                req_events = [e for e in pending if (e.get('payload') or {}).get('request_id') == request_id]
+                result['pending_events'] = collection(event_summaries(req_events, 50, exact_via=True), total=len(req_events))
             return result
-        confirmed_drafts = {request['draft_id'] for request in data['requests']}
-        open_requests = [request for request in data['requests']
-                             if (request['status'] in {'active', 'paused', 'pending'}
-                                 or request.get('target_status') is not None)]
-        if progress_only:
-            tasks_by_request = {}
-            for task in all_tasks or ():
-                tasks_by_request.setdefault(
-                    task.get('request_id'), []).append(task)
-            reviews = awaiting_acceptances(data['requests'], notification_rows)
-            rows = [request_progress(
-                request,
-                progression.get(request['id']),
-                tasks_by_request.get(request['id'], ()),
-                notification_rows)
-                for request in open_requests]
-            return {
-                'requests': collection(rows),
-                'awaiting_acceptance': collection(reviews),
-                'counts': {
-                    'open_requests': len(rows) + len(reviews),
-                    'awaiting_acceptance': len(reviews),
-                    'open_questions': sum(
-                        is_open_question(row) for row in notification_rows),
-                },
-                'expand': ('Call ancor_request_get with request_id=<id> for '
-                           'current state; add include_content=true for exact request text, '
-                           'or use ancor_task_show for one task.'),
-                **extra,
-            }
-        selected_tasks = select_tasks(
-            all_tasks or [], include_done=include_done,
-            include_archived=include_archived)
-        visible = selected_tasks[:task_limit]
-        notification_source = (notification_rows if include_closed_notifications
-                               else actionable_notifications(notification_rows))
-        selected_notifications = notification_selection(
-            notification_source, notification_limit)
+
+        open_requests = [
+            r for r in data['requests']
+            if r['status'] in {'active', 'paused', 'pending'} or r.get('target_status') is not None
+        ]
+        active_goals = service.goal_store.list_goals(include_terminal=False)
         reviews = awaiting_acceptances(data['requests'], notification_rows)
+        notification_source = notification_rows if include_closed else actionable_notifications(notification_rows)
+        selected = notification_selection(notification_source, notification_limit)
         result = {
-            'requests': collection(
-                [request_ref(request, progression.get(request['id']),
-                                 exact_via=True)
-                 for request in open_requests]),
-            'tasks': collection(
-                [{**task, 'exact_via': task_exact_via(task['id'])} for task in visible],
-                total=len(selected_tasks)),
+            'requests': collection([request_ref(r, exact_via=True) for r in open_requests]),
+            'active_goals': collection([goal_summary(g) for g in active_goals]),
+            'resources': {
+                **service.goal_store.total_active_usage(),
+                'backend': service.cluster_backend.summary(),
+            },
+            'awaiting_acceptance': collection(reviews),
             'counts': {
                 'requests': request_counts(data['requests']),
-                'tasks': task_counts(all_tasks or []),
-                'events': event_counts(ordinary_events),
+                'active_goals': len(active_goals),
+                'events': event_counts(pending),
                 'notifications': notification_counts(notification_rows),
                 'awaiting_acceptance': len(reviews),
             },
-            'awaiting_acceptance': collection(reviews),
-            'attention': attention_items(
-                observation['progression'], tasks=all_tasks,
-                notifications=([] if coordinator else
-                               actionable_notifications(notification_rows)),
-                events=ordinary_events, limit=attention_limit),
-            'omitted': omitted_groups(
-                [task for task in all_tasks or [] if task not in selected_tasks],
-                [row for row in notification_rows if row not in notification_source]),
             'notifications': collection(
-                [notification_summary(row, exact_via=True)
-                 for row in selected_notifications],
+                [notification_summary(row, exact_via=True) for row in selected],
                 total=len(notification_source)),
-            'liveness': observation['liveness'],
-            'scheduled_wakes': observation['scheduled_wakes'],
             **extra,
-            **deprecated,
         }
         if interactor:
-            drafts = [draft_summary(draft) for draft in data['drafts']
-                      if draft['id'] not in confirmed_drafts]
-            result['drafts'] = collection(
-                drafts[:DRAFT_LIMIT], total=len(drafts))
-        if coordinator:
-            result['pending_events'] = collection(
-                event_summaries(ordinary_events, event_limit, exact_via=True),
-                total=len(ordinary_events))
+            confirmed = {r['draft_id'] for r in data['requests']}
+            drafts = [d for d in data['drafts'] if d['id'] not in confirmed]
+            result['drafts'] = collection(drafts[:DRAFT_LIMIT], total=len(drafts))
+        if root_role:
+            result['pending_events'] = collection(event_summaries(pending, 100, exact_via=True), total=len(pending))
         else:
-            result['pending_events'] = collection([], total=len(ordinary_events))
+            result['pending_events'] = collection([], total=len(pending))
         return result
 
-    def notify(args, **native):
+    def visualize(args, **_native):
+        req_id = args.get('request_id')
+        tree_text = render_text_tree(service.store.path, request_id=req_id)
+        out = {'tree': tree_text}
+        output_path = args.get('output_path')
+        if output_path:
+            target = Path(output_path).expanduser().resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(render_html(service.store.path, request_id=req_id), encoding='utf-8')
+            out['html_path'] = str(target)
+        return out
+
+    def notify(args, **_native):
         action = args['action']
         if action == 'list':
             rows = notifications()
@@ -663,89 +386,39 @@ def register(ctx, *, scan_runner=None):
                 rows = [row for row in rows if row['id'] == identifier]
                 if not rows:
                     raise KeyError(identifier)
-            state = args.get('state')
-            if state:
-                rows = [row for row in rows if row['state'] == state]
-            for field in ('request_id', 'task_id'):
-                value = args.get(field)
-                if value:
-                    rows = [row for row in rows if row.get(field) == value]
+            if args.get('state'):
+                rows = [row for row in rows if row['state'] == args['state']]
+            if args.get('request_id'):
+                rows = [row for row in rows if row.get('request_id') == args['request_id']]
             if args.get('open_only'):
-                rows = [row for row in rows if row['kind'] == 'question'
-                        and row['answer'] is None and row.get('closed_at') is None]
+                rows = [row for row in rows if is_open_question(row)]
             limit = args.get('limit', 50)
-            if type(limit) is not int or not 1 <= limit <= 200:
-                raise ValueError('limit must be an integer between 1 and 200')
             total = len(rows)
             rows = rows[-limit:]
-            full = bool(identifier)
-            items = ([notification_detail(row) for row in rows] if full else
-                     [notification_summary(row) for row in rows])
+            items = ([notification_detail(row) for row in rows] if identifier
+                     else [notification_summary(row) for row in rows])
             return {'notifications': collection(items, total=total)}
         box = outbox()
         identifier = args['id']
         if action == 'send':
-            if not coordinator:
-                raise PermissionError('coordinator profile required to send notifications')
-            request_id, task_id = args.get('request_id'), args.get('task_id')
-            try:
-                existing = box.get(identifier)
-            except KeyError:
-                existing = None
-            retry_same_question = bool(
-                existing and existing['kind'] == 'question'
-                and existing['request_id'] == request_id
-                and existing['task_id'] == task_id)
-            if args['kind'] == 'completion':
-                req = service.store.get_request(request_id)
-                if req['status'] != 'awaiting_acceptance':
-                    raise ValueError('completion requires a request awaiting human acceptance')
-                if identifier != completion_id(req):
-                    raise ValueError('completion id must be ' + completion_id(req))
-                if existing is None and len(args['message']) > COMPLETION_MAX_CHARS:
-                    raise ValueError(f'completion message exceeds {COMPLETION_MAX_CHARS} characters; '
-                                     'send result, artifact, essential limitation and next action; keep detailed evidence in the verification record')
-            if args['kind'] == 'question':
-                req = service.store.get_request(request_id)
-                if req['content_mode'] == 'points':
-                    raise ValueError('Use ancor_question create; it durably requests delivery without a separate ancor_notify send')
-                if not task_id:
-                    raise ValueError('question requires request_id and task_id')
-                req = service.store.get_request(request_id)
-                if req['status'] != 'active' or req['target_status'] is not None:
-                    raise ValueError('question requires a stably active request')
-                links = {link['task_id'] for link in service.store.snapshot()['task_links']
-                         if link['request_id'] == req['id']}
-                if task_id not in links:
-                    raise ValueError('question task must be linked to the request')
-                if not retry_same_question:
-                    task = operations.board.show(task_id)
-                    if task.get('archived_at') or task.get('archived'):
-                        raise RuntimeError('question requires an unarchived task')
-                    if task.get('status') != 'blocked':
-                        if task.get('status') == 'triage':
-                            raise RuntimeError(
-                                f'question requires a blocked task; {task_id} is in triage, '
-                                'which must be reviewed and revised before asking the human')
-                        raise RuntimeError(
-                            f'question requires a blocked task; {task_id} is '
-                            f'{task.get("status")}')
-            box.enqueue(identifier, args['kind'], args['message'], actor=ctx.profile_name,
-                        request_id=request_id, task_id=task_id)
+            if not root_role:
+                raise PermissionError('Root Agent role required to send notifications')
+            if args.get('kind') != 'completion':
+                raise ValueError('Use ancor_question_create for questions; ancor_completion_send is for verified completions')
+            req = service.store.get_request(args['request_id'])
+            if req['status'] != 'awaiting_acceptance':
+                raise ValueError('completion requires a request awaiting human acceptance')
+            if identifier != completion_id(req):
+                raise ValueError('completion id must be ' + completion_id(req))
+            if len(args['message']) > COMPLETION_MAX_CHARS:
+                raise ValueError(f'completion message exceeds {COMPLETION_MAX_CHARS} characters')
+            box.enqueue(identifier, 'completion', args['message'],
+                        actor=exec_profile, request_id=args['request_id'])
             return notification_detail(box.get(identifier))
-        if action == 'withdraw':
-            if not coordinator:
-                raise PermissionError('coordinator profile required to withdraw questions')
-            if any(q['id'] == identifier for q in service.store.questions()):
-                service.store.withdraw_question(identifier, args['reason'], ctx.profile_name)
-            return notification_detail(box.withdraw(identifier, actor=ctx.profile_name,
-                                                    reason=args['reason']))
         if action == 'respond':
             if not interactor:
-                raise PermissionError('interactor profile required to respond')
+                raise PermissionError('interactor role required to respond')
             existing = box.get(identifier)
-            if existing.get('request_id') and service.store.get_request(existing['request_id'])['content_mode'] == 'points':
-                raise ValueError('Use ancor_change_propose with reply, content operations and resolve_question as appropriate')
             if existing['kind'] != 'question':
                 raise ValueError('not a question')
             if existing['answer'] is not None:
@@ -754,326 +427,228 @@ def register(ctx, *, scan_runner=None):
                 event = response_event(existing)
                 return {'notification': notification_detail(existing),
                         'event': event, 'confirmed': event['payload']['confirmed']}
-            # The reply is not durable here. The returned proposal is immutable
-            # and only its exact native confirmation commits the answer.
             proposal = box.propose_response(identifier, args['answer'])
             return {'notification': notification_detail(existing),
                     **service.prepared_response_presentation(proposal)}
         raise ValueError('unknown notification action')
 
-    def request(args, **_native):
-        if args['action'] == 'respond':
-            raise ValueError('Use ancor_change propose with exact native confirmation for human input; convert a legacy brief explicitly before point updates')
-        return service.request(args)
+    def _caller_goal_id():
+        if root_role:
+            return 'root'
+        gid = (os.environ.get('GOAL_ID') or os.environ.get('ANCOR_GOAL_ID') or '').strip()
+        if not gid:
+            raise PermissionError('GOAL_ID environment variable is required for non-root goal operations')
+        return gid
 
-    def board_action(args, **_native):
-        return operations.call(args)
+    def _job_canceller(handle):
+        return service.cluster_backend.cancel_handle(handle['handle_id'], handle.get('tags'))
 
-    def acceptance(args, **_native):
-        if args['action'] in {'accept', 'verify'}:
-            operations.reconcile()
-        return service.acceptance(args)
+    def goal_list(args, **_native):
+        goals = service.goal_store.list_goals(
+            request_id=args.get('request_id'),
+            parent_goal_id=args.get('parent_goal_id'),
+            status=args.get('status'),
+            include_terminal=bool(args.get('include_terminal', False)),
+        )
+        return collection(goals)
 
-    def signal(args, **_native):
-        return service.signal(args)
+    def goal_get(args, **_native):
+        gid = args['goal_id']
+        goal = service.goal_store.get_goal(gid)
+        children = service.goal_store.list_goals(parent_goal_id=gid, include_terminal=True)
+        return {'goal': goal, 'children': collection(children),
+                'subtree_active_usage': service.goal_store.subtree_active_usage(gid)}
 
-    def note(args, **_native):
-        return service.note(args)
+    def goal_self(_args, **_native):
+        gid = _caller_goal_id()
+        goal = service.goal_store.get_goal(gid)
+        children = service.goal_store.list_goals(parent_goal_id=gid, include_terminal=True)
+        return {'goal': goal, 'children': collection(children),
+                'subtree_active_usage': service.goal_store.subtree_active_usage(gid)}
 
-    methods = {'request': request, 'get_context': get_context,
-               'ack_events': ack_events, 'notify': notify,
-               'acceptance': acceptance, 'board': board_action, 'wake': wake,
-               'note': note, 'signal': signal}
-    if coordinator or worker:
-        # ANCOR owns the repairable-block loop; keep the native breaker from
-        # routing unrelated causes on one card to triage.
-        from .block_guard import block_guard_hook
-        ctx.register_hook('kanban_task_blocked', block_guard_hook(
-            ctx.get_config('board'), ctx.get_config('block_unblock_cycles', 3)))
+    def goal_read_request(args, **_native):
+        gid = _caller_goal_id()
+        return service.goal_store.read_request_for_goal(gid, args['request_id'])
+
+    def goal_spawn(args, **_native):
+        caller = _caller_goal_id()
+        spec = args['goal_yaml'] if args.get('goal_yaml') else args
+        return service.goal_store.spawn_goal(spec, caller_goal_id=caller)
+
+    def goal_signal(args, **_native):
+        caller = _caller_goal_id()
+        payload = {}
+        if args.get('message') is not None:
+            payload['message'] = args['message']
+        if args.get('generation') is not None:
+            payload['generation'] = args['generation']
+        return service.goal_store.signal_goal(
+            args['goal_id'], args['kind'], payload, caller_goal_id=caller)
+
+    def goal_pause(args, **_native):
+        caller = _caller_goal_id()
+        return service.goal_store.pause_goal(
+            args['goal_id'], mode=args.get('mode', 'drain'),
+            caller_goal_id=caller, job_canceller=_job_canceller)
+
+    def goal_resume(args, **_native):
+        caller = _caller_goal_id()
+        return service.goal_store.resume_goal(args['goal_id'], caller_goal_id=caller)
+
+    def goal_stop(args, **_native):
+        caller = _caller_goal_id()
+        return service.goal_store.stop_goal(
+            args['goal_id'], reason=args.get('reason', 'stopped'),
+            caller_goal_id=caller, job_canceller=_job_canceller)
+
+    def goal_report(args, **_native):
+        gid = _caller_goal_id()
+        return service.goal_store.report_result(gid, {'goal_id': gid, **args})
+
+    def resource_acquire(args, **_native):
+        gid = _caller_goal_id()
+        guard = QuotaGuard(service.goal_store, service.cluster_backend)
+        return guard.acquire(
+            usage=args.get('usage'), tags=args.get('tags'),
+            handle_id=args.get('handle_id'), command=args.get('command'),
+            goal_id=gid, metadata=args.get('metadata'))
+
+    def cluster_status(_args, **_native):
+        return {
+            **service.goal_store.total_active_usage(),
+            'backend': service.cluster_backend.summary(),
+        }
+
+    def delivery_submit(args, **_native):
+        packet = service.judge_gate.build_judge_packet(
+            args['request_id'],
+            summary=args['summary'],
+            artifacts=args['artifacts'],
+            eval_evidence=args.get('eval_evidence'),
+        )
+        if judge_runner is not None:
+            verdict = judge_runner(packet)
+            return {'packet': packet, 'verdict': verdict}
+        event = service.store.add_event('delivery.submitted', {
+            'request_id': args['request_id'],
+            'generation': packet['request']['generation'],
+            'summary': args['summary'],
+            'artifacts': args['artifacts'],
+            'judge_packet': packet,
+        })
+        return {'status': 'submitted_to_judge', 'event_id': event['id'], 'judge_packet': packet}
+
+    def judge_read_request(args, **_native):
+        req = service.store.get_request(args['request_id'])
+        content = service.store.content(args['request_id'])
+        grants = service.store.active_grants(args['request_id'])
+        return {
+            'request': request_detail(req, include_text=True, include_audit=False),
+            'content': content,
+            'grants': [{k: g[k] for k in ('id', 'action', 'target', 'scope')} for g in grants],
+        }
+
+    def judge_verdict(args, **_native):
+        return service.judge_gate.apply_verdict(
+            args['request_id'],
+            generation=args['generation'],
+            decision=args['decision'],
+            summary=args['summary'],
+            evidence=args.get('evidence'),
+            feedback=args.get('feedback'),
+            artifacts=args.get('artifacts'),
+            actor='ancor-judge',
+            runtime=list(observed_models),
+        )
+
+    methods = {
+        'request': service.request,
+        'get_context': get_context,
+        'visualize': visualize,
+        'ack_events': ack_events,
+        'notify': notify,
+        'note': service.note,
+        'signal': service.signal,
+        'goal_list': goal_list,
+        'goal_get': goal_get,
+        'goal_self': goal_self,
+        'goal_read_request': goal_read_request,
+        'goal_spawn': goal_spawn,
+        'goal_signal': goal_signal,
+        'goal_pause': goal_pause,
+        'goal_resume': goal_resume,
+        'goal_stop': goal_stop,
+        'goal_report': goal_report,
+        'resource_acquire': resource_acquire,
+        'cluster_status': cluster_status,
+        'delivery_submit': delivery_submit,
+        'judge_read_request': judge_read_request,
+        'judge_verdict': judge_verdict,
+    }
+
+    change_properties = {}
+    if interactor or root_role:
+        atomic_defs, atomic_methods = atomic_interfaces(
+            service, interactor=interactor, coordinator=root_role)
+        change_properties = atomic_defs['ancor_change'][1]
+        methods.update(atomic_methods)
+
     if interactor:
         ctx.register_hook('pre_tool_call', service.pre_tool_call)
         ctx.register_hook('post_tool_call', service.post_tool_call)
-    contract_schema = {
-        'type': 'object',
-        'description': ('Worker card. It holds these six parts and nothing else. '
-                        'outcome, expected_output and evidence are required; inputs, '
-                        'advice and binding_constraints may be empty. Convey intended use and audience in outcome/inputs, '
-                        'purpose-appropriate quality expectations in expected_output, and substantive '
-                        'checks of the actual output in evidence. Keep optional preferences distinct '
-                        'from necessary quality.'),
-        'properties': {
-            'outcome': {'type': 'string', 'pattern': r'\S'},
-            'inputs': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
-            'advice': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
-            'binding_constraints': {'type': 'array',
-                                    'items': {'type': 'string', 'pattern': r'\S'}},
-            'expected_output': {'type': 'array', 'minItems': 1,
-                                'items': {'type': 'string', 'pattern': r'\S'}},
-            'evidence': {'type': 'array', 'minItems': 1,
-                         'items': {'type': 'string', 'pattern': r'\S'}},
-        },
-        'required': ['outcome', 'expected_output', 'evidence'],
-        'additionalProperties': False,
-    }
-    if worker:
-        # Workers use native Kanban's task-scoped tools and the task card contract.
-        from .worker_context import transform_kanban_show_result
-        ctx.register_hook('transform_tool_result', transform_kanban_show_result)
-        definitions = {}
-    elif interactor:
-        definitions = {
-            'ancor_signal': (
-                'Send informational text to the coordinator through the durable event queue. '
-                'No request or task is required. Submit the returned exact clarify_args through native clarify; only explicit confirmation enqueues the signal. '
-                'This does not change requests or grant authorization. '
-                'Returns an immutable proposal, not delivery or coordinator acknowledgement.',
-                {'text': {'type': 'string', 'pattern': r'\S'}}, ['text']),
-            'ancor_request': (
-                'Draft, confirm, cancel, pause, resume, answer, or make the final human acceptance decision on an ANCOR request. draft requires an authoritative single-line title plus an outcome-oriented brief; keep implementation method and task decomposition out unless the user made a detail a hard constraint. cancel, pause, resume, accept and request_changes create immutable proposals with exact native clarify_args. accept is final human acceptance of coordinator-verified work; request_changes requires exact feedback and returns the request to active repair. respond is retired; use ancor_change with native confirmation for every human input.',
-                {'action': {'type': 'string', 'enum': ['draft', 'confirm', 'cancel', 'pause', 'resume', 'respond', 'accept', 'request_changes']},
-                 'title': {'type': 'string', 'maxLength': 80,
-                           'description': 'Authoritative single-line request label used by every compact list and wake packet.'},
-                 'summary': {'type': 'string',
-                             'description': 'Optional high-level, user-facing points shown before the exact stored request; may state which execution choices are left open.'},
-                 'brief': {'type': 'string',
-                           'description': 'Outcome, scope, hard constraints, non-goals and unresolved human decisions. Do not prescribe implementation unless externally fixed or explicitly non-negotiable.'},
-                 'replacement_of': {'oneOf': [{'type': 'string'},
-                                               {'type': 'array', 'items': {'type': 'string'}}]},
-                 'draft_id': {'type': 'string'}, 'request_id': {'type': 'string'},
-                 'request_ids': {'type': 'array', 'items': {'type': 'string'}},
-                 'reason': {'type': 'string'}, 'body': {'type': 'string'},
-                 'feedback': {'type': 'string',
-                              'description': 'Exact human change request. Required only for request_changes.'}}, ['action']),
-            'ancor_get_context': (
-                'Read a compact ANCOR overview or request-scoped current state. Pass request_id with include_content=true only when complete request text, point version IDs or active grants are needed. Default queries omit text, completed/archived tasks and closed notifications. Request state keeps mutation versions; include_history=true expands transitions and audit versions. Content and grants share content.exact_via; counts are under counts. Set progress_only=true for minimal open-work progress, including requests awaiting human acceptance. Read-only: this role cannot acknowledge events or mutate the board.',
-                {'request_id': {'type': 'string'},
-                 'include_content': {'type': 'boolean', 'description': 'Requires request_id. Expand complete authoritative text and active grants; points omit the duplicate brief and audit metadata.'},
-                 'include_history': {'type': 'boolean', 'description': 'Requires request_id. Expand transition history and request audit versions; default queries give a history count and query when history exists.'},
-                 'before_id': {'type': 'integer', 'minimum': 1, 'description': 'With include_history=true, return older transitions before this event ID.'},
-                 'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
-                 'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
-                 'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
-                 'include_done': {'type': 'boolean'},
-                 'include_archived': {'type': 'boolean'},
-                 'include_closed_notifications': {'type': 'boolean'},
-                 'progress_only': {'type': 'boolean',
-                                   'description': 'Return only open requests as compact progress rows.'}}, []),
-            'ancor_board': (
-                'Read linked native tasks. list returns compact summaries and accepts request_id, status, limit and include_archived filters; show returns one card with bounded recent history; history expands comments, events or runs. This role cannot mutate the board.',
-                {'action': {'type': 'string', 'enum': ['list', 'show', 'history']},
-                 'kind': {'type': 'string', 'enum': ['comments', 'events', 'runs']},
-                 'before_id': {'type': 'integer', 'minimum': 1},
-                 'request_id': {'type': 'string'}, 'task_id': {'type': 'string'},
-                 'status': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
-                 'include_archived': {'type': 'boolean'}}, ['action']),
-            'ancor_notify': (
-                'List compact durable notifications, expand one by id, or answer an open question. respond returns an immutable response proposal with exact native clarify_args; the reply is not recorded until the user submits that exact confirmation. Completion notices are closed only by the final human acceptance decision in ancor_request. Filter by request_id, task_id, state or open_only. A closed question cannot be resurrected; use request respond for new human input outside a question.',
-                {'action': {'type': 'string', 'enum': ['list', 'respond']},
-                 'id': {'type': 'string'}, 'answer': {'type': 'string'},
-                 'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
-                 'request_id': {'type': 'string'}, 'task_id': {'type': 'string'},
-                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
-        }
-    elif coordinator:
-        definitions = {
-            'ancor_request': (
-                'Advance one requested request transition after its linked native cards have converged. advance is idempotent: it returns completed, or blocked with concrete card or replacement blockers. It is the only coordinator path that commits a staged pause, resume, cancellation or replacement.',
-                {'action': {'type': 'string', 'enum': ['advance']},
-                 'request_id': {'type': 'string'}}, ['action', 'request_id']),
-            'ancor_note': (
-                'Maintain request-scoped working notes across coordinator wakes. Notes are durable coordination memory, not request text, authorization, acceptance evidence, or a task contract. list returns bounded previews; get returns one full note. Every note carries created_at and updated_at Unix timestamps. add, update and delete require a stable active or paused request; delete is a soft delete and revisions are retained. Never store credentials or secrets.',
-                {'action': {'type': 'string', 'enum': ['list', 'get', 'add', 'update', 'delete', 'append', 'replace', 'invalidate', 'history']},
-                 'request_id': {'type': 'string'}, 'note_id': {'type': 'string'},
-                 'body': {'type': 'string'},
-                 'expected_revision': {'type': 'integer', 'minimum': 1},
-                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
-                 'include_deleted': {'type': 'boolean'}},
-                ['action', 'request_id']),
-            'ancor_wake': (
-                'Manage durable future one-shot wakes. schedule requires request_id, reason, due_at (Unix seconds); replace requires wake_id, reason, due_at; cancel requires wake_id. list defaults to pending wakes and optionally filters request_id or state. Never create immediate self-wake loops.',
-                {'action': {'type': 'string', 'enum': ['schedule', 'list', 'cancel', 'replace']},
-                 'request_id': {'type': 'string'}, 'wake_id': {'type': 'string'},
-                 'reason': {'type': 'string'}, 'due_at': {'type': 'number'},
-                 'state': {'type': 'string', 'enum': ['scheduled', 'queued', 'suppressed',
-                                                      'cancelled', 'handled']},
-                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
-            'ancor_notify': (
-                'Durably enqueue a completion notice, list compact notifications, or withdraw an obsolete unanswered question. For point-based requests, create questions only through ancor_question; creation already requests delivery. The question send path is only for migrated legacy briefs. Enqueue returns pending; Gateway delivery is asynchronous. A question requires an active request and a linked blocked task; multiple distinct questions may remain open for the same request or task. Completion requires awaiting_acceptance and the exact completion_notice_id returned by verification. Filter by request_id, task_id, state or open_only; only id expands one full notification. Reuse a stable ID for the same question; pending is not delivery, and uncertain requires operator reconciliation.',
-                {'action': {'type': 'string', 'enum': ['send', 'list', 'withdraw']},
-                 'id': {'type': 'string'},
-                 'kind': {'type': 'string', 'enum': ['question', 'completion']},
-                 'message': {'type': 'string', 'description': f'Completion notices have a {COMPLETION_MAX_CHARS}-character limit; full checks belong in verification evidence.'}, 'reason': {'type': 'string'},
-                 'request_id': {'type': 'string'}, 'task_id': {'type': 'string'},
-                 'state': {'type': 'string'}, 'open_only': {'type': 'boolean'},
-                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
-            'ancor_board': (
-                'Read and coordinate linked native tasks. list returns compact summaries; show returns one card with bounded recent history; history expands comments, events or runs for one card. create requires a contract with outcome, expected_output and evidence; inputs, advice and binding_constraints are optional; edit takes the same contract and re-renders the card. archive writes an audit comment and verifies the native terminal state. Supports create, block, unblock, comment, link/unlink parent_id -> child_id, revise, archive, and associate. Each task has exactly one request owner; associate is idempotent for that owner and rejects sharing or transfer.',
-                {'action': {'type': 'string', 'enum': ['create', 'list', 'show', 'block', 'unblock',
-                                                        'history', 'comment', 'link', 'unlink', 'edit', 'revise',
-                                                        'archive', 'associate']},
-                 'kind': {'type': 'string', 'enum': ['comments', 'events', 'runs']},
-                 'before_id': {'type': 'integer', 'minimum': 1},
-                 'priority': {'type': 'integer'},
-                 'parent_ids': {'type': 'array', 'items': {'type': 'string'}},
-                 'hold': {'type': 'boolean'},
-                 'generation': {'type': 'integer', 'minimum': 1, 'description': 'For point requests, create/contract edit requires the current content generation.'},
-                 'point_versions': {'type': 'array', 'items': {'type': 'string'}, 'description': 'For point requests, select relevant content.fields points by their version_id, not id.'},
-                 'max_runtime_seconds': {'type': 'integer', 'minimum': 1},
-                 'status': {'type': 'string'},
-                 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100},
-                 'include_archived': {'type': 'boolean'},
-                 'contract': contract_schema,
-                 **{field: {'type': 'string'} for field in
-                    ('request_id', 'task_id', 'parent_id', 'child_id', 'key', 'title', 'reason', 'body')}},
-                ['action']),
-            'ancor_get_context': (
-                'Read a compact coordination snapshot or request-scoped current state: counts, open tasks/questions, pending event previews and health. Request queries also omit completed/archived tasks, closed notifications, request text, notes and full review/basis records by default. Pass request_id with include_content=true for authoritative text, point version IDs and active grants; ancor_reconcile get for review/basis records; ancor_note list/get for working notes; ancor_board show for a full task; ancor_notify id for one notification. Pass request_id with include_history=true for transitions and audit versions. Content and grants share content.exact_via; health decisions appear once in progression, and totals under counts. Pass event_id for one complete event. Use ancor_ack_events for handled IDs; ack_event_ids is deprecated.',
-                {'ack_event_ids': {'type': 'array', 'items': {'type': 'integer'}},
-                 'request_id': {'type': 'string'},
-                 'include_content': {'type': 'boolean', 'description': 'Requires request_id. Expand complete authoritative text and active grants; points omit the duplicate brief and audit metadata.'},
-                 'include_history': {'type': 'boolean', 'description': 'Requires request_id. Expand transition history and request audit versions; default queries give a history count and query when history exists.'},
-                 'before_id': {'type': 'integer', 'minimum': 1, 'description': 'With include_history=true, return older transitions before this event ID.'},
-                 'notification_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
-                 'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
-                 'include_done': {'type': 'boolean'},
-                 'include_archived': {'type': 'boolean'},
-                 'include_closed_notifications': {'type': 'boolean'},
-                 'task_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200},
-                 'event_limit': {'type': 'integer', 'minimum': 1, 'maximum': 500},
-                 'event_id': {'type': 'integer', 'minimum': 1},
-                 'note_limit': {'type': 'integer', 'minimum': 1, 'maximum': 200,
-                                'description': 'Explicitly expand this many note previews for request_id; omitted by default. Prefer ancor_note list/get.'}}, []),
-            'ancor_ack_events': (
-                'Atomically acknowledge durable event IDs after acting on them. For worker completion, read the result and relevant evidence, decide the next action, and preserve material findings or follow-up actions. Workers own work-level quality; focus on delivery impact and examine underlying work when a concrete concern warrants it. Acknowledgement needs no separate per-card quality report; pending repair remains work to finish. The whole batch is rejected without writing if any ID is missing, host-owned (host.stalled or host.liveness), or blocked by a triage card. Repeating an acknowledged ID is idempotent and returns it in already_acked.',
-                {'event_ids': {'type': 'array', 'minItems': 1,
-                               'items': {'type': 'integer', 'minimum': 1}},
-                 'reason': {'type': 'string'}}, ['event_ids']),
-            'ancor_acceptance': (
-                'Record independent coordinator verification against the current request, or reject with a reason. Review the assembled delivery and content that directly affects it for substance, clarity and usefulness. Reuse worker findings for underlying work; investigate further to resolve concrete concerns about the result. Correct meaningful defects and briefly explain why the delivery meets the request. Verification does not require exhaustive testing or an extra audit package. Verification requires every linked native card to be done or archived and archives verified done cards. verify/accept moves the request to awaiting_acceptance; it is not final acceptance. The human-facing role makes the final decision.',
-                {'request_id': {'type': 'string'}, 'action': {'type': 'string', 'enum': ['verify', 'accept', 'reject']},
-                 'evidence': {
-                     'type': 'object',
-                     'description': 'Required for verify/accept. Bind the current request and delivery artifacts to linked task IDs. In verification, briefly explain the findings supporting delivery quality and usefulness, drawing on your review and applicable worker checks. Mention limitations that affect use and describe checks honestly. Reuse existing findings; these fields do not require extra tests or audit artifacts.',
-                     'properties': {
-                         'brief': {'type': 'string', 'description': 'Exact stored legacy brief; structured requests use generation and coverage.'},
-                         'generation': {'type': 'integer', 'minimum': 1},
-                         'coverage': {'type': 'array', 'items': {'type': 'object', 'properties': {
-                             'version_id': {'type': 'string'},
-                             'satisfied': {'type': 'boolean', 'description': 'True only when this outcome or constraint is actually satisfied; pending, blocked and failed work is false.'},
-                             'evidence': {'type': 'string'}},
-                             'required': ['version_id', 'satisfied', 'evidence'], 'additionalProperties': False}},
-                         **{field: {'type': 'array', 'minItems': 1,
-                                    'items': {'type': 'string', 'pattern': r'\S'}}
-                            for field in ('verification', 'artifacts', 'task_ids')}},
-                     'required': ['verification', 'artifacts', 'task_ids'],
-                     'anyOf': [{'required': ['brief']}, {'required': ['generation', 'coverage']}],
-                     'additionalProperties': False},
-                 'reason': {'type': 'string'}}, ['request_id', 'action']),
-        }
+    else:
+        ctx.register_hook('pre_tool_call', _role_fence_hook(role))
+        # Record the model that actually answered (post-fallback) straight from Hermes;
+        # never self-reported by the agent.
+        ctx.register_hook('post_api_request', _observed_model_hook(
+            observed_models,
+            on_new=(lambda model, provider: service.goal_store.record_observed_model(
+                _caller_goal_id(), model, provider)) if goal_role else None))
 
-    if interactor or coordinator:
-        from .atomic_tools import interfaces
-        atomic_definitions, atomic_methods = interfaces(service, operations, interactor=interactor, coordinator=coordinator)
-        definitions.update(atomic_definitions)
-        methods.update(atomic_methods)
-
-    tool_api = str(ctx.get_config('tool_api', 'v2')).lower()
-    if tool_api not in {'v2', 'legacy', 'dual'}:
-        raise ValueError('tool_api must be one of: dual, legacy, v2')
-    v2_mutations = frozenset()
-    if tool_api in {'v2', 'dual'}:
-        from .tool_surface import V2_MUTATION_TOOLS, build_v2_surface
-        v2_mutations = V2_MUTATION_TOOLS
-        role = 'interactor' if interactor else 'coordinator' if coordinator else 'worker'
-        v2_definitions, v2_methods = build_v2_surface(
-            role=role,
-            methods=methods,
-            legacy_definitions=definitions,
-            contract_schema=contract_schema,
-            admin_tools=bool(ctx.get_config('admin_tools', False)),
-        )
-        if tool_api == 'v2':
-            definitions, methods = v2_definitions, v2_methods
-        elif role != 'worker':
-            definitions = {**definitions, **v2_definitions}
-            methods = {**methods, **v2_methods}
+    from .tool_surface import ROOT_MUTATION_TOOLS, build_surface
+    definitions, handlers = build_surface(
+        role=role, methods=methods, change_properties=change_properties)
 
     for name, (description, properties, required) in definitions.items():
-        method = methods[name.removeprefix('ancor_')]
+        method = handlers[name.removeprefix('ancor_')]
         try:
             accepts_native_kwargs = any(
-                parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in inspect.signature(method).parameters.values())
+                p.kind is inspect.Parameter.VAR_KEYWORD
+                for p in inspect.signature(method).parameters.values())
         except (TypeError, ValueError):
             accepts_native_kwargs = False
+
         def handle(args, _method=method, _name=name, _properties=properties,
                    _required=required, _accepts_native_kwargs=accepts_native_kwargs, **kwargs):
             try:
                 args = _normalize_tool_arguments(_name, args)
-                if worker:
-                    if args:
-                        raise PermissionError('worker context is read-only')
-                    return json.dumps(service.store.snapshot(), ensure_ascii=False)
-                allowed = (interactor_profile if interactor else coordinator_profile)
-                if ctx.profile_name != allowed:
-                    raise PermissionError('ANCOR role profile required')
-                if _name == 'ancor_change' and coordinator and args.get('action') not in {'get', 'history'}:
-                    raise PermissionError('coordinator may only read changes')
-                if _name == 'ancor_question' and interactor and args.get('action') not in {'list', 'get'}:
-                    raise PermissionError('interactor may only read questions; answer via confirmed change')
-                if _name == 'ancor_request' and coordinator and args.get('action') != 'advance':
-                    raise PermissionError('coordinator may only advance requests')
-                mutation = (_name == 'ancor_acceptance'
-                            or _name == 'ancor_ack_events'
-                            or _name in v2_mutations
-                            or (_name == 'ancor_request' and args.get('action') == 'advance')
-                            or (_name == 'ancor_wake' and args.get('action') != 'list')
-                            or (_name == 'ancor_note' and args.get('action') in {'add', 'update', 'delete'})
-                            or (_name == 'ancor_notify' and args.get('action') == 'send')
-                            or (_name == 'ancor_board' and args.get('action') not in {'list', 'show'})
-                            or (_name == 'ancor_get_context' and bool(args.get('ack_event_ids'))))
-                # Cooperation marker, not a shell/process security sandbox.
-                if mutation and not coordinator:
-                    raise PermissionError('coordinator profile required')
+                if _name in ROOT_MUTATION_TOOLS and not (root_role or (goal_role and _name.startswith('ancor_goal_'))):
+                    raise PermissionError('Root Agent role required')
                 missing = _missing_fields(args, _required)
                 if missing:
-                    return json.dumps(_invalid_request(
-                        _name, args.get('action'), missing=missing), ensure_ascii=False)
-                invalid = _validate_action_request(_name, args)
-                if invalid:
-                    return json.dumps(invalid, ensure_ascii=False)
+                    return json.dumps(_invalid_request(_name, missing=missing), ensure_ascii=False)
                 unknown = set(args) - set(_properties)
                 if unknown:
                     raise ValueError('unsupported arguments: ' + ', '.join(sorted(unknown)))
-                if coordinator:
-                    from .scheduling import Scheduling
-                    Scheduling(service.store).started()
-                result = (_method(args, **kwargs) if _accepts_native_kwargs
-                          else _method(args))
-                if tool_api == 'v2':
-                    from .tool_surface import rewrite_legacy_references
-                    result = rewrite_legacy_references(result, role=role)
+                result = (_method(args, **kwargs) if _accepts_native_kwargs else _method(args))
                 return json.dumps(result, ensure_ascii=False)
             except ToolProtocolError as exc:
-                log.warning('ANCOR protocol error in %s: %s', _name, exc)
-                return json.dumps({
-                    'error': str(exc), 'code': 'protocol_error', 'tool': _name,
-                    'next_step': ('Call the tool directly with its declared object schema; '
-                                  'do not wrap tool calls in a calls array.'),
-                }, ensure_ascii=False)
+                return json.dumps({'error': str(exc), 'code': 'protocol_error', 'tool': _name}, ensure_ascii=False)
+            except (AttenuationError, QuotaExceededError) as exc:
+                code = 'attenuation_violation' if isinstance(exc, AttenuationError) else 'quota_exceeded'
+                return json.dumps({'error': str(exc), 'code': code, 'tool': _name}, ensure_ascii=False)
             except Exception as exc:
-                log.exception('ANCOR tool failed')
+                log.exception('ANCOR tool %s failed', _name)
                 code = ('forbidden' if isinstance(exc, PermissionError) else
                         'not_found' if isinstance(exc, KeyError) else
                         'invalid_request' if isinstance(exc, ValueError) else
                         'state_conflict' if isinstance(exc, RuntimeError) else 'internal')
-                result = {'error': str(exc), 'code': code}
-                from .operations import TaskBasisError
-                if isinstance(exc, TaskBasisError):
-                    result.update(current_basis=exc.current_basis,
-                                  next_step='Select relevant point_versions from current_basis and retry with its generation; this rejected operation created or edited no card.')
-                return json.dumps(result, ensure_ascii=False)
-        ctx.register_tool(name=name, toolset='ancor',
-                          schema={'name': name, 'description': description, 'parameters': {
-                              'type': 'object', 'properties': properties, 'required': required,
-                              'additionalProperties': False}}, handler=handle)
+                return json.dumps({'error': str(exc), 'code': code}, ensure_ascii=False)
+
+        ctx.register_tool(
+            name=name, toolset='ancor',
+            schema={'name': name, 'description': description, 'parameters': {
+                'type': 'object', 'properties': properties, 'required': required,
+                'additionalProperties': False}},
+            handler=handle,
+        )

@@ -62,10 +62,10 @@ class Coordinator:
             if not events:
                 return 'idle'
             snapshot = await asyncio.to_thread(self.snapshot)
-            prompt = ('Process these ANCOR events; inspect the compact snapshot, expand only '
-                      'needed requests or tasks, and explicitly acknowledge only handled event IDs. '
-                      'For execution_unknown events, the card is frozen: reconcile durable results, '
-                      'live workers, and completed artifacts before any redispatch.\n'
+            prompt = ('Process these ANCOR events as Root Agent; inspect the compact snapshot '
+                      '(requests, active_goals, cluster GPU status), spawn/steer/pause/stop L1 '
+                      'goals or submit delivery to the independent Judge, and explicitly '
+                      'acknowledge only handled event IDs.\n'
                       + json.dumps({'events': event_summaries(events, self.batch_size),
                                     'snapshot': snapshot},
                                    separators=(',', ':'), ensure_ascii=False))

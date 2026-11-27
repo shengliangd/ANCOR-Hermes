@@ -1,8 +1,8 @@
 {
   "name": "ancor",
   "label": "ANCOR",
-  "description": "Read-only requests, tasks, questions, and event history.",
-  "version": "1.0.0",
+  "description": "Read-only ANCOR requests, recursive /goal trees, generic resource budgets, and Judge verdicts.",
+  "version": "2.1.0",
   "icon": "GitBranch",
   "tab": {"path": "/ancor", "position": "end"},
   "entry": "dist/index.js",

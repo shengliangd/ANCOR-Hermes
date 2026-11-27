@@ -1,13 +1,12 @@
 name: ancor
-version: 0.9.0
-description: Durable requests and interactor/coordinator workflow over native Hermes Kanban.
+version: 2.1.0
+description: Human-intent alignment on default profile + thin deterministic substrate, generic resource budgets, recursive /goal tree on ancor-exec, and independent delivery Judge.
 provides_tools:
   - ancor_overview
   - ancor_request_get
+  - ancor_request_read
   - ancor_event_get
-  - ancor_task_list
-  - ancor_task_show
-  - ancor_task_history
+  - ancor_event_ack
   - ancor_change_get
   - ancor_change_history
   - ancor_change_propose
@@ -25,92 +24,67 @@ provides_tools:
   - ancor_request_changes_propose
   - ancor_request_advance
   - ancor_signal_propose
-  - ancor_event_ack
   - ancor_note_list
   - ancor_note_get
   - ancor_note_history
   - ancor_note_add
   - ancor_note_update
   - ancor_note_delete
-  - ancor_wake_list
-  - ancor_wake_schedule
-  - ancor_wake_cancel
-  - ancor_task_create
-  - ancor_task_title_update
-  - ancor_task_priority_update
-  - ancor_task_contract_update
-  - ancor_task_block
-  - ancor_task_unblock
-  - ancor_task_revise
-  - ancor_task_comment
-  - ancor_task_link
-  - ancor_task_unlink
-  - ancor_task_archive
-  - ancor_impact_get
-  - ancor_impact_review
-  - ancor_impact_finish
-  - ancor_delivery_verify
-  - ancor_delivery_reject
   - ancor_completion_send
-  - ancor_admin_task_associate
-  - ancor_request
-  - ancor_get_context
-  - ancor_ack_events
-  - ancor_acceptance
-  - ancor_board
-  - ancor_notify
-  - ancor_signal
-  - ancor_wake
-  - ancor_note
-  - ancor_change
-  - ancor_question
-  - ancor_reconcile
+  - ancor_goal_list
+  - ancor_goal_get
+  - ancor_goal_self
+  - ancor_goal_spawn
+  - ancor_goal_signal
+  - ancor_goal_pause
+  - ancor_goal_resume
+  - ancor_goal_stop
+  - ancor_goal_report
+  - ancor_resource_acquire
+  - ancor_cluster_status
+  - ancor_delivery_submit
+  - ancor_judge_verdict
+  - ancor_visualize
 provides_hooks:
   - pre_tool_call
   - post_tool_call
-  - transform_tool_result
-  - kanban_task_blocked
-  - on_kanban_worker_exited
+  - post_api_request
 config_schema:
   interactor_profile:
     type: string
-    default: ancor-interactor
-  coordinator_profile:
+    default: default
+  exec_profile:
     type: string
-    default: ancor-coordinator
+    default: ancor-exec
+  exec_config_path:
+    type: string
+  category_reasoning:
+    type: object
   owner_profile:
     type: string
     default: default
   gateway_owner:
     type: boolean
     default: false
-  board:
-    type: string
-    default: ancor
-  worker_profile:
-    type: string
-    default: ancor-worker
   poll_interval:
     type: number
-    default: 30
+    default: 15
   event_batch_size:
     type: integer
     minimum: 1
     maximum: 32
     default: 12
-  block_unblock_cycles:
+  max_judge_rejects:
     type: integer
+    minimum: 1
     default: 3
+  global_limits:
+    type: object
+  cluster_state_path:
+    type: string
   human_target:
     type: string
   transport_profile:
     type: string
   store_path:
     type: string
-  tool_api:
-    type: string
-    enum: [v2, legacy, dual]
-    default: v2
-  admin_tools:
-    type: boolean
-    default: false

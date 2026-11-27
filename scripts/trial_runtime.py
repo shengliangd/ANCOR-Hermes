@@ -91,55 +91,46 @@ def main():
 
 def pump(root, cycles):
     import asyncio
-    from dataclasses import asdict
     from types import SimpleNamespace
     import yaml
     from ancor.host import Host
     from ancor.notification import NotificationDispatcher
-    from hermes_cli.kanban_db_connect import connect
-    from hermes_cli.kanban_db_dispatch import dispatch_once
     cfg = yaml.safe_load((root / 'config.yaml').read_text())['plugins']['entries']['ancor']['settings']
     ctx = SimpleNamespace(get_config=lambda key, default=None: cfg.get(key, default))
     host = Host(ctx)
+
     def local_inbox(target, message):
         if target != 'trial:human':
             raise RuntimeError('trial notification cannot leave local inbox')
         with (root / 'inbox.jsonl').open('a') as output:
             output.write(json.dumps({'target': target, 'message': message, 'time': time.time()}, ensure_ascii=False) + '\n')
         return {'success': True, 'trial': True}
+
     box = host.notification_outbox()
-    dispatcher = NotificationDispatcher(box, local_inbox, resolve_request=host.store.get_request,
-        resolve_task=lambda tid: host.board.show(tid) if tid else None)
-    def native_tick():
-        conn = connect(board='trial')
-        try:
-            return dispatch_once(conn, board='trial', max_spawn=2, max_in_progress=2)
-        finally:
-            conn.close()
+    dispatcher = NotificationDispatcher(
+        box, local_inbox, resolve_request=host.store.get_request, resolve_task=lambda _tid: None)
+
     async def tick():
-        # Production dispatch runs independently of coordination. Keep it concurrent
-        # so a coordinator inspecting a released card cannot starve its worker.
-        coordinator = asyncio.create_task(host.coordinator.tick())
-        while not coordinator.done():
-            dispatch = await asyncio.to_thread(native_tick)
-            if dispatch.spawned or dispatch.crashed or dispatch.auto_blocked:
-                print(json.dumps({'concurrent_dispatch': asdict(dispatch)}, default=str), flush=True)
-            while await dispatcher.deliver_once():
-                pass
-            await asyncio.wait([coordinator], timeout=3)
-        state = await coordinator
+        host.scan()
+        dispatched = await host.runner.dispatch_ready()
+        state = await host.coordinator.tick()
         while await dispatcher.deliver_once():
             pass
-        return state
+        return state, dispatched
+
     for index in range(cycles):
-        result = asyncio.run(tick())
-        dispatch = native_tick()
-        print(json.dumps({'cycle': index, 'coordinator': result, 'dispatch': asdict(dispatch)}, default=str), flush=True)
-        print(json.dumps({'requests': [{'id': r['id'], 'status': r['status'], 'generation': r['generation']}
-                                     for r in host.store.snapshot()['requests']],
-                          'tasks': [{'id': t['id'], 'status': t['status']} for t in host.board.list()]}, ensure_ascii=False), flush=True)
+        state, dispatched = asyncio.run(tick())
+        print(json.dumps({
+            'cycle': index,
+            'coordinator': state,
+            'dispatched_goals': dispatched,
+            'requests': [{'id': r['id'], 'status': r['status'], 'generation': r['generation']}
+                         for r in host.store.snapshot()['requests']],
+            'goals': [{'goal_id': g['goal_id'], 'status': g['status'], 'parent': g['parent_goal_id']}
+                      for g in host.goals.list_goals(include_terminal=True)],
+        }, ensure_ascii=False), flush=True)
         if index + 1 < cycles:
-            time.sleep(15)
+            time.sleep(5)
     return 0
 
 

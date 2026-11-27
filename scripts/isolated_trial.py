@@ -17,17 +17,13 @@ import sys
 import time
 
 REPO = Path(__file__).resolve().parents[1]
-ROLES = ('ancor-interactor', 'ancor-coordinator', 'ancor-worker')
+ROLES = ('ancor-exec',)
 
 
 def role_skills(role):
-    if role == 'ancor-interactor':
-        primary = 'ancor'
-    elif role == 'ancor-coordinator':
-        primary = 'ancor-coordination'
-    else:
-        primary = role
-    return (primary,)
+    if role == 'default':
+        return ('ancor',)
+    return ()
 
 
 def prepare(root, native, credentials):
@@ -72,17 +68,17 @@ def prepare(root, native, credentials):
     python = copied / 'bin/python'
     workspace = root / 'workspace'
     workspace.mkdir()
-    settings = {'store_path': str(root / 'ancor/requests.db'), 'board': 'trial',
+    settings = {'store_path': str(root / 'ancor/requests.db'),
+                'cluster_state_path': str(root / 'ancor/cluster.json'),
                 'owner_profile': 'default', 'gateway_owner': False,
-                'interactor_profile': 'ancor-interactor', 'coordinator_profile': 'ancor-coordinator',
-                'worker_profile': 'ancor-worker', 'human_target': 'trial:human',
-                'transport_profile': 'default', 'poll_interval': 30}
+                'interactor_profile': 'default', 'exec_profile': 'ancor-exec',
+                'human_target': 'trial:human', 'transport_profile': 'default', 'poll_interval': 15}
     (root / 'ancor').mkdir()
     identities = {}
     for role in ('default', *ROLES):
         home = root if role == 'default' else root / 'profiles' / role
         home.mkdir(parents=True, exist_ok=True)
-        source_role = 'ancor-coordinator' if role == 'default' else role
+        source_role = 'ancor-interactor' if role == 'default' else 'ancor-coordinator'
         source = credentials / 'profiles' / source_role
         original = yaml.safe_load((source / 'config.yaml').read_text()) or {}
         model = copy.deepcopy(original['model'])
@@ -103,13 +99,12 @@ def prepare(root, native, credentials):
         with os.fdopen(fd, 'w') as output:
             for name, value in secret_values.items():
                 output.write(name + '=' + json.dumps(value) + '\n')
-        toolsets = ['terminal', 'file', 'skills', 'delegation']
-        if role == 'ancor-interactor':
-            toolsets += ['ancor', 'clarify']
-        elif role == 'ancor-coordinator':
-            toolsets += ['ancor']
-        elif role == 'ancor-worker':
-            toolsets += ['kanban']
+        if role == 'default':
+            toolsets = ['terminal', 'file', 'skills', 'ancor', 'clarify']
+        else:
+            # ancor-exec: role-specific pre_tool_call fence enforces root vs goal vs judge boundaries.
+            toolsets = ['terminal', 'file', 'skills', 'ancor']
+        auto_load = list(role_skills(role))
         config = {
             '_config_version': original.get('_config_version', 1),
             'model': model, 'providers': providers, 'auth': {'adopt_external_logins': False},
@@ -117,10 +112,8 @@ def prepare(root, native, credentials):
             'agent': {'max_turns': 24},
             'approvals': {'single_query_mode': 'approve'},
             'auxiliary': {'background_review': {'enabled': False}}, 'curator': {'enabled': False},
-            'skills': {'auto_load': [{'ancor-interactor': 'ancor',
-                                    'ancor-coordinator': 'ancor-coordination', 'ancor-worker': 'ancor-worker'}[role]] if role in ROLES else []},
+            'skills': {'auto_load': auto_load},
             'plugins': {'enabled': ['ancor'], 'entries': {'ancor': {'enabled': True, 'settings': settings}}},
-            'kanban': {'review_dispatch': False, 'dispatch_in_gateway': False, 'auto_subscribe': False},
             'telemetry': {'enabled': False}, 'terminal': {'cwd': str(workspace)},
         }
         (home / 'config.yaml').write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False))
@@ -128,10 +121,8 @@ def prepare(root, native, credentials):
         (home / 'plugins').mkdir(exist_ok=True)
         shutil.copytree(REPO / 'ancor', home / 'plugins/ancor', ignore=shutil.ignore_patterns('__pycache__'))
         (home / 'skills').mkdir(exist_ok=True)
-        if role in ROLES:
-            shutil.copy2(REPO / 'roles' / role / 'SOUL.md', home / 'SOUL.md')
-            for skill in role_skills(role):
-                shutil.copytree(REPO / 'skills' / skill, home / 'skills' / skill)
+        for skill in role_skills(role):
+            shutil.copytree(REPO / 'skills' / skill, home / 'skills' / skill)
         identities[role] = {'model': model.get('default'), 'provider': model.get('provider')}
     (root / 'trial.json').write_text(json.dumps({'root': str(root), 'native': str(native),
            'python': str(python), 'repo': str(REPO), 'models': identities}, indent=2))
@@ -139,9 +130,6 @@ def prepare(root, native, credentials):
     wrapper = '#!/bin/sh\nexec ' + shlex.quote(str(python)) + ' -B ' + shlex.quote(str(REPO / 'scripts/trial_runtime.py')) + ' "$@"\n'
     (root / 'bin/hermes').write_text(wrapper)
     (root / 'bin/hermes').chmod(0o700)
-    subprocess.run([str(root / 'bin/hermes'), 'kanban', 'boards', 'create', 'trial',
-                    '--default-workdir', str(workspace)], env=environment(root), cwd=workspace, check=True,
-                   stdout=subprocess.DEVNULL)
     print(json.dumps({'trial_root': str(root), 'models': identities, 'live_instance_modified': False}, indent=2))
 
 

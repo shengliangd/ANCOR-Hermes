@@ -406,9 +406,6 @@ class Changes:
                        'body': body, 'reason': reason, 'point_ids': encode(list(point_ids))}.items()):
                     raise RuntimeError('question identity already used')
                 return dict(existing)
-            if task_id and not db.execute('SELECT 1 FROM task_links WHERE request_id=? AND task_id=?',
-                                         (rid, task_id)).fetchone():
-                raise ValueError('question task must be linked')
             active = {p['point_id'] for p in self._points(db, rid)}
             if not set(point_ids) <= active:
                 raise ValueError('question references inactive or foreign points')
@@ -532,14 +529,6 @@ class Changes:
         data = json.loads(evidence)
         if data.get('generation') != req['generation']:
             raise RuntimeError('verification must bind current generation')
-        if not db.execute('SELECT 1 FROM coverage_reviews WHERE request_id=? AND generation=?',
-                          (req['id'], req['generation'])).fetchone():
-            raise RuntimeError('coverage review required')
-        if req['observed_generation'] != req['generation']:
-            raise RuntimeError('current generation has not been reviewed')
-        if db.execute("SELECT 1 FROM impact_reviews WHERE request_id=? AND generation=? AND state='pending'",
-                      (req['id'], req['generation'])).fetchone():
-            raise RuntimeError('impact adjustments are still pending')
         required_points = {p['version_id']: p for p in self._points(db, req['id'])
                            if p['field'] in {'outcome', 'constraint'}}
         required = set(required_points)
@@ -616,7 +605,7 @@ class Changes:
 
     def pending_coordination(self):
         with self._transaction() as db:
-            return [dict(r) for r in db.execute("SELECT id,generation,observed_generation FROM requests r "
-                "WHERE content_mode='points' AND status='active' AND target_status IS NULL AND "
-                "(observed_generation<>generation OR EXISTS(SELECT 1 FROM impact_reviews i WHERE "
-                "i.request_id=r.id AND i.generation=r.generation AND i.state='pending'))")]
+            return [dict(r) for r in db.execute(
+                "SELECT id,generation,observed_generation FROM requests r "
+                "WHERE content_mode='points' AND status='active' AND target_status IS NULL "
+                "AND observed_generation<>generation")]

@@ -17,8 +17,10 @@ CONFIRMATION_TIMEOUT_SECONDS = 3600
 
 
 class Service:
-    def __init__(self, ctx, store=None, board=None):
-        self.ctx, self._store, self.board = ctx, store, board
+    def __init__(self, ctx, store=None, cluster_backend=None):
+        self.ctx, self._store, self._cluster_backend = ctx, store, cluster_backend
+        self._goal_store = None
+        self._judge_gate = None
 
     @property
     def store(self):
@@ -33,16 +35,32 @@ class Service:
         return self._store
 
     @property
-    def native_board(self):
-        if self.board is None:
-            from .board import NativeBoard
-            name = self.ctx.get_config('board')
-            if not name:
-                raise ValueError('configure ANCOR board')
-            self.board = NativeBoard(
-                name, profile=self.ctx.get_config(
-                    'coordinator_profile', 'ancor-coordinator'))
-        return self.board
+    def cluster_backend(self):
+        if self._cluster_backend is None:
+            from .watcher import FileClusterBackend
+            cluster_path = self.ctx.get_config('cluster_state_path') if self.ctx else None
+            path = Path(cluster_path) if cluster_path else Path(self.store.path).parent / 'cluster.json'
+            self._cluster_backend = FileClusterBackend(path)
+        return self._cluster_backend
+
+    @property
+    def goal_store(self):
+        if self._goal_store is None:
+            from .goals import GoalStore
+            from .model_routing import CategoryRouter
+            global_limits = self.ctx.get_config('global_limits') if self.ctx else None
+            self._goal_store = GoalStore(self.store, global_limits=global_limits,
+                                         category_router=CategoryRouter.from_ctx(self.ctx))
+        return self._goal_store
+
+    @property
+    def judge_gate(self):
+        if self._judge_gate is None:
+            from .judge import DEFAULT_MAX_JUDGE_REJECTS, JudgeGate
+            max_rejects = (self.ctx.get_config('max_judge_rejects', DEFAULT_MAX_JUDGE_REJECTS)
+                           if self.ctx else DEFAULT_MAX_JUDGE_REJECTS)
+            self._judge_gate = JudgeGate(self.store, self.goal_store, max_rejects=max_rejects)
+        return self._judge_gate
 
     def request(self, args):
         action = args['action']
@@ -84,8 +102,10 @@ class Service:
             return self._prepare_confirmation(action, self.command_presentation(command))
         if action == 'advance':
             from .transitions import advance_request
-            return advance_request(self.store, self.native_board,
-                                       args['request_id'])
+            return advance_request(
+                self.store, self.goal_store, args['request_id'],
+                job_canceller=lambda handle: self.cluster_backend.cancel_handle(
+                    handle['handle_id'], handle.get('tags')))
         if action in {'accept', 'request_changes'}:
             command = self.store.create_human_decision(
                 args['request_id'], action, args.get('feedback'))
@@ -664,30 +684,9 @@ class Service:
                 self.store._check_verification(db, request, json.dumps(evidence))
         elif evidence.get('brief') != request['brief']:
             raise ValueError('evidence must bind the exact stored brief')
-        for field in ('verification', 'artifacts', 'task_ids'):
+        for field in ('verification', 'artifacts'):
             values = evidence.get(field)
             if not isinstance(values, list) or not values or any(not isinstance(v, str) or not v.strip() for v in values):
                 raise ValueError(f'evidence requires nonempty {field}')
-        links = {x['task_id'] for x in self.store.snapshot()['task_links']
-                 if x['request_id'] == request['id']}
-        if not set(evidence['task_ids']) <= links:
-            raise ValueError('evidence references unlinked tasks')
-        if not links:
-            raise ValueError('all linked native tasks must be done or archived before acceptance')
-        tasks = {task['id']: task for task in self.native_board.list()}
-        for task_id in sorted(links):
-            task = tasks.get(task_id)
-            if task is None:
-                raise ValueError('all linked native tasks must be readable before acceptance')
-            status = task.get('status')
-            if status == 'archived':
-                continue
-            if status != 'done':
-                raise ValueError('all linked native tasks must be done before acceptance')
-            actual = self.native_board.archive(
-                task_id,
-                f'ANCOR request {request["id"]} accepted; archive verified work.')
-            if actual.get('status') != 'archived':
-                raise RuntimeError('native archive verification failed')
         return self.store.submit_acceptance(
             request['id'], json.dumps(evidence, ensure_ascii=False), generation=request['generation'])

@@ -197,20 +197,6 @@ def test_human_acceptance_rechecks_structured_coverage(atomic):
     assert store.get_request(rid)['status'] == 'awaiting_acceptance'
 
 
-def test_reconciliation_requires_all_tasks_and_survives_ack(atomic):
-    store, rid = atomic
-    store.link_task(rid, 't')
-    with pytest.raises(ValueError):
-        store.review_impact(rid, 1, [], 'covered')
-    store.review_impact(rid, 1, [{'task_id': 't', 'decision': 'revise', 'reason': 'new constraint'}], 'covered')
-    store.ack_events([e['id'] for e in store.pending_events()])
-    assert store.pending_coordination()
-    with pytest.raises(RuntimeError, match='pending'):
-        store.submit_acceptance(rid, json.dumps(evidence(store, rid)), generation=1)
-    store.finish_impact(rid, 1, 't', 'changed card')
-    assert store.pending_coordination() == []
-
-
 def test_acceptance_rejects_old_verification_even_after_reverification(atomic):
     store, rid = atomic
     store.link_task(rid, 't')
@@ -331,33 +317,6 @@ def test_scoped_grant_is_not_a_request_or_implicit_obligation(atomic):
     assert store.active_grants(rid) == []
 
 
-def test_host_forwards_first_question_without_existing_outbox(atomic):
-    from ancor.host import Host
-    from test_host import Context, Board
-    store, rid = atomic
-    store.create_question(rid, identifier='first', body='Which?', reason='Need input', actor='ancor-coordinator')
-    ctx = Context(store.path)
-    ctx.config['human_target'] = 'test:user'
-    host = Host(ctx, store=store, board=Board())
-    host.close_stale_notifications()
-    rows = NotificationOutbox.read_existing(store.path + '.notifications.db')
-    assert len(rows) == 1 and rows[0]['id'] == 'first'
-
-
-def test_host_reconstructs_pending_review_after_ack_and_restart(atomic):
-    from ancor.host import Host
-    from test_host import Context, Board
-    store, rid = atomic
-    store.ack_events([e['id'] for e in store.pending_events()])
-    host = Host(Context(store.path), store=Store(store.path), board=Board())
-    events = host.pending(32)
-    assert any(e['kind'] == 'request.reconcile_needed' and e['payload']['request_id'] == rid for e in events)
-    store.ack_events([e['id'] for e in events])
-    assert store.pending_coordination()
-    store.review_impact(rid, 1, [], 'No tasks yet; planning is required')
-    assert store.pending_coordination() == []
-
-
 def test_completion_notices_bind_each_verification_attempt(atomic, tmp_path):
     from ancor.views import completion_id
     from ancor.notification import NotificationDispatcher
@@ -390,19 +349,3 @@ def test_new_transition_reason_overrides_legacy_command(atomic):
     event = store.request_transitions(rid)[-1]
     assert event['payload']['reason'] == 'new reason'
     assert 'change_id' in event['payload']
-
-
-def test_request_question_waits_without_suspending_independent_work(atomic, tmp_path):
-    from ancor.scheduling import Scheduling
-    store, rid = atomic
-    box = NotificationOutbox(tmp_path / 'notifications', coordinator_profile='coordinator', target='test:user')
-    store.create_question(rid, identifier='q', body='Which data?', reason='Need decision', actor='coordinator')
-    store.sync_questions(box)
-    box.claim_next()
-    box.mark_sent('q', {'success': True})
-    scheduling = Scheduling(store, clock=lambda: 100)
-    state = scheduling.health(store.snapshot(), [], box.list())[0]
-    assert state['state'] == 'waiting_on_human'
-    store.link_task(rid, 'independent')
-    state = scheduling.health(store.snapshot(), [{'id': 'independent', 'status': 'ready'}], box.list())[0]
-    assert state['state'] == 'active'

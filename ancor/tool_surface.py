@@ -1,4 +1,4 @@
-"""Strict model-facing tool surface layered over the existing service API."""
+"""Strict role-scoped tool surface for Interactor (default) and ancor-exec (root | goal | judge)."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -8,140 +8,102 @@ OPTIONAL_TEXT = {'type': 'string'}
 BOOLEAN = {'type': 'boolean'}
 POSITIVE_INTEGER = {'type': 'integer', 'minimum': 1}
 LIMIT = {'type': 'integer', 'minimum': 1, 'maximum': 200}
-HISTORY_LIMIT = {'type': 'integer', 'minimum': 1, 'maximum': 100}
 STRINGS = {'type': 'array', 'items': TEXT}
 
-
-_ACTION_TO_V2 = {
-    ('ancor_board', 'create'): 'ancor_task_create',
-    ('ancor_board', 'list'): 'ancor_task_list',
-    ('ancor_board', 'show'): 'ancor_task_show',
-    ('ancor_board', 'history'): 'ancor_task_history',
-    ('ancor_board', 'block'): 'ancor_task_block',
-    ('ancor_board', 'unblock'): 'ancor_task_unblock',
-    ('ancor_board', 'revise'): 'ancor_task_revise',
-    ('ancor_board', 'comment'): 'ancor_task_comment',
-    ('ancor_board', 'link'): 'ancor_task_link',
-    ('ancor_board', 'unlink'): 'ancor_task_unlink',
-    ('ancor_board', 'archive'): 'ancor_task_archive',
-    ('ancor_board', 'associate'): 'ancor_admin_task_associate',
-    ('ancor_note', 'list'): 'ancor_note_list',
-    ('ancor_note', 'get'): 'ancor_note_get',
-    ('ancor_note', 'history'): 'ancor_note_history',
-    ('ancor_note', 'add'): 'ancor_note_add',
-    ('ancor_note', 'append'): 'ancor_note_add',
-    ('ancor_note', 'update'): 'ancor_note_update',
-    ('ancor_note', 'replace'): 'ancor_note_update',
-    ('ancor_note', 'delete'): 'ancor_note_delete',
-    ('ancor_note', 'invalidate'): 'ancor_note_delete',
-    ('ancor_wake', 'list'): 'ancor_wake_list',
-    ('ancor_wake', 'schedule'): 'ancor_wake_schedule',
-    ('ancor_wake', 'replace'): 'ancor_wake_schedule',
-    ('ancor_wake', 'cancel'): 'ancor_wake_cancel',
-    ('ancor_question', 'list'): 'ancor_question_list',
-    ('ancor_question', 'get'): 'ancor_question_get',
-    ('ancor_question', 'create'): 'ancor_question_create',
-    ('ancor_question', 'withdraw'): 'ancor_question_withdraw',
-    ('ancor_change', 'propose'): 'ancor_change_propose',
-    ('ancor_change', 'get'): 'ancor_change_get',
-    ('ancor_change', 'history'): 'ancor_change_history',
-    ('ancor_request', 'pause'): 'ancor_request_pause_propose',
-    ('ancor_request', 'resume'): 'ancor_request_resume_propose',
-    ('ancor_request', 'cancel'): 'ancor_request_cancel_propose',
-    ('ancor_request', 'advance'): 'ancor_request_advance',
-    ('ancor_request', 'accept'): 'ancor_request_accept_propose',
-    ('ancor_request', 'request_changes'): 'ancor_request_changes_propose',
-    ('ancor_reconcile', 'get'): 'ancor_impact_get',
-    ('ancor_reconcile', 'review'): 'ancor_impact_review',
-    ('ancor_reconcile', 'finish'): 'ancor_impact_finish',
-    ('ancor_acceptance', 'verify'): 'ancor_delivery_verify',
-    ('ancor_acceptance', 'accept'): 'ancor_delivery_verify',
-    ('ancor_acceptance', 'reject'): 'ancor_delivery_reject',
-    ('ancor_notify', 'list'): 'ancor_notification_list',
-    ('ancor_notify', 'respond'): 'ancor_notification_respond',
-    ('ancor_signal', 'propose'): 'ancor_signal_propose',
+ARTIFACT_SCHEMA = {
+    'type': 'object',
+    'properties': {'path': TEXT, 'desc': TEXT},
+    'required': ['path', 'desc'],
+    'additionalProperties': False,
 }
 
-_LEGACY_REFERENCE_TOOLS = {
-    tool for tool, _action in _ACTION_TO_V2
-} | {'ancor_get_context', 'ancor_signal'}
-_DROP_REFERENCE = object()
+GENERIC_BUDGET_SCHEMA = {
+    'type': 'object',
+    'description': (
+        'Generic 3-layer resource budget: limits (arbitrary numeric keys enforced monotonically), '
+        'allowed (arbitrary string-list allowlists enforced as subsets), and constraints '
+        '(natural-language soft boundaries auto-inherited by child goals).'
+    ),
+    'properties': {
+        'limits': {
+            'type': 'object',
+            'additionalProperties': {'type': 'number', 'minimum': 0},
+        },
+        'allowed': {
+            'type': 'object',
+            'additionalProperties': STRINGS,
+        },
+        'constraints': STRINGS,
+    },
+    'additionalProperties': False,
+}
 
-V2_MUTATION_TOOLS = frozenset({
+GOAL_SPEC_PROPERTIES = {
+    'goal_yaml': OPTIONAL_TEXT,
+    'goal_id': OPTIONAL_TEXT,
+    'request_ref': {
+        'type': 'object',
+        'properties': {'id': TEXT, 'generation': POSITIVE_INTEGER},
+        'required': ['id', 'generation'],
+        'additionalProperties': False,
+    },
+    'objective': OPTIONAL_TEXT,
+    'done_criteria': OPTIONAL_TEXT,
+    'scope': {
+        'type': 'object',
+        'properties': {
+            'readable_requests': STRINGS,
+            'writable_paths': STRINGS,
+            'can_ask_human': BOOLEAN,
+        },
+        'additionalProperties': False,
+    },
+    'budget': GENERIC_BUDGET_SCHEMA,
+    'category': {
+        'type': 'string',
+        'description': ('Optional semantic model category (an alias name from ancor-exec model_aliases, '
+                        'e.g. research / coding / fast; see model_categories in your packet). '
+                        'Omit to use the ancor-exec default model. Unknown names are rejected.'),
+    },
+}
+
+VERIFICATION_EVIDENCE_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'generation': POSITIVE_INTEGER,
+        'coverage': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'version_id': TEXT,
+                    'satisfied': BOOLEAN,
+                    'evidence': TEXT,
+                },
+                'required': ['version_id', 'satisfied', 'evidence'],
+                'additionalProperties': False,
+            },
+        },
+        'verification': {'type': 'array', 'minItems': 1, 'items': TEXT},
+        'artifacts': {'type': 'array', 'minItems': 1, 'items': TEXT},
+    },
+    'required': ['generation', 'coverage', 'verification', 'artifacts'],
+    'additionalProperties': False,
+}
+
+ROOT_MUTATION_TOOLS = frozenset({
     'ancor_event_ack', 'ancor_request_advance',
     'ancor_note_add', 'ancor_note_update', 'ancor_note_delete',
-    'ancor_wake_schedule', 'ancor_wake_cancel',
-    'ancor_task_create', 'ancor_task_title_update', 'ancor_task_priority_update',
-    'ancor_task_contract_update', 'ancor_task_block', 'ancor_task_unblock',
-    'ancor_task_revise', 'ancor_task_comment', 'ancor_task_link',
-    'ancor_task_unlink', 'ancor_task_archive',
     'ancor_question_create', 'ancor_question_withdraw',
-    'ancor_impact_review', 'ancor_impact_finish',
-    'ancor_delivery_verify', 'ancor_delivery_reject', 'ancor_completion_send',
-    'ancor_admin_task_associate',
+    'ancor_completion_send',
+    'ancor_goal_spawn', 'ancor_goal_signal',
+    'ancor_goal_pause', 'ancor_goal_resume', 'ancor_goal_stop',
+    'ancor_delivery_submit',
 })
 
 
-def rewrite_legacy_references(value, *, role=None):
-    """Rewrite model-facing expand/query references to direct v2 tool names."""
-    if isinstance(value, list):
-        items = (rewrite_legacy_references(item, role=role) for item in value)
-        return [item for item in items if item is not _DROP_REFERENCE]
-    if not isinstance(value, dict):
-        return value
-    if isinstance(value.get('tool'), str) and isinstance(value.get('args'), dict):
-        tool = value['tool']
-        if tool not in _LEGACY_REFERENCE_TOOLS:
-            return value
-        args = dict(value['args'])
-        action = args.pop('action', None)
-        if tool == 'ancor_board' and action == 'edit':
-            if 'contract' in args:
-                tool = 'ancor_task_contract_update'
-            elif 'title' in args:
-                tool = 'ancor_task_title_update'
-            else:
-                tool = 'ancor_task_priority_update'
-        elif tool == 'ancor_get_context':
-            if 'event_id' in args:
-                tool = 'ancor_event_get'
-            elif 'request_id' in args:
-                tool = 'ancor_request_get'
-            else:
-                tool = 'ancor_overview'
-        elif tool == 'ancor_notify' and action == 'list' and 'id' in args:
-            tool = 'ancor_notification_get'
-        elif tool in {'ancor_signal', 'ancor_request'} and action is None and tool == 'ancor_signal':
-            tool = 'ancor_signal_propose'
-        else:
-            mapped = _ACTION_TO_V2.get((tool, action))
-            if mapped is None and action is not None:
-                args['action'] = action
-            elif mapped is not None:
-                tool = mapped
-        if role == 'coordinator' and tool in {
-                'ancor_request_accept_propose', 'ancor_request_changes_propose'}:
-            return _DROP_REFERENCE
-        if tool == 'ancor_request_cancel_propose' and 'request_id' in args:
-            args['request_ids'] = [args.pop('request_id')]
-        if tool == 'ancor_wake_schedule' and action == 'replace':
-            args['replaces_wake_id'] = args.pop('wake_id')
-        return {**value, 'tool': tool, 'args': args}
-    result = {}
-    for key, item in value.items():
-        rewritten = rewrite_legacy_references(item, role=role)
-        if rewritten is not _DROP_REFERENCE:
-            result[key] = rewritten
-    return result
-
-
-def build_v2_surface(*, role, methods, legacy_definitions, contract_schema, admin_tools=False):
-    """Return direct v2 definitions and handlers for one ANCOR role.
-
-    Read operations stay grouped by resource. Every mutation has exactly one
-    operation and a direct schema. The existing service methods remain the
-    single source of business behavior.
-    """
+def build_surface(*, role: str, methods: dict, change_properties: dict):
+    """Return direct tool definitions and handlers for one ANCOR role."""
     definitions = {}
     handlers = {}
 
@@ -152,71 +114,140 @@ def build_v2_surface(*, role, methods, legacy_definitions, contract_schema, admi
     def delegate(method, payload):
         return lambda args: methods[method]({**payload, **args})
 
-    def board(action, fields=()):
-        return lambda args: methods['board']({
-            'action': action,
-            **{field: args[field] for field in fields if field in args},
-        })
-
-    def notify_list(args):
-        payload = {'action': 'list', **args}
-        return methods['notify'](payload)
-
     def question(action, fields=()):
         return lambda args: methods['question']({
             'action': action,
             **{field: args[field] for field in fields if field in args},
         })
 
-    def reconcile(action, fields=()):
-        return lambda args: methods['reconcile']({
-            'action': action,
-            **{field: args[field] for field in fields if field in args},
-        })
-
-    if role not in {'interactor', 'coordinator'}:
+    if role == 'goal':
+        add(
+            'ancor_request_read',
+            'Read authoritative requirement text directly from DB for a request in your scope.readable_requests.',
+            {'request_id': TEXT}, ['request_id'],
+            methods['goal_read_request'],
+        )
+        add(
+            'ancor_goal_self',
+            'Inspect your own active /goal contract, generic budget, children, and active resource handles.',
+            {}, [],
+            methods['goal_self'],
+        )
+        add(
+            'ancor_goal_spawn',
+            'Spawn a child /goal with generic monotonic attenuation (limits, allowed, inherited constraints).',
+            deepcopy(GOAL_SPEC_PROPERTIES), [],
+            methods['goal_spawn'],
+        )
+        add(
+            'ancor_goal_signal',
+            'Send a steer or update_generation control signal to one of your descendant goals.',
+            {'goal_id': TEXT, 'kind': {'type': 'string', 'enum': ['steer', 'update_generation']},
+             'message': OPTIONAL_TEXT, 'generation': POSITIVE_INTEGER},
+            ['goal_id', 'kind'],
+            methods['goal_signal'],
+        )
+        add(
+            'ancor_goal_pause',
+            'Deterministically pause a descendant goal subtree (drain keeps external jobs, preempt cancels them).',
+            {'goal_id': TEXT, 'mode': {'type': 'string', 'enum': ['drain', 'preempt']}},
+            ['goal_id'],
+            methods['goal_pause'],
+        )
+        add(
+            'ancor_goal_resume',
+            'Deterministically resume a paused descendant goal subtree.',
+            {'goal_id': TEXT}, ['goal_id'],
+            methods['goal_resume'],
+        )
+        add(
+            'ancor_goal_stop',
+            'Deterministically cancel a descendant goal subtree, killing local processes and external handles.',
+            {'goal_id': TEXT, 'reason': OPTIONAL_TEXT}, ['goal_id'],
+            methods['goal_stop'],
+        )
+        add(
+            'ancor_goal_report',
+            'Submit your structured GoalResult receipt (completed, blocked, infeasible, or cancelled) to your parent.',
+            {
+                'request_generation': POSITIVE_INTEGER,
+                'status': {'type': 'string', 'enum': ['completed', 'blocked', 'infeasible', 'cancelled']},
+                'summary': TEXT,
+                'artifacts': {'type': 'array', 'items': ARTIFACT_SCHEMA},
+                'metrics': {'type': 'object'},
+                'open_issues': STRINGS,
+            },
+            ['request_generation', 'status', 'summary'],
+            methods['goal_report'],
+        )
+        add(
+            'ancor_resource_acquire',
+            'Acquire tracked external resources/jobs through the generic GOAL_ID QuotaGuard (checks limits & allowed).',
+            {
+                'usage': {'type': 'object', 'additionalProperties': {'type': 'number', 'minimum': 0}},
+                'tags': {'type': 'object', 'additionalProperties': TEXT},
+                'handle_id': OPTIONAL_TEXT,
+                'command': OPTIONAL_TEXT,
+                'metadata': {'type': 'object'},
+            },
+            [],
+            methods['resource_acquire'],
+        )
         return definitions, handlers
 
-    # Shared read-only surface.
+    if role == 'judge':
+        add(
+            'ancor_request_read',
+            'Read complete authoritative requirement text and active grants for the request under delivery review.',
+            {'request_id': TEXT}, ['request_id'],
+            methods['judge_read_request'],
+        )
+        add(
+            'ancor_judge_verdict',
+            'Record the independent Judge Final Decision: accept (moves to awaiting_acceptance), '
+            'reject (returns structured feedback to Root Agent), or escalate (asks human via Interactor).',
+            {
+                'request_id': TEXT,
+                'generation': POSITIVE_INTEGER,
+                'decision': {'type': 'string', 'enum': ['accept', 'reject', 'escalate']},
+                'summary': TEXT,
+                'evidence': VERIFICATION_EVIDENCE_SCHEMA,
+                'feedback': STRINGS,
+                'artifacts': {'type': 'array', 'items': ARTIFACT_SCHEMA},
+            },
+            ['request_id', 'generation', 'decision', 'summary'],
+            methods['judge_verdict'],
+        )
+        return definitions, handlers
+
+    if role not in {'interactor', 'root'}:
+        return definitions, handlers
+
+    # Shared read-only surface for Interactor (default) and Root Agent (ancor-exec ANCOR_ROLE=root).
     add(
         'ancor_overview',
-        'Read the compact global ANCOR overview: open requests, attention items, task counts, health and bounded pending-event previews.',
+        'Read the compact global ANCOR overview: open requests, active goals, resource usage, notifications and pending events.',
         {}, [], lambda _args: methods['get_context']({}),
     )
     add(
         'ancor_request_get',
-        'Read one request and its compact current state. Expand content or history only when exact requirements or audit context are needed.',
+        'Read one request and its current state, active goals, and judge verdicts. Expand content or history when needed.',
         {
             'request_id': TEXT,
             'include_content': BOOLEAN,
             'include_history': BOOLEAN,
             'before_id': POSITIVE_INTEGER,
-            'task_limit': LIMIT,
             'notification_limit': LIMIT,
-            'attention_limit': {'type': 'integer', 'minimum': 0, 'maximum': 50},
-            'include_done': BOOLEAN,
-            'include_archived': BOOLEAN,
             'include_closed_notifications': BOOLEAN,
         },
         ['request_id'], lambda args: methods['get_context'](args),
     )
     add(
-        'ancor_task_list', 'List linked native task cards with compact status and ownership information.',
-        {'request_id': OPTIONAL_TEXT, 'status': OPTIONAL_TEXT, 'limit': LIMIT,
-         'include_archived': BOOLEAN},
-        [], board('list', ('request_id', 'status', 'limit', 'include_archived')),
+        'ancor_visualize',
+        'Generate a read-only visualization (text tree and optional self-contained HTML snapshot) directly from requirements.db.',
+        {'request_id': OPTIONAL_TEXT, 'output_path': OPTIONAL_TEXT}, [],
+        methods['visualize'],
     )
-    add(
-        'ancor_task_show', 'Show one linked native task card with bounded recent history.',
-        {'task_id': TEXT}, ['task_id'], board('show', ('task_id',)),
-    )
-    add(
-        'ancor_task_history', 'Expand one bounded category of task history for a linked native card.',
-        {'task_id': TEXT, 'kind': {'type': 'string', 'enum': ['comments', 'events', 'runs']},
-         'limit': HISTORY_LIMIT, 'before_id': POSITIVE_INTEGER},
-        ['task_id', 'kind'], board('history', ('task_id', 'kind', 'limit', 'before_id')),
-    )
-    change_properties = legacy_definitions['ancor_change'][1]
     add(
         'ancor_change_get', 'Read one committed or pending ANCOR change record without changing it.',
         {'change_id': TEXT}, ['change_id'],
@@ -239,8 +270,9 @@ def build_v2_surface(*, role, methods, legacy_definitions, contract_schema, admi
     )
     add(
         'ancor_notification_list', 'List compact durable notification and question-delivery records.',
-        {'request_id': OPTIONAL_TEXT, 'task_id': OPTIONAL_TEXT, 'state': OPTIONAL_TEXT,
-         'open_only': BOOLEAN, 'limit': LIMIT}, [], notify_list,
+        {'request_id': OPTIONAL_TEXT, 'state': OPTIONAL_TEXT,
+         'open_only': BOOLEAN, 'limit': LIMIT}, [],
+        lambda args: methods['notify']({'action': 'list', **args}),
     )
     add(
         'ancor_notification_get', 'Read one notification or question-delivery record by exact ID.',
@@ -275,15 +307,13 @@ def build_v2_surface(*, role, methods, legacy_definitions, contract_schema, admi
         )
         add(
             'ancor_change_propose',
-            'Create one immutable structured request change and its exact native confirmation. '
-            'Use the create operation with title and fields; do not propose a legacy brief. '
-            'Scope and non-goals belong in constraint, while exact disambiguating facts belong in context.',
+            'Create one immutable structured request change and its exact native confirmation.',
             {key: deepcopy(change_properties[key]) for key in
              ('request_id', 'input', 'base', 'operations')},
             ['input', 'operations'], delegate('change', {'action': 'propose'}),
         )
         add(
-            'ancor_signal_propose', 'Prepare a confirmed informational signal to the coordinator.',
+            'ancor_signal_propose', 'Prepare a confirmed informational signal to the Root Agent.',
             {'text': TEXT}, ['text'], delegate('signal', {}),
         )
         add(
@@ -293,51 +323,54 @@ def build_v2_surface(*, role, methods, legacy_definitions, contract_schema, admi
         )
         return definitions, handlers
 
-    # Coordinator-only reads.
+    # Root Agent (ancor-exec with ANCOR_ROLE=root): request-level orchestrator, zero code/training tools.
     add(
-        'ancor_event_get', 'Read one complete pending ANCOR event and its linked task reference.',
+        'ancor_event_get', 'Read one complete pending ANCOR event.',
         {'event_id': POSITIVE_INTEGER}, ['event_id'],
         lambda args: methods['get_context'](args),
     )
     add(
-        'ancor_note_list', 'List bounded coordinator working-note previews for one request.',
+        'ancor_note_list', 'List bounded Root Agent working-note previews for one request.',
         {'request_id': TEXT, 'limit': LIMIT, 'include_deleted': BOOLEAN}, ['request_id'],
         delegate('note', {'action': 'list'}),
     )
     add(
-        'ancor_note_get', 'Read one complete coordinator working note.',
+        'ancor_note_get', 'Read one complete Root Agent working note.',
         {'request_id': TEXT, 'note_id': TEXT}, ['request_id', 'note_id'],
         delegate('note', {'action': 'get'}),
     )
     add(
-        'ancor_note_history', 'Read retained revisions of one coordinator working note.',
+        'ancor_note_history', 'Read retained revisions of one Root Agent working note.',
         {'request_id': TEXT, 'note_id': TEXT}, ['request_id', 'note_id'],
         delegate('note', {'action': 'history'}),
     )
     add(
-        'ancor_wake_list', 'List durable future coordinator wakes.',
-        {'request_id': OPTIONAL_TEXT,
-         'state': {'type': 'string', 'enum': ['scheduled', 'queued', 'suppressed', 'cancelled', 'handled']},
-         'limit': LIMIT}, [], delegate('wake', {'action': 'list'}),
+        'ancor_goal_list', 'List active (or all) /goal nodes in the execution tree.',
+        {'request_id': OPTIONAL_TEXT, 'parent_goal_id': OPTIONAL_TEXT,
+         'status': OPTIONAL_TEXT, 'include_terminal': BOOLEAN}, [],
+        methods['goal_list'],
     )
     add(
-        'ancor_impact_get', 'Read current request-change review, task basis and pending impact adjustments.',
-        {'request_id': TEXT}, ['request_id'], reconcile('get', ('request_id',)),
+        'ancor_goal_get', 'Read one /goal node, its subtree, active handles, and latest GoalResult.',
+        {'goal_id': TEXT}, ['goal_id'],
+        methods['goal_get'],
     )
-
-    # Coordinator mutations: one direct operation per tool.
+    add(
+        'ancor_cluster_status', 'Inspect global active resource utilization across all active goal subtrees.',
+        {}, [],
+        methods['cluster_status'],
+    )
     add(
         'ancor_event_ack', 'Acknowledge only event IDs whose consequences have been handled.',
-        {'event_ids': {'type': 'array', 'minItems': 1,
-                       'items': {'type': 'integer', 'minimum': 1}},
+        {'event_ids': {'type': 'array', 'minItems': 1, 'items': POSITIVE_INTEGER},
          'reason': OPTIONAL_TEXT}, ['event_ids'], methods['ack_events'],
     )
     add(
-        'ancor_request_advance', 'Commit one requested request transition after linked native cards have converged.',
+        'ancor_request_advance', 'Cascade lifecycle down L1 goal subtrees and commit a requested request transition.',
         {'request_id': TEXT}, ['request_id'], delegate('request', {'action': 'advance'}),
     )
     add(
-        'ancor_note_add', 'Add one durable coordinator working note to a stable active or paused request.',
+        'ancor_note_add', 'Add one durable working note to a stable active or paused request.',
         {'request_id': TEXT, 'body': TEXT}, ['request_id', 'body'],
         delegate('note', {'action': 'add'}),
     )
@@ -353,123 +386,64 @@ def build_v2_surface(*, role, methods, legacy_definitions, contract_schema, admi
         ['request_id', 'note_id', 'expected_revision'],
         delegate('note', {'action': 'delete'}),
     )
-
-    def schedule_wake(args):
-        if args.get('replaces_wake_id'):
-            return methods['wake']({'action': 'replace', 'wake_id': args['replaces_wake_id'], **args})
-        return methods['wake']({'action': 'schedule', **args})
-
     add(
-        'ancor_wake_schedule', 'Schedule a future one-shot wake, optionally replacing one pending wake.',
-        {'request_id': TEXT, 'reason': TEXT, 'due_at': {'type': 'number'},
-         'replaces_wake_id': OPTIONAL_TEXT},
-        ['request_id', 'reason', 'due_at'], schedule_wake,
-    )
-    add(
-        'ancor_wake_cancel', 'Cancel one pending future wake.',
-        {'wake_id': TEXT}, ['wake_id'], delegate('wake', {'action': 'cancel'}),
-    )
-    add(
-        'ancor_task_create', 'Create one held native task card with a strict worker contract.',
-        {'request_id': TEXT, 'key': TEXT, 'title': TEXT, 'contract': contract_schema,
-         'generation': POSITIVE_INTEGER, 'point_versions': STRINGS,
-         'parent_ids': STRINGS, 'hold': BOOLEAN, 'priority': {'type': 'integer'},
-         'max_runtime_seconds': POSITIVE_INTEGER},
-        ['request_id', 'key', 'title', 'contract', 'max_runtime_seconds'],
-        board('create', ('request_id', 'key', 'title', 'contract', 'generation', 'point_versions',
-                         'parent_ids', 'hold', 'priority', 'max_runtime_seconds')),
-    )
-    add(
-        'ancor_task_title_update', 'Change one linked task title after proving it is quiescent.',
-        {'task_id': TEXT, 'title': TEXT}, ['task_id', 'title'], board('edit', ('task_id', 'title')),
-    )
-    add(
-        'ancor_task_priority_update', 'Change one linked task priority.',
-        {'task_id': TEXT, 'priority': {'type': 'integer'}}, ['task_id', 'priority'],
-        board('edit', ('task_id', 'priority')),
-    )
-    add(
-        'ancor_task_contract_update', 'Replace a stopped task contract using the current request basis.',
-        {'task_id': TEXT, 'contract': contract_schema, 'generation': POSITIVE_INTEGER,
-         'point_versions': STRINGS}, ['task_id', 'contract'],
-        board('edit', ('task_id', 'contract', 'generation', 'point_versions')),
-    )
-    add(
-        'ancor_task_block', 'Block one linked task with an exact reason.',
-        {'task_id': TEXT, 'reason': TEXT}, ['task_id', 'reason'], board('block', ('task_id', 'reason')),
-    )
-    add(
-        'ancor_task_unblock', 'Release one linked task after proving quiescence and a stable active request.',
-        {'task_id': TEXT, 'reason': TEXT}, ['task_id', 'reason'], board('unblock', ('task_id', 'reason')),
-    )
-    add(
-        'ancor_task_revise', 'Revise one unarchived triage task through the native repair path.',
-        {'task_id': TEXT, 'reason': TEXT}, ['task_id', 'reason'], board('revise', ('task_id', 'reason')),
-    )
-    add(
-        'ancor_task_comment', 'Append one audit comment to a linked native task.',
-        {'task_id': TEXT, 'body': TEXT}, ['task_id', 'body'], board('comment', ('task_id', 'body')),
-    )
-    add(
-        'ancor_task_link', 'Add a parent-to-child dependency between two linked tasks.',
-        {'parent_id': TEXT, 'child_id': TEXT}, ['parent_id', 'child_id'],
-        board('link', ('parent_id', 'child_id')),
-    )
-    add(
-        'ancor_task_unlink', 'Remove one parent-to-child dependency between two linked tasks.',
-        {'parent_id': TEXT, 'child_id': TEXT}, ['parent_id', 'child_id'],
-        board('unlink', ('parent_id', 'child_id')),
-    )
-    add(
-        'ancor_task_archive', 'Archive one quiescent linked task with an exact reason.',
-        {'task_id': TEXT, 'reason': TEXT}, ['task_id', 'reason'], board('archive', ('task_id', 'reason')),
-    )
-    add(
-        'ancor_question_create', 'Create one durable coordinator question and request delivery.',
-        {'request_id': TEXT, 'id': TEXT, 'body': TEXT, 'reason': TEXT,
-         'task_id': OPTIONAL_TEXT, 'point_ids': STRINGS},
-        ['request_id', 'id', 'body', 'reason'], question(
-            'create', ('request_id', 'id', 'body', 'reason', 'task_id', 'point_ids')),
+        'ancor_question_create', 'Create one durable question for the human (via Interactor).',
+        {'request_id': TEXT, 'id': TEXT, 'body': TEXT, 'reason': TEXT, 'point_ids': STRINGS},
+        ['request_id', 'id', 'body', 'reason'],
+        question('create', ('request_id', 'id', 'body', 'reason', 'point_ids')),
     )
     add(
         'ancor_question_withdraw', 'Withdraw one obsolete open question with an exact reason.',
-        {'id': TEXT, 'reason': TEXT}, ['id', 'reason'], question('withdraw', ('id', 'reason')),
-    )
-
-    reconcile_properties = legacy_definitions['ancor_reconcile'][1]
-    add(
-        'ancor_impact_review', 'Classify the impact of one current request generation on every linked task.',
-        {'request_id': TEXT, 'generation': POSITIVE_INTEGER,
-         'coverage_reason': TEXT, 'decisions': deepcopy(reconcile_properties['decisions'])},
-        ['request_id', 'generation', 'coverage_reason', 'decisions'],
-        reconcile('review', ('request_id', 'generation', 'coverage_reason', 'decisions')),
+        {'id': TEXT, 'reason': TEXT}, ['id', 'reason'],
+        question('withdraw', ('id', 'reason')),
     )
     add(
-        'ancor_impact_finish', 'Finish one pending impact adjustment after applying it to its task.',
-        {'request_id': TEXT, 'generation': POSITIVE_INTEGER, 'task_id': TEXT, 'evidence': OPTIONAL_TEXT},
-        ['request_id', 'generation', 'task_id'],
-        reconcile('finish', ('request_id', 'generation', 'task_id', 'evidence')),
-    )
-    add(
-        'ancor_delivery_verify', 'Submit independent coordinator verification for the current request generation.',
-        {'request_id': TEXT, 'evidence': deepcopy(legacy_definitions['ancor_acceptance'][1]['evidence'])},
-        ['request_id', 'evidence'], delegate('acceptance', {'action': 'verify'}),
-    )
-    add(
-        'ancor_delivery_reject', 'Reject delivery with a concrete reason and keep the request active.',
-        {'request_id': TEXT, 'reason': TEXT}, ['request_id', 'reason'],
-        delegate('acceptance', {'action': 'reject'}),
-    )
-    add(
-        'ancor_completion_send', 'Enqueue the single completion notice for verified delivery.',
+        'ancor_completion_send', 'Enqueue the single completion notice for a Judge-verified delivery.',
         {'id': TEXT, 'request_id': TEXT, 'message': TEXT}, ['id', 'request_id', 'message'],
         delegate('notify', {'action': 'send', 'kind': 'completion'}),
     )
-    if admin_tools:
-        add(
-            'ancor_admin_task_associate', 'Repair one task-to-request ownership association.',
-            {'task_id': TEXT, 'request_id': TEXT, 'reason': TEXT},
-            ['task_id', 'request_id', 'reason'], board(
-                'associate', ('task_id', 'request_id', 'reason')),
-        )
+    add(
+        'ancor_goal_spawn', 'Spawn a new L1 /goal with generic 3-layer budget (limits, allowed, constraints).',
+        deepcopy(GOAL_SPEC_PROPERTIES), [],
+        methods['goal_spawn'],
+    )
+    add(
+        'ancor_goal_signal',
+        'Send a steer or update_generation control signal to an active goal (lower agent reads authoritative DB directly).',
+        {'goal_id': TEXT, 'kind': {'type': 'string', 'enum': ['steer', 'update_generation']},
+         'message': OPTIONAL_TEXT, 'generation': POSITIVE_INTEGER},
+        ['goal_id', 'kind'],
+        methods['goal_signal'],
+    )
+    add(
+        'ancor_goal_pause',
+        'Deterministically pause a goal subtree (drain keeps external jobs running; preempt cancels them).',
+        {'goal_id': TEXT, 'mode': {'type': 'string', 'enum': ['drain', 'preempt']}},
+        ['goal_id'],
+        methods['goal_pause'],
+    )
+    add(
+        'ancor_goal_resume',
+        'Deterministically resume a paused goal subtree (skips independently paused or terminal descendants).',
+        {'goal_id': TEXT}, ['goal_id'],
+        methods['goal_resume'],
+    )
+    add(
+        'ancor_goal_stop',
+        'Deterministically cancel a goal subtree, terminating local PIDs and cancelling external handles.',
+        {'goal_id': TEXT, 'reason': OPTIONAL_TEXT}, ['goal_id'],
+        methods['goal_stop'],
+    )
+    add(
+        'ancor_delivery_submit',
+        'Submit a request delivery package to the independent Judge Agent (fresh clean context).',
+        {
+            'request_id': TEXT,
+            'summary': TEXT,
+            'artifacts': {'type': 'array', 'minItems': 1, 'items': ARTIFACT_SCHEMA},
+            'eval_evidence': OPTIONAL_TEXT,
+        },
+        ['request_id', 'summary', 'artifacts'],
+        methods['delivery_submit'],
+    )
     return definitions, handlers

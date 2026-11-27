@@ -1,4 +1,4 @@
-"""Role-scoped interface to changes, questions, and incremental coordination."""
+"""Role-scoped interface to atomic changes and durable questions."""
 from .changes import envelope
 from .request_contract import DESCRIPTIONS, FIELDS
 
@@ -7,7 +7,7 @@ INTEGER = {'type': 'integer', 'minimum': 1}
 STRINGS = {'type': 'array', 'items': TEXT}
 
 
-def interfaces(service, operations, *, interactor, coordinator):
+def interfaces(service, *, interactor, coordinator):
     fields = {
         'type': 'object',
         'properties': {
@@ -15,9 +15,11 @@ def interfaces(service, operations, *, interactor, coordinator):
         },
         'additionalProperties': False,
     }
+
     def operation(name, properties, required):
         return {'type': 'object', 'properties': {'op': {'const': name}, **properties},
                 'required': ['op', *required], 'additionalProperties': False}
+
     ops = [
         operation('create', {'title': TEXT, 'fields': fields}, ['title', 'fields']),
         operation('convert', {'fields': fields}, ['fields']),
@@ -38,12 +40,7 @@ def interfaces(service, operations, *, interactor, coordinator):
             'Create an immutable atomic change proposal, inspect it, or page committed history. '
             'Use this for structured creation, in-place point changes, answers, lifecycle decisions and grants. '
             'Propose requires exact original input and current base versions from request detail; '
-            'only exact native clarify confirmation commits. Present the returned human-readable confirmation unchanged; '
-            'do not narrate operation JSON, base versions or internal IDs to the user. '
-            'Title changes do not alter content generation. '
-            'Arrays are unordered semantically. Never invent requests or authorization. '
-            'A reply alone does not change requests; include point operations and resolve_question as appropriate. '
-            'Legacy briefs require explicit convert with complete fields. Coordinator can only read history/get.',
+            'only exact native clarify confirmation commits.',
             {'action': {'enum': ['propose', 'get', 'history'] if interactor else ['get', 'history']},
              'request_id': TEXT, 'change_id': TEXT, 'input': TEXT,
              'base': {'type': 'object', 'properties': {v: {'type': 'integer', 'minimum': 0}
@@ -51,13 +48,12 @@ def interfaces(service, operations, *, interactor, coordinator):
              'operations': {'type': 'array', 'minItems': 1, 'maxItems': 200, 'items': {'oneOf': ops}},
              'before': TEXT, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
         'ancor_question': (
-            'Read durable questions, or create/withdraw one as coordinator. Questions may be request-scoped '
-            'without a task; a linked task must be blocked. Creation durably requests notification delivery. '
-            'Reply and resolve through a confirmed ancor_change; replies need not resolve a question. '
-            'Notification delivery is separate from resolution.',
+            'Read durable questions, or create/withdraw one as Root Agent. '
+            'Creation durably requests notification delivery. '
+            'Reply and resolve through a confirmed ancor_change.',
             {'action': {'enum': ['list', 'get', 'create', 'withdraw'] if coordinator else ['list', 'get']},
              'request_id': TEXT, 'id': TEXT, 'body': TEXT, 'reason': TEXT,
-             'task_id': TEXT, 'point_ids': STRINGS, 'include_closed': {'type': 'boolean'},
+             'point_ids': STRINGS, 'include_closed': {'type': 'boolean'},
              'limit': {'type': 'integer', 'minimum': 1, 'maximum': 200}}, ['action']),
     }
 
@@ -68,11 +64,12 @@ def interfaces(service, operations, *, interactor, coordinator):
             return service.store.get_change(args['change_id'])
         if args['action'] == 'history':
             result = service.change(args)
-            result['items'] = [{'id': c['id'], 'request_id': c['request_id'], 'actor': c['actor'],
+            result['items'] = [{
+                'id': c['id'], 'request_id': c['request_id'], 'actor': c['actor'],
                 'committed_at': c['committed_at'], 'operations_count': len(c['operations']),
                 'kinds': sorted({op['op'] for op in c['operations']}),
-                'exact_via': {'tool': 'ancor_change', 'args': {'action': 'get', 'change_id': c['id']}}}
-                for c in result['items']]
+                'exact_via': {'tool': 'ancor_change_get', 'args': {'change_id': c['id']}},
+            } for c in result['items']]
             return result
         return service.change(args)
 
@@ -80,15 +77,12 @@ def interfaces(service, operations, *, interactor, coordinator):
         store = service.store
         action = args['action']
         if action in {'create', 'withdraw'} and not coordinator:
-            raise PermissionError('coordinator required')
+            raise PermissionError('Root Agent profile required')
         if action == 'create':
-            if args.get('task_id'):
-                task = operations.board.show(args['task_id'])
-                if task['status'] != 'blocked':
-                    raise ValueError('question task must be blocked')
-            return store.create_question(args['request_id'], identifier=args['id'], body=args['body'],
-                                         reason=args['reason'], task_id=args.get('task_id'),
-                                         point_ids=args.get('point_ids', []), actor=service.ctx.profile_name)
+            return store.create_question(
+                args['request_id'], identifier=args['id'], body=args['body'],
+                reason=args['reason'], point_ids=args.get('point_ids', []),
+                actor=service.ctx.profile_name)
         if action == 'withdraw':
             return store.withdraw_question(args['id'], args['reason'], service.ctx.profile_name)
         rows = store.questions(args.get('request_id'))
@@ -106,52 +100,8 @@ def interfaces(service, operations, *, interactor, coordinator):
             raise ValueError('limit must be 1..200')
         return envelope([question_ref(r) for r in rows[:limit]], len(rows))
 
-    methods = {'change': change, 'question': question}
-    if coordinator:
-        definitions['ancor_reconcile'] = (
-            'Assess the effect of current requirements on every linked task, including finished work, and explain coverage '
-            'of new requests. Classify unchanged work as unaffected; this is not a full retest or content review of every card. Decisions: unaffected, reverify, revise, retire. A request change never '
-            'automatically stops all cards. Finish each pending adjustment only after applying it; revise requires '
-            'a current task basis and a quiescent worker. Reverify requires explicit evidence. '
-            'Get returns durable review/basis state even after wake events were acknowledged.',
-            {'action': {'enum': ['get', 'review', 'finish']}, 'request_id': TEXT,
-             'generation': INTEGER, 'task_id': TEXT, 'evidence': TEXT, 'coverage_reason': TEXT,
-             'decisions': {'type': 'array', 'items': {'type': 'object', 'properties': {
-                 'task_id': TEXT, 'decision': {'enum': ['unaffected', 'reverify', 'revise', 'retire']},
-                 'reason': TEXT}, 'required': ['task_id', 'decision', 'reason'], 'additionalProperties': False}}},
-            ['action', 'request_id'])
-
-        def reconcile(args, **_kwargs):
-            store, rid = service.store, args['request_id']
-            if args['action'] == 'get':
-                return store.coordination(rid)
-            operations.reconcile()
-            if args['action'] == 'review':
-                return store.review_impact(rid, args['generation'], args['decisions'], args['coverage_reason'])
-            if args['action'] != 'finish':
-                raise ValueError('unknown reconciliation action')
-            state = store.coordination(rid)
-            tid = args['task_id']
-            review = next((r for r in state['reviews'] if r['task_id'] == tid), None)
-            if not review:
-                raise ValueError('task has no current review')
-            detail = operations.detail(tid)
-            if review['decision'] == 'retire':
-                if detail['task']['status'] not in {'archived', 'cancelled'}:
-                    raise ValueError('retired task must be archived or cancelled')
-                operations.require_quiescence(detail)
-            elif review['decision'] == 'revise':
-                operations.require_quiescence(detail)
-                basis = next((b for b in state['task_basis'] if b['task_id'] == tid), None)
-                if not basis or basis['generation'] != args['generation']:
-                    raise ValueError('revised card needs current basis')
-            elif review['decision'] == 'reverify':
-                store._text(args.get('evidence'))
-            store.finish_impact(rid, args['generation'], tid, args.get('evidence'))
-            return store.coordination(rid)
-        methods['reconcile'] = reconcile
-    return definitions, methods
+    return definitions, {'change': change, 'question': question}
 
 
 def question_ref(row):
-    return {k: row[k] for k in ('id', 'request_id', 'task_id', 'state', 'revision')}
+    return {k: row[k] for k in ('id', 'request_id', 'state', 'revision')}
