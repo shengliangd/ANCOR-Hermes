@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from pathlib import Path
 import subprocess
 import time
@@ -112,7 +113,7 @@ class FileClusterBackend(ClusterBackend):
             handle['updated_at'] = float(self.clock())
             self._save(data)
             return True
-        return False
+        return handle['status'] in TERMINAL_HANDLE_STATUSES
 
     def summary(self) -> dict:
         data = self._load()
@@ -151,7 +152,7 @@ class GoalWatcher:
             changed = False
             wake_this = False
             handles = list(goal['external_job_ids'])
-            signals = list(goal['pending_signals'])
+            signals = []
 
             if self.cluster_backend is not None and handles:
                 updated_handles = []
@@ -191,7 +192,7 @@ class GoalWatcher:
                     and not any(
                         s.get('kind') == 'watcher_event'
                         and (s.get('payload') or {}).get('event') == 'wall_clock_timeout'
-                        for s in signals
+                        for s in [*goal['pending_signals'], *signals]
                     )):
                 changed = True
                 wake_this = True
@@ -206,6 +207,14 @@ class GoalWatcher:
             if changed:
                 with self.goal_store.store._transaction() as db:
                     current = self.goal_store._get(db, gid)
+                    if current['status'] not in {'running', 'waiting_external', 'paused'}:
+                        continue
+                    patches = {h['handle_id']: h for h in handles
+                               if h.get('status') in TERMINAL_HANDLE_STATUSES}
+                    handles = [patches.get(h['handle_id'], h)
+                               if h.get('status', 'running') in ACTIVE_HANDLE_STATUSES else h
+                               for h in current['external_job_ids']]
+                    signals = [*current['pending_signals'], *signals]
                     new_status = current['status']
                     new_wake = current['needs_wake']
                     if wake_this and current['status'] != 'paused':
@@ -243,7 +252,7 @@ class GoalReconciler:
         self.clock = clock
         self.pid_alive = pid_alive
 
-    def reconcile(self) -> dict:
+    def reconcile(self, *, managed_goal_ids=()) -> dict:
         now = float(self.clock())
         waiting_external: list[str] = []
         recovered_running: list[str] = []
@@ -252,6 +261,8 @@ class GoalReconciler:
         goals = self.goal_store.list_goals(include_terminal=False)
         for goal in goals:
             gid = goal['goal_id']
+            if gid in managed_goal_ids:
+                continue
             if goal['status'] == 'paused':
                 continue
             if goal['status'] == 'waiting_external':
@@ -260,6 +271,8 @@ class GoalReconciler:
             pid = goal.get('pid')
             if pid and self.pid_alive(pid):
                 still_alive.append(gid)
+                continue
+            if not pid and goal['needs_wake']:
                 continue
 
             live_handles = []
@@ -316,6 +329,7 @@ def build_goal_prompt(goal: dict, signals: list[dict], *, model_categories=None)
     """Build the structured prompt passed to an independent persistent goal session."""
     packet = {
         'goal_id': goal['goal_id'],
+        'session_title': f"ancor-{goal['request_id']}-{goal['goal_id']}",
         'parent_goal_id': goal['parent_goal_id'],
         'request_ref': goal['request_ref'],
         'objective': goal['objective'],
@@ -340,9 +354,13 @@ def build_goal_prompt(goal: dict, signals: list[dict], *, model_categories=None)
 def default_goal_command(profile: str, session_id: str, prompt: str, *, resume: bool,
                          model_args=()) -> list[str]:
     # model_args is ['-m', <category>] (+ ['--reasoning', lvl]); Hermes resolves the alias natively.
-    cmd = ['hermes', '-p', profile, '--cli', 'chat', *model_args]
+    cmd = ['hermes', '-p', profile, '--cli', 'chat', '--format', 'stream-json', *model_args]
     if resume and session_id:
         cmd.extend(['--resume', session_id])
+    elif '\n' in prompt:
+        packet = json.loads(prompt.split('\n', 1)[1])
+        if packet.get('session_title'):
+            cmd.extend(['-c', packet['session_title'], '--create-if-missing'])
     cmd.extend(['-q', prompt])
     return cmd
 
@@ -351,12 +369,14 @@ class GoalRunner:
     """Launches independent persistent Hermes processes under ancor-exec with ANCOR_ROLE=goal."""
 
     def __init__(self, goal_store: GoalStore, *, profile: str = 'ancor-exec',
-                 command_builder=None, env_builder=None, category_router=None):
+                 command_builder=None, env_builder=None, category_router=None, native_sessions=None):
         self.goal_store = goal_store
         self.profile = profile
         self.command_builder = command_builder or default_goal_command
         self.env_builder = env_builder
         self.category_router = category_router if category_router is not None else goal_store.category_router
+        self.tasks: dict[str, asyncio.Task] = {}
+        self.native_sessions = command_builder is None if native_sessions is None else native_sessions
 
     def _launch(self, goal: dict, signals: list[dict], *, resume: bool) -> list[str]:
         router = self.category_router
@@ -385,55 +405,114 @@ class GoalRunner:
         base['GOAL_ID'] = goal['goal_id']
         base['ANCOR_GOAL_ID'] = goal['goal_id']
         base['ANCOR_STORE_PATH'] = self.goal_store.store.path
+        from .session_identity import launch_identity
+        base['HERMES_EPHEMERAL_SYSTEM_PROMPT'] = launch_identity('goal', goal['goal_id'])
         return base
 
     def run_goal_sync(self, goal_id: str) -> int:
-        goal = self.goal_store.get_goal(goal_id)
-        if goal['status'] != 'running':
-            return 0
-        signals = self.goal_store.consume_signals(goal_id)
-        resume = bool(signals) or goal['updated_at'] > goal['created_at']
-        cmd = self._launch(goal, signals, resume=resume)
-        proc = subprocess.Popen(
-            cmd,
-            env=self._child_env(goal),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        self.goal_store.set_process(goal_id, proc.pid, goal['session_id'])
-        try:
-            rc = proc.wait()
-        finally:
-            self.goal_store.clear_process(goal_id)
-        return rc
+        return asyncio.run(self.run_goal(goal_id))
+
+    async def _read_session_output(self, goal_id, stream, *, stderr=False):
+        while line := await stream.readline():
+            text = line.decode('utf-8', errors='replace').strip()
+            session_id = None
+            if stderr:
+                # Native CLI emits this as soon as session.create/resume returns,
+                # before the first model call, including in stream-json mode.
+                if text.startswith('Session: '):
+                    session_id = text.removeprefix('Session: ').strip()
+            else:
+                try:
+                    event = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get('type') in {'system', 'result'}:
+                    session_id = event.get('session_id')
+            if isinstance(session_id, str) and session_id.strip():
+                self.goal_store.bind_session(goal_id, session_id)
 
     async def run_goal(self, goal_id: str) -> int:
         goal = self.goal_store.get_goal(goal_id)
         if goal['status'] != 'running':
             return 0
         signals = self.goal_store.consume_signals(goal_id)
-        resume = bool(signals) or goal['updated_at'] > goal['created_at']
-        cmd = self._launch(goal, signals, resume=resume)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            env=self._child_env(goal),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        self.goal_store.set_process(goal_id, proc.pid, goal['session_id'])
+        proc = None
+        spawn = None
+        error = None
+        interrupted = False
+        readers = []
         try:
-            return await proc.wait()
+            resume = bool(goal['session_id'])
+            cmd = self._launch(goal, signals, resume=resume)
+            if self.native_sessions:
+                self.goal_store.prepare_native_session(goal_id, self.profile)
+            spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+                *cmd, env=self._child_env(goal), stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                limit=8 * 1024 * 1024,
+                start_new_session=True))
+            proc = await asyncio.shield(spawn)
+            registered = self.goal_store.set_process(goal_id, proc.pid, goal['session_id'])
+            readers = [asyncio.create_task(self._read_session_output(goal_id, proc.stdout)),
+                       asyncio.create_task(self._read_session_output(goal_id, proc.stderr, stderr=True))]
+            if registered['status'] != 'running':
+                raise asyncio.CancelledError
+            rc = await proc.wait()
+            await asyncio.gather(*readers)
+            if rc:
+                error = f'process exited with code {rc}'
+            return rc
+        except asyncio.CancelledError:
+            interrupted = True
+            if proc is None and spawn is not None:
+                proc = await asyncio.shield(spawn)
+                self.goal_store.set_process(goal_id, proc.pid, goal['session_id'])
+            if proc is not None:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await proc.wait()
+            raise
+        except Exception as exc:
+            error = f'{type(exc).__name__}: {exc}'
+            raise
         finally:
-            self.goal_store.clear_process(goal_id)
+            if readers:
+                await asyncio.gather(*readers, return_exceptions=True)
+            if proc is None or proc.returncode is not None:
+                if self.native_sessions and (interrupted or error):
+                    self.goal_store.request_execution_stop(goal_id)
+                    await asyncio.to_thread(self.goal_store.settle_stops, goal_ids=[goal_id])
+                self.goal_store.finish_run(goal_id, signals, error=error, interrupted=interrupted)
 
     async def dispatch_ready(self) -> list[str]:
+        # Keep ownership until the completed task has been inspected. A second
+        # scan can occur before a newly created task has persisted its PID.
+        for gid, task in list(self.tasks.items()):
+            if task.done():
+                del self.tasks[gid]
+                if not task.cancelled() and task.exception() is not None:
+                    log.error('ANCOR Goal %s failed: %s', gid, task.exception())
         ready = self.goal_store.goals_needing_wake()
-        if not ready:
-            return []
-        tasks = [asyncio.create_task(self.run_goal(g['goal_id'])) for g in ready]
+        launched = []
+        for goal in ready:
+            gid = goal['goal_id']
+            if gid not in self.tasks:
+                self.tasks[gid] = asyncio.create_task(self.run_goal(gid), name=f'ancor:goal:{gid}')
+                launched.append(gid)
+        return launched
+
+    async def close(self):
+        tasks = list(self.tasks.values())
+        for task in tasks:
+            task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        return [g['goal_id'] for g in ready]
+        self.tasks.clear()

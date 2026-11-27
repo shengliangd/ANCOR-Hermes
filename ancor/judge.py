@@ -8,6 +8,8 @@ declared artifacts / evaluation evidence.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
+from copy import copy
 import time
 from uuid import uuid4
 
@@ -104,7 +106,37 @@ class JudgeGate:
                 break
         return count
 
-    def apply_verdict(self, request_id: str, *, generation: int, decision: str,
+    def apply_verdict(self, request_id: str, *, delivery_event_id: int | None = None, **kwargs) -> dict:
+        # Bind all existing Store operations to one transaction: acceptance or
+        # escalation, verdict insertion, receipt and ACK must commit together.
+        with self.store._transaction() as db:
+            gate = copy(self)
+            gate.store = copy(self.store)
+            gate.store._transaction = lambda: nullcontext(db)
+            if delivery_event_id is not None:
+                event = db.execute('SELECT * FROM events WHERE id=? AND kind=?',
+                                   (delivery_event_id, 'delivery.submitted')).fetchone()
+                if event is None:
+                    raise ValueError('unknown delivery_event_id')
+                packet = json.loads(event['payload']).get('judge_packet', {})
+                request = packet.get('request', {})
+                if request.get('id') != request_id or request.get('generation') != kwargs.get('generation'):
+                    raise ValueError('verdict does not match the delivery request and generation')
+                receipt = db.execute('SELECT result_json FROM judge_deliveries WHERE event_id=?',
+                                     (delivery_event_id,)).fetchone()
+                if receipt and receipt['result_json']:
+                    return json.loads(receipt['result_json'])
+                if event['acknowledged']:
+                    raise ValueError('delivery is already closed')
+                db.execute('INSERT OR IGNORE INTO judge_deliveries(event_id) VALUES (?)', (delivery_event_id,))
+            result = gate._apply_verdict(request_id, **kwargs)
+            if delivery_event_id is not None:
+                db.execute('UPDATE judge_deliveries SET result_json=?, error=NULL WHERE event_id=?',
+                           (json.dumps(result, ensure_ascii=False), delivery_event_id))
+                gate.store.ack_events([delivery_event_id])
+            return result
+
+    def _apply_verdict(self, request_id: str, *, generation: int, decision: str,
                       summary: str, evidence: dict | None = None,
                       feedback: list[str] | None = None,
                       artifacts: list[dict] | None = None,

@@ -129,5 +129,119 @@ def test_goal_runner_launches_under_ancor_exec_with_role_and_goal_id(tmp_path):
         'goal_id': 'g_watch',
         'ancor_role': 'goal',
         'profile': 'ancor-exec',
-        'session_id': 'goal-g_watch',
+        'session_id': '',
     }
+
+
+def test_dispatch_returns_with_live_process_and_can_launch_more_work(tmp_path):
+    import asyncio
+    import os
+    import pytest
+
+    _, goals, _, goal = _create_goal(tmp_path, [3000.0])
+
+    async def scenario():
+        runner = GoalRunner(goals, command_builder=lambda *a, **kw: [
+            sys.executable, '-c', 'import time; time.sleep(60)'])
+        pids = []
+        try:
+            assert await asyncio.wait_for(runner.dispatch_ready(), 1) == ['g_watch']
+            # Prevent duplicate launch even before the first task stores its PID.
+            assert await runner.dispatch_ready() == []
+            for _ in range(100):
+                pid = goals.get_goal('g_watch')['pid']
+                if pid:
+                    break
+                await asyncio.sleep(.01)
+            assert pid
+            pids.append(pid)
+            os.kill(pid, 0)
+            goals.spawn_goal({
+                'goal_id': 'second', 'request_ref': goal['request_ref'],
+                'objective': 'Concurrent work', 'done_criteria': 'Done',
+                'scope': goal['scope'], 'budget': {},
+            })
+            assert await asyncio.wait_for(runner.dispatch_ready(), 1) == ['second']
+            for _ in range(100):
+                pid = goals.get_goal('second')['pid']
+                if pid:
+                    break
+                await asyncio.sleep(.01)
+            assert pid
+            pids.append(pid)
+            os.kill(pids[0], 0)
+        finally:
+            await asyncio.wait_for(runner.close(), 7)
+        for pid in pids:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        assert goals.get_goal('g_watch')['pid'] is None
+        assert goals.get_goal('second')['pid'] is None
+
+    asyncio.run(scenario())
+
+
+def test_process_failure_retries_preserve_signals_and_eventually_notify_root(tmp_path):
+    now = [4000.0]
+    store, goals, _, _ = _create_goal(tmp_path, now)
+    goals.signal_goal('g_watch', 'steer', {'message': 'do not lose this'})
+    runner = GoalRunner(goals, command_builder=lambda *a, **kw: [sys.executable, '-c', 'raise SystemExit(2)'])
+    for attempt in range(3):
+        assert runner.run_goal_sync('g_watch') == 2
+        current = goals.get_goal('g_watch')
+        assert current['pid'] is None
+        assert any(s['payload'].get('message') == 'do not lose this' for s in current['pending_signals'])
+        if attempt < 2:
+            assert current['status'] == 'running' and current['needs_wake']
+            assert goals.goals_needing_wake() == []
+            now[0] += 60
+            # Retry survives reopening the store / restarting the supervisor.
+            assert GoalStore(Store(store.path), clock=lambda: now[0]).goals_needing_wake()[0]['goal_id'] == 'g_watch'
+        else:
+            assert current['status'] == 'blocked'
+            assert 'code 2' in current['result']['open_issues'][0]
+    assert len([e for e in store.pending_events() if e['kind'] == 'goal.blocked']) == 1
+
+
+def test_launch_failure_and_zero_exit_without_report_are_recoverable(tmp_path):
+    import pytest
+    _, goals, _, _ = _create_goal(tmp_path, [4000.0])
+    goals.signal_goal('g_watch', 'steer', {'message': 'retain work'})
+    runner = GoalRunner(goals, command_builder=lambda *a, **kw: ['/no/such/executable'])
+    with pytest.raises(FileNotFoundError):
+        runner.run_goal_sync('g_watch')
+    current = goals.get_goal('g_watch')
+    assert current['needs_wake'] and current['status'] == 'running'
+    assert current['pending_signals'][0]['payload']['message'] == 'retain work'
+    runner = GoalRunner(goals, command_builder=lambda *a, **kw: [sys.executable, '-c', 'pass'])
+    assert runner.run_goal_sync('g_watch') == 0
+    assert goals.get_goal('g_watch')['needs_wake']
+
+
+def test_watcher_preserves_concurrent_new_signals_and_handles(tmp_path):
+    _, goals, backend, _ = _create_goal(tmp_path, [1000.0])
+    goals.register_resource_usage('g_watch', handle_id='first')
+    backend.submit_handle(handle_id='first', goal_id='g_watch', usage={}, tags={})
+    backend.set_status('first', 'succeeded')
+    original = backend.query_handle
+    def query(handle_id, tags=None):
+        goals.signal_goal('g_watch', 'steer', {'message': 'arrived during poll'})
+        goals.register_resource_usage('g_watch', handle_id='second')
+        return original(handle_id, tags)
+    backend.query_handle = query
+    GoalWatcher(goals, backend).poll()
+    current = goals.get_goal('g_watch')
+    assert {h['handle_id'] for h in current['external_job_ids']} == {'first', 'second'}
+    assert any(s['payload'].get('message') == 'arrived during poll' for s in current['pending_signals'])
+
+
+def test_reconciler_discovers_later_exit_of_orphan_without_repeating_wakeup(tmp_path):
+    _, goals, backend, _ = _create_goal(tmp_path, [1000.0])
+    goals.set_process('g_watch', 99999)
+    alive = [True]
+    reconciler = GoalReconciler(goals, backend, pid_alive=lambda _: alive[0])
+    assert reconciler.reconcile()['still_alive'] == ['g_watch']
+    alive[0] = False
+    assert reconciler.reconcile()['recovered_running'] == ['g_watch']
+    assert reconciler.reconcile()['recovered_running'] == []
+    assert len(goals.get_goal('g_watch')['pending_signals']) == 1

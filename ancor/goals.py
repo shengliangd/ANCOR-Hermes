@@ -13,6 +13,7 @@ substrate:
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -40,6 +41,32 @@ class QuotaExceededError(RuntimeError):
 def init_goal_tables(db) -> None:
     """Initialize sidecar execution-plane tables inside requirements.db."""
     db.executescript('''
+        CREATE TABLE IF NOT EXISTS goal_runtime_settings (
+            name TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS goal_run_failures (
+            goal_id TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL,
+            retry_at REAL NOT NULL,
+            error TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS goal_stop_intents (
+            goal_id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS goal_native_sessions (
+            goal_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            profile TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS judge_deliveries (
+            event_id INTEGER PRIMARY KEY,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            retry_at REAL NOT NULL DEFAULT 0,
+            result_json TEXT,
+            error TEXT
+        );
         CREATE TABLE IF NOT EXISTS active_goals (
             goal_id TEXT PRIMARY KEY,
             parent_goal_id TEXT NOT NULL,
@@ -86,19 +113,51 @@ def init_goal_tables(db) -> None:
 
 
 def default_process_killer(pid: int) -> bool:
-    """Best-effort termination of a local Hermes goal process group / PID."""
+    """Terminate an owned process group and confirm exit before reporting success."""
     if not pid or pid <= 0:
         return False
+    # Runner children are group leaders. Never signal the caller's own group.
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-    try:
-        os.kill(pid, signal.SIGTERM)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
+        grouped = os.getpgid(pid) == pid
+    except ProcessLookupError:
+        grouped = True
+    except OSError:
         return False
+    def alive():
+        if not grouped:
+            return is_pid_alive(pid)
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        # Zombies cannot execute; parent reap may occur after this synchronous call.
+        for entry in Path('/proc').iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fields = (entry / 'stat').read_text().rsplit(') ', 1)[1].split()
+                if int(fields[2]) == pid and fields[0] != 'Z':
+                    return True
+            except (OSError, ValueError, IndexError):
+                continue
+        return False
+    for sig, timeout in ((signal.SIGTERM, 1.0), (signal.SIGKILL, 2.0)):
+        if not alive():
+            return True
+        try:
+            (os.killpg if grouped else os.kill)(pid, sig)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not alive():
+                return True
+            time.sleep(.02)
+    return not alive()
 
 
 def is_pid_alive(pid: int | None) -> bool:
@@ -106,7 +165,10 @@ def is_pid_alive(pid: int | None) -> bool:
         return False
     try:
         os.kill(int(pid), 0)
-        return True
+        try:
+            return Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0] != 'Z'
+        except (OSError, IndexError):
+            return True
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -159,7 +221,7 @@ def _parse_budget(raw_budget: dict | None, extra_writable_paths: list[str] | Non
     limits: dict[str, float | int] = {}
     for k, v in raw_limits.items():
         key = _nonempty_str(k, 'budget.limits key')
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
             raise ValueError(f'budget.limits[{key!r}] must be a non-negative number')
         if key == 'wall_hours' and v <= 0:
             raise ValueError('budget.limits["wall_hours"] must be positive')
@@ -437,8 +499,17 @@ class GoalStore:
                  category_router=None):
         self.store = store
         self.clock = clock
-        self.global_limits = dict(global_limits or {})
+        self.global_limits = _parse_budget({'limits': global_limits or {}})['limits']
+        if global_limits is not None:
+            with self.store._transaction() as db:
+                db.execute('INSERT OR REPLACE INTO goal_runtime_settings(name, value) VALUES (?, ?)',
+                           ('global_limits', json.dumps(self.global_limits)))
         self.category_router = category_router
+
+    def _global_limits_db(self, db) -> dict:
+        row = db.execute('SELECT value FROM goal_runtime_settings WHERE name=?',
+                         ('global_limits',)).fetchone()
+        return json.loads(row['value']) if row else self.global_limits
 
     def _validate_category(self, category: str | None) -> str | None:
         if category is None:
@@ -559,6 +630,8 @@ class GoalStore:
 
             if parent_id != 'root':
                 parent = self._get(db, parent_id)
+                if db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?', (parent_id,)).fetchone():
+                    raise RuntimeError('parent execution stop is unconfirmed; cannot spawn child')
                 if parent['status'] not in {'running', 'waiting_external'}:
                     raise RuntimeError(
                         f"parent goal {parent_id} is {parent['status']}; cannot spawn child goal")
@@ -573,15 +646,21 @@ class GoalStore:
                 if parent_deadline is not None:
                     deadline = min(deadline, float(parent_deadline)) if deadline is not None else float(parent_deadline)
             else:
-                if self.global_limits:
+                global_limits = self._global_limits_db(db)
+                if global_limits:
                     active_l1 = [
                         g for g in self._children(db, 'root')
                         if g['status'] in NON_TERMINAL_BUDGET_STATUSES
                     ]
-                    for key, cap in self.global_limits.items():
+                    for key, cap in global_limits.items():
                         if _is_non_additive_limit(key):
+                            requested = parsed['budget']['limits'].setdefault(key, cap)
+                            if requested > cap:
+                                raise AttenuationError(f'L1 limit {key!r} exceeds global limit ({cap:g})')
                             continue
-                        req_val = float(parsed['budget']['limits'].get(key, 0))
+                        # Missing allocation is zero, not unlimited. Persist it so
+                        # child processes enforce the same bound without host config.
+                        req_val = float(parsed['budget']['limits'].setdefault(key, 0))
                         allocated = sum(float(g['budget']['limits'].get(key, 0)) for g in active_l1)
                         if allocated + req_val > float(cap) + 1e-9:
                             raise AttenuationError(
@@ -591,7 +670,9 @@ class GoalStore:
                 deadline = (now + float(wall_hours) * 3600.0) if wall_hours is not None else None
 
             check_category_allowed(parsed)
-            sid = session_id or f"goal-{parsed['goal_id']}"
+            # Empty until Hermes has actually created a session. Timestamps and
+            # pending recovery signals do not establish session identity.
+            sid = session_id or ''
             db.execute(
                 'INSERT INTO active_goals('
                 'goal_id, parent_goal_id, request_id, generation, objective, done_criteria, '
@@ -699,59 +780,69 @@ class GoalStore:
             goal = self._get(db, goal_id)
             if goal['status'] in TERMINAL_GOAL_STATUSES:
                 raise RuntimeError(f"goal {goal_id} is already terminal ({goal['status']})")
-            # Execution metadata comes from Hermes hooks, never from the reporting agent.
-            validated.update(category=goal.get('category'),
-                             observed_models=goal.get('observed_models') or [])
-            db.execute(
-                'UPDATE active_goals SET status=?, pid=NULL, paused_by_ancestor=NULL, '
-                'needs_wake=0, result_json=?, updated_at=? WHERE goal_id=?',
-                (validated['status'], json.dumps(validated, ensure_ascii=False), now, goal_id))
-            parent_id = goal['parent_goal_id']
-            if parent_id == 'root':
-                self.store._add_event(
-                    db,
-                    f"goal.{validated['status']}",
-                    {
-                        'goal_id': goal_id,
-                        'request_id': goal['request_id'],
-                        'generation': validated['request_generation'],
-                        'status': validated['status'],
-                        'summary': validated['summary'],
-                        'artifacts': validated['artifacts'],
-                        'metrics': validated['metrics'],
-                        'open_issues': validated['open_issues'],
-                        'category': goal.get('category'),
-                        'observed_models': goal.get('observed_models') or [],
-                    },
-                    source_key=f"goal.result:{goal_id}:{validated['status']}",
-                )
-            else:
-                parent = self._get(db, parent_id)
-                if parent['status'] not in TERMINAL_GOAL_STATUSES:
-                    signals = list(parent['pending_signals'])
-                    signals.append({
-                        'kind': 'child_result',
-                        'payload': {**validated, 'category': goal.get('category'),
-                                    'observed_models': goal.get('observed_models') or []},
-                        'at': now,
-                    })
-                    needs_wake = 0 if parent['status'] == 'paused' else 1
-                    new_status = ('running' if (parent['status'] == 'waiting_external' and needs_wake)
-                                  else parent['status'])
-                    db.execute(
-                        'UPDATE active_goals SET pending_signals=?, needs_wake=?, status=?, updated_at=? '
-                        'WHERE goal_id=?',
-                        (json.dumps(signals, ensure_ascii=False), needs_wake, new_status, now, parent_id))
-            return self._get(db, goal_id)
+            if goal['status'] == 'paused':
+                raise RuntimeError(f'goal {goal_id} is paused; result rejected')
+            if db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?', (goal_id,)).fetchone():
+                raise RuntimeError('execution stop is unconfirmed; result rejected')
+            if validated['request_generation'] != goal['generation']:
+                raise RuntimeError(
+                    f"result generation {validated['request_generation']} does not match "
+                    f"goal generation {goal['generation']}; re-read your current contract")
+            return self._report_result_db(db, goal, validated, now)
+
+    def _report_result_db(self, db, goal, validated, now):
+        goal_id = goal['goal_id']
+        # Execution metadata comes from Hermes hooks, never from the reporting agent.
+        validated.update(category=goal.get('category'),
+                         observed_models=goal.get('observed_models') or [])
+        db.execute(
+            'UPDATE active_goals SET status=?, paused_by_ancestor=NULL, '
+            'needs_wake=0, result_json=?, updated_at=? WHERE goal_id=?',
+            (validated['status'], json.dumps(validated, ensure_ascii=False), now, goal_id))
+        parent_id = goal['parent_goal_id']
+        if parent_id == 'root':
+            self.store._add_event(
+                db,
+                f"goal.{validated['status']}",
+                {
+                    'goal_id': goal_id,
+                    'request_id': goal['request_id'],
+                    'generation': validated['request_generation'],
+                    'status': validated['status'],
+                    'summary': validated['summary'],
+                    'artifacts': validated['artifacts'],
+                    'metrics': validated['metrics'],
+                    'open_issues': validated['open_issues'],
+                    'category': goal.get('category'),
+                    'observed_models': goal.get('observed_models') or [],
+                },
+                source_key=f"goal.result:{goal_id}:{validated['status']}",
+            )
+        else:
+            parent = self._get(db, parent_id)
+            if parent['status'] not in TERMINAL_GOAL_STATUSES:
+                signals = list(parent['pending_signals'])
+                signals.append({
+                    'kind': 'child_result',
+                    'payload': {**validated, 'category': goal.get('category'),
+                                'observed_models': goal.get('observed_models') or []},
+                    'at': now,
+                })
+                needs_wake = 0 if parent['status'] == 'paused' else 1
+                new_status = ('running' if (parent['status'] == 'waiting_external' and needs_wake)
+                              else parent['status'])
+                db.execute(
+                    'UPDATE active_goals SET pending_signals=?, needs_wake=?, status=?, updated_at=? '
+                    'WHERE goal_id=?',
+                    (json.dumps(signals, ensure_ascii=False), needs_wake, new_status, now, parent_id))
+        return self._get(db, goal_id)
 
     def pause_goal(self, goal_id: str, *, mode: str = 'drain', caller_goal_id: str = 'root',
-                   process_killer=default_process_killer, job_canceller=None) -> dict:
+                   process_killer=default_process_killer, job_canceller=None, session_stopper=None) -> dict:
         """Deterministically pause target and cascade down the entire subtree."""
         if mode not in {'drain', 'preempt'}:
             raise ValueError('pause mode must be "drain" or "preempt"')
         now = float(self.clock())
-        pids_to_kill: list[int] = []
-        jobs_to_cancel: list[tuple[str, dict]] = []
         paused_ids: list[str] = []
 
         with self.store._transaction() as db:
@@ -765,53 +856,32 @@ class GoalStore:
                 nid = node['goal_id']
                 if node['status'] in TERMINAL_GOAL_STATUSES:
                     continue
-                if node.get('pid'):
-                    pids_to_kill.append(int(node['pid']))
-                if mode == 'preempt':
-                    for handle in node['external_job_ids']:
-                        if handle.get('status', 'running') in ACTIVE_HANDLE_STATUSES:
-                            jobs_to_cancel.append((nid, dict(handle)))
-
+                db.execute('INSERT INTO goal_stop_intents(goal_id, mode) VALUES (?, ?) ON CONFLICT(goal_id) '
+                           "DO UPDATE SET mode=CASE WHEN mode='preempt' THEN mode ELSE excluded.mode END",
+                           (nid, mode))
                 if nid == goal_id:
                     ancestor_marker = node['paused_by_ancestor']
                     db.execute(
                         "UPDATE active_goals SET status='paused', paused_by_ancestor=?, "
-                        'pid=NULL, needs_wake=0, updated_at=? WHERE goal_id=?',
+                        'needs_wake=0, updated_at=? WHERE goal_id=?',
                         (ancestor_marker, now, nid))
                     paused_ids.append(nid)
                 elif node['status'] != 'paused':
                     db.execute(
                         "UPDATE active_goals SET status='paused', paused_by_ancestor=?, "
-                        'pid=NULL, needs_wake=0, updated_at=? WHERE goal_id=?',
+                        'needs_wake=0, updated_at=? WHERE goal_id=?',
                         (goal_id, now, nid))
                     paused_ids.append(nid)
 
-        killed = [pid for pid in pids_to_kill if process_killer and process_killer(pid)]
-        cancelled_jobs = []
-        if mode == 'preempt' and jobs_to_cancel:
-            for nid, handle in jobs_to_cancel:
-                if job_canceller is not None:
-                    job_canceller(handle)
-                cancelled_jobs.append(handle['handle_id'])
-            with self.store._transaction() as db:
-                for nid, handle in jobs_to_cancel:
-                    node = self._get(db, nid)
-                    updated = []
-                    for existing in node['external_job_ids']:
-                        if existing['handle_id'] == handle['handle_id']:
-                            updated.append({**existing, 'status': 'cancelled', 'cancelled_at': now})
-                        else:
-                            updated.append(existing)
-                    db.execute(
-                        'UPDATE active_goals SET external_job_ids=?, updated_at=? WHERE goal_id=?',
-                        (json.dumps(updated, ensure_ascii=False), now, nid))
+        settled = self.settle_stops(goal_ids=[n['goal_id'] for n in nodes],
+                                    process_killer=process_killer, job_canceller=job_canceller,
+                                    session_stopper=session_stopper)
 
         return {
             'goal_id': goal_id,
             'mode': mode,
             'paused_goals': paused_ids,
-            'killed_pids': killed,
-            'cancelled_jobs': cancelled_jobs,
+            **settled,
         }
 
     def resume_goal(self, goal_id: str, *, caller_goal_id: str = 'root') -> dict:
@@ -830,6 +900,9 @@ class GoalStore:
                         f"cannot resume {goal_id} while ancestor {ancestor['goal_id']} is still paused")
 
             nodes = [target, *self._descendants(db, goal_id)]
+            if any(db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?',
+                              (n['goal_id'],)).fetchone() for n in nodes):
+                raise RuntimeError('cannot resume while execution stop is unconfirmed')
             for node in nodes:
                 nid = node['goal_id']
                 if node['status'] != 'paused':
@@ -853,61 +926,90 @@ class GoalStore:
         return {'goal_id': goal_id, 'resumed_goals': resumed_ids}
 
     def stop_goal(self, goal_id: str, *, reason: str = 'stopped', caller_goal_id: str = 'root',
-                  process_killer=default_process_killer, job_canceller=None) -> dict:
-        """Deterministically cancel target and entire subtree: kill PIDs and cancel external handles."""
+                  process_killer=default_process_killer, job_canceller=None, session_stopper=None) -> dict:
+        """Fence the subtree immediately; retain execution handles until confirmed stopped."""
         now = float(self.clock())
-        pids_to_kill: list[int] = []
-        jobs_to_cancel: list[tuple[str, dict]] = []
-        cancelled_ids: list[str] = []
-
+        cancelled_ids = []
         with self.store._transaction() as db:
             self._require_authority(db, caller_goal_id, goal_id)
-            target = self._get(db, goal_id)
-            nodes = [target, *self._descendants(db, goal_id)]
+            nodes = [self._get(db, goal_id), *self._descendants(db, goal_id)]
             for node in nodes:
                 nid = node['goal_id']
+                db.execute('INSERT OR REPLACE INTO goal_stop_intents(goal_id, mode) VALUES (?, ?)', (nid, 'preempt'))
                 if node['status'] in TERMINAL_GOAL_STATUSES:
                     continue
-                if node.get('pid'):
-                    pids_to_kill.append(int(node['pid']))
-                for handle in node['external_job_ids']:
-                    if handle.get('status', 'running') in ACTIVE_HANDLE_STATUSES:
-                        jobs_to_cancel.append((nid, dict(handle)))
-                updated_handles = [
-                    ({**h, 'status': 'cancelled', 'cancelled_at': now}
-                     if h.get('status', 'running') in ACTIVE_HANDLE_STATUSES else h)
-                    for h in node['external_job_ids']
-                ]
-                cancel_result = {
-                    'goal_id': nid,
-                    'request_generation': node['generation'],
-                    'status': 'cancelled',
-                    'summary': reason,
-                    'artifacts': [],
-                    'metrics': {},
-                    'open_issues': [],
-                }
-                db.execute(
-                    "UPDATE active_goals SET status='cancelled', paused_by_ancestor=NULL, "
-                    'pid=NULL, needs_wake=0, external_job_ids=?, result_json=?, updated_at=? '
-                    'WHERE goal_id=?',
-                    (json.dumps(updated_handles, ensure_ascii=False),
-                     json.dumps(cancel_result, ensure_ascii=False), now, nid))
+                cancel_result = {'goal_id': nid, 'request_generation': node['generation'],
+                    'status': 'cancelled', 'summary': reason, 'artifacts': [], 'metrics': {}, 'open_issues': []}
+                db.execute("UPDATE active_goals SET status='cancelled', paused_by_ancestor=NULL, "
+                           'needs_wake=0, result_json=?, updated_at=? WHERE goal_id=?',
+                           (json.dumps(cancel_result, ensure_ascii=False), now, nid))
                 cancelled_ids.append(nid)
+        settled = self.settle_stops(goal_ids=[n['goal_id'] for n in nodes],
+                                    process_killer=process_killer, job_canceller=job_canceller,
+                                    session_stopper=session_stopper)
+        return {'goal_id': goal_id, 'cancelled_goals': cancelled_ids, **settled}
 
-        killed = [pid for pid in pids_to_kill if process_killer and process_killer(pid)]
-        cancelled_jobs = []
-        for _nid, handle in jobs_to_cancel:
-            if job_canceller is not None:
-                job_canceller(handle)
-            cancelled_jobs.append(handle['handle_id'])
-
-        return {
-            'goal_id': goal_id,
-            'cancelled_goals': cancelled_ids,
-            'killed_pids': killed,
-            'cancelled_jobs': cancelled_jobs,
-        }
+    def settle_stops(self, *, goal_ids=None, process_killer=default_process_killer, job_canceller=None,
+                     session_stopper=None):
+        """Retry persisted stop intents; failed confirmations never erase handles."""
+        with self.store._transaction() as db:
+            intents = [dict(r) for r in db.execute('SELECT * FROM goal_stop_intents')]
+        killed, cancelled, pending = [], [], []
+        for intent in intents:
+            gid = intent['goal_id']
+            if goal_ids is not None and gid not in goal_ids:
+                continue
+            node = self.get_goal(gid)
+            pid = node.get('pid')
+            if pid:
+                try:
+                    stopped = bool(process_killer and process_killer(pid))
+                except Exception:
+                    stopped = False
+                if stopped:
+                    with self.store._transaction() as db:
+                        db.execute('UPDATE active_goals SET pid=NULL WHERE goal_id=? AND pid=?', (gid, pid))
+                    killed.append(pid)
+            with self.store._transaction() as db:
+                native = db.execute('SELECT * FROM goal_native_sessions WHERE goal_id=?', (gid,)).fetchone()
+            sid = node.get('session_id') or (native['title'] if native else '')
+            session_confirmed = not sid
+            if sid:
+                try:
+                    if session_stopper is None:
+                        from .session_control import confirm_session_stopped
+                        session_confirmed = confirm_session_stopped(sid, native['profile'] if native else 'ancor-exec')
+                    else:
+                        session_confirmed = bool(session_stopper(sid))
+                except Exception:
+                    session_confirmed = False
+            if intent['mode'] == 'preempt':
+                for handle in node['external_job_ids']:
+                    if handle.get('status', 'running') not in ACTIVE_HANDLE_STATUSES:
+                        continue
+                    try:
+                        stopped = bool(job_canceller and job_canceller(handle))
+                    except Exception:
+                        stopped = False
+                    if stopped:
+                        with self.store._transaction() as db:
+                            current = self._get(db, gid)
+                            handles = [({**h, 'status': 'cancelled', 'cancelled_at': float(self.clock())}
+                                        if h['handle_id'] == handle['handle_id'] else h)
+                                       for h in current['external_job_ids']]
+                            db.execute('UPDATE active_goals SET external_job_ids=? WHERE goal_id=?',
+                                       (json.dumps(handles, ensure_ascii=False), gid))
+                        cancelled.append(handle['handle_id'])
+            with self.store._transaction() as db:
+                current = self._get(db, gid)
+                live = not session_confirmed or current.get('pid') or (intent['mode'] == 'preempt' and any(
+                    h.get('status', 'running') in ACTIVE_HANDLE_STATUSES for h in current['external_job_ids']))
+                if live:
+                    pending.append(gid)
+                else:
+                    db.execute('DELETE FROM goal_stop_intents WHERE goal_id=?', (gid,))
+        return {'killed_pids': killed, 'cancelled_jobs': cancelled, 'pending_stops': pending,
+                'stop_confirmed': not pending}
 
     def _subtree_active_usage_db(self, db, goal_id: str) -> dict[str, float]:
         nodes = [self._get(db, goal_id), *self._descendants(db, goal_id)]
@@ -934,7 +1036,7 @@ class GoalStore:
         tags = dict(tags or {})
         for k, v in usage.items():
             _nonempty_str(k, 'usage key')
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
                 raise ValueError(f'usage[{k!r}] must be a non-negative number')
         for k, v in tags.items():
             _nonempty_str(k, 'tags key')
@@ -947,8 +1049,24 @@ class GoalStore:
                 raise QuotaExceededError(
                     f"goal {goal_id} is {goal['status']}; resource acquisition rejected")
 
+            # Check actual reservations atomically as well as L1 allocations:
+            # completed goals can still own live external resource handles.
+            global_usage = {}
+            for row in db.execute('SELECT external_job_ids FROM active_goals'):
+                for handle in json.loads(row['external_job_ids']):
+                    if handle.get('status', 'running') in ACTIVE_HANDLE_STATUSES:
+                        for key, amount in (handle.get('usage') or {}).items():
+                            global_usage[key] = global_usage.get(key, 0) + amount
+            global_limits = self._global_limits_db(db)
+            for key, amount in usage.items():
+                cap = global_limits.get(key)
+                if cap is not None and global_usage.get(key, 0) + amount > cap + 1e-9:
+                    raise QuotaExceededError(f'global resource limit exceeded for {key!r}: limit={cap:g}')
+
             chain = [goal, *self._ancestors(db, goal_id)]
             for node in chain:
+                if db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?', (node['goal_id'],)).fetchone():
+                    raise QuotaExceededError('execution stop is unconfirmed; acquisition rejected')
                 if node['status'] in {'paused', 'cancelled'}:
                     raise QuotaExceededError(
                         f"ancestor goal {node['goal_id']} is {node['status']}; acquisition rejected")
@@ -999,7 +1117,7 @@ class GoalStore:
             if goal['status'] != 'running':
                 return goal
             db.execute(
-                "UPDATE active_goals SET status='waiting_external', pid=NULL, "
+                "UPDATE active_goals SET status='waiting_external', "
                 'needs_wake=0, updated_at=? WHERE goal_id=?',
                 (now, goal_id))
             return self._get(db, goal_id)
@@ -1012,7 +1130,31 @@ class GoalStore:
             db.execute(
                 'UPDATE active_goals SET pid=?, session_id=?, needs_wake=0, updated_at=? WHERE goal_id=?',
                 (int(pid), sid, now, goal_id))
+            if goal['status'] != 'running':
+                db.execute('INSERT INTO goal_stop_intents(goal_id, mode) VALUES (?, ?) '
+                           'ON CONFLICT(goal_id) DO UPDATE SET mode=goal_stop_intents.mode',
+                           (goal_id, 'preempt' if goal['status'] == 'cancelled' else 'drain'))
             return self._get(db, goal_id)
+
+    def bind_session(self, goal_id: str, session_id: str) -> None:
+        session_id = _nonempty_str(session_id, 'session_id')
+        with self.store._transaction() as db:
+            db.execute('UPDATE active_goals SET session_id=? WHERE goal_id=?', (session_id, goal_id))
+            goal = self._get(db, goal_id)
+            if goal['status'] == 'paused' or goal['status'] in TERMINAL_GOAL_STATUSES:
+                db.execute('INSERT INTO goal_stop_intents(goal_id, mode) VALUES (?, ?) '
+                           'ON CONFLICT(goal_id) DO UPDATE SET mode=goal_stop_intents.mode',
+                           (goal_id, 'preempt' if goal['status'] == 'cancelled' else 'drain'))
+
+    def prepare_native_session(self, goal_id: str, profile: str) -> None:
+        with self.store._transaction() as db:
+            goal = self._get(db, goal_id)
+            title = f"ancor-{goal['request_id']}-{goal_id}"
+            db.execute('INSERT OR REPLACE INTO goal_native_sessions VALUES (?, ?, ?)', (goal_id, title, profile))
+
+    def request_execution_stop(self, goal_id: str) -> None:
+        with self.store._transaction() as db:
+            db.execute("INSERT OR IGNORE INTO goal_stop_intents(goal_id, mode) VALUES (?, 'drain')", (goal_id,))
 
     def clear_process(self, goal_id: str, *, session_id: str | None = None) -> dict:
         now = float(self.clock())
@@ -1031,6 +1173,46 @@ class GoalStore:
                 (sid, new_status, now, goal_id))
             return self._get(db, goal_id)
 
+    def finish_run(self, goal_id: str, signals: list[dict], *, error: str | None = None,
+                   interrupted: bool = False) -> dict:
+        """Reconcile a reaped/failed launch, preserving work and bounding retries."""
+        now = float(self.clock())
+        with self.store._transaction() as db:
+            goal = self._get(db, goal_id)
+            db.execute('UPDATE active_goals SET pid=NULL WHERE goal_id=?', (goal_id,))
+            if goal['status'] != 'running':
+                if goal['status'] == 'paused' and signals:
+                    db.execute('UPDATE active_goals SET pending_signals=? WHERE goal_id=?',
+                               (json.dumps([*signals, *goal['pending_signals']], ensure_ascii=False), goal_id))
+                return self._get(db, goal_id)
+            pending = goal['pending_signals']
+            has_active = any(h.get('status', 'running') in ACTIVE_HANDLE_STATUSES
+                             for h in goal['external_job_ids'])
+            if error is None and has_active and not pending and not interrupted:
+                db.execute("UPDATE active_goals SET status='waiting_external', needs_wake=0 WHERE goal_id=?",
+                           (goal_id,))
+                db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
+                return self._get(db, goal_id)
+            restored = [*signals, *pending]
+            reason = error or ('host interrupted execution' if interrupted else
+                               'process exited without a result or active external work')
+            prior = db.execute('SELECT attempts FROM goal_run_failures WHERE goal_id=?', (goal_id,)).fetchone()
+            attempts = (prior['attempts'] if prior else 0) + (0 if interrupted else 1)
+            retry_at = now if interrupted else now + min(300, 5 * 2 ** min(attempts - 1, 6))
+            restored.append({'kind': 'recovery', 'payload': {'reason': reason, 'attempt': attempts}, 'at': now})
+            db.execute('UPDATE active_goals SET pending_signals=?, needs_wake=1, updated_at=? WHERE goal_id=?',
+                       (json.dumps(restored, ensure_ascii=False), now, goal_id))
+            db.execute('INSERT OR REPLACE INTO goal_run_failures VALUES (?, ?, ?, ?)',
+                       (goal_id, attempts, retry_at, reason))
+            if attempts >= 3:
+                result = validate_goal_result({
+                    'goal_id': goal_id, 'request_generation': goal['generation'],
+                    'status': 'blocked', 'summary': 'Execution failed after three attempts',
+                    'open_issues': [reason],
+                })
+                return self._report_result_db(db, goal, result, now)
+            return self._get(db, goal_id)
+
     def consume_signals(self, goal_id: str) -> list[dict]:
         now = float(self.clock())
         with self.store._transaction() as db:
@@ -1047,7 +1229,9 @@ class GoalStore:
         with self.store._transaction() as db:
             rows = db.execute(
                 "SELECT * FROM active_goals WHERE status='running' AND needs_wake=1 "
-                'AND pid IS NULL ORDER BY created_at, goal_id').fetchall()
+                '''AND pid IS NULL AND NOT EXISTS (SELECT 1 FROM goal_stop_intents s WHERE s.goal_id=active_goals.goal_id) AND NOT EXISTS (
+                    SELECT 1 FROM goal_run_failures f WHERE f.goal_id=active_goals.goal_id
+                    AND f.retry_at > ?) ORDER BY created_at, goal_id''', (float(self.clock()),)).fetchall()
             return [_decode_goal(r) for r in rows]
 
     def total_active_usage(self) -> dict:

@@ -69,7 +69,7 @@ def test_cli_args_pass_alias_only_never_provider():
     assert router.cli_args('local') == ['-m', 'local']
     assert router.cli_args(None) == []
     cmd = default_goal_command('ancor-exec', 's1', 'hi', resume=False, model_args=router.cli_args('coding'))
-    assert cmd == ['hermes', '-p', 'ancor-exec', '--cli', 'chat', '-m', 'coding', '-q', 'hi']
+    assert cmd == ['hermes', '-p', 'ancor-exec', '--cli', 'chat', '--format', 'stream-json', '-m', 'coding', '-q', 'hi']
     assert '--provider' not in cmd
     with pytest.raises(ValueError):
         CategoryRouter(alias_names=set(), reasoning={'fast': 'turbo'})
@@ -121,12 +121,14 @@ def test_runner_launches_with_category_and_survives_recovery(tmp_path):
     router = CategoryRouter(alias_names=lambda: load_alias_names(cfg_path), reasoning={'research': 'high'})
     goals = GoalStore(store, category_router=router)
     goals.spawn_goal(_spec(req, 'g_r', category='research'))
+    # The fake model yields to tracked work rather than silently abandoning the goal.
+    goals.register_resource_usage('g_r', handle_id='ongoing-work')
     out = tmp_path / 'argv.json'
     captured = {}
 
     def builder(profile, session_id, prompt, *, resume, model_args=()):
         captured['prompt'] = json.loads(prompt.split('\n', 1)[1])
-        code = f'import json,sys; open({str(out)!r},"w").write(json.dumps(sys.argv[1:]))'
+        code = f'import json,sys; open({str(out)!r},"w").write(json.dumps(sys.argv[1:])); print(json.dumps(dict(type="result", session_id="real-session")))'
         return [sys.executable, '-c', code, *default_goal_command(profile, session_id, 'P',
                                                                    resume=resume, model_args=model_args)]
 
@@ -188,6 +190,9 @@ def test_host_dispatches_judge_with_judge_alias(tmp_path):
 
     async def launcher(packet):
         launched.append(packet)
+        host.judge.apply_verdict(req['id'], generation=req['generation'], decision='reject',
+                                summary='Needs work', feedback=['Missing evidence'],
+                                delivery_event_id=packet['delivery_event_id'])
         return 0
 
     host = Host(FakeContext('default', store_path, exec_config_path=str(cfg_path)),
@@ -201,3 +206,28 @@ def test_host_dispatches_judge_with_judge_alias(tmp_path):
     cmd = host.judge_command_for(packet)
     assert cmd[cmd.index('-m') + 1] == 'judge' and 'ANCOR_ROLE=judge' in cmd
     assert host.wake_packet()['model_categories'] == sorted(alias_names_from_config(cfg))
+
+
+@pytest.mark.parametrize('failure', ['launch', 'nonzero', 'no_verdict'])
+def test_judge_failure_keeps_delivery_durable_with_bounded_retries(tmp_path, failure):
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    now = [1000.0]
+    calls = []
+    async def launcher(packet):
+        calls.append(packet)
+        if failure == 'launch':
+            raise OSError('cannot launch')
+        return 1 if failure == 'nonzero' else 0
+    host = Host(FakeContext('default', store.path), store=store, clock=lambda: now[0], judge_launcher=launcher)
+    packet = host.judge.build_judge_packet(req['id'], summary='done', artifacts=[])
+    store.add_event('delivery.submitted', {'request_id': req['id'], 'judge_packet': packet})
+    for attempt in range(3):
+        assert len(asyncio.run(host.dispatch_judges())) == 1
+        assert any(e['kind'] == 'delivery.submitted' for e in store.pending_events())
+        assert asyncio.run(host.dispatch_judges()) == []
+        now[0] += 100
+        host = Host(FakeContext('default', store.path), clock=lambda: now[0], judge_launcher=launcher)
+    assert asyncio.run(host.dispatch_judges()) == []
+    assert len(calls) == 3
+    assert len([e for e in store.pending_events() if e['kind'] == 'judge.failed']) == 1

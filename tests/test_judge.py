@@ -114,3 +114,32 @@ def test_judge_direct_escalate_creates_interactor_question(tmp_path):
     qs = store.questions(req['id'])
     assert len(qs) == 1
     assert 'corrupted' in qs[0]['body']
+
+
+@pytest.mark.parametrize('decision', ['accept', 'reject', 'escalate'])
+def test_delivery_receipt_is_atomic_and_idempotent(tmp_path, decision, monkeypatch):
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    gate = JudgeGate(store, GoalStore(store))
+    packet = gate.build_judge_packet(req['id'], summary='done', artifacts=[])
+    store.add_event('delivery.submitted', {'request_id': req['id'], 'judge_packet': packet})
+    eid = next(e['id'] for e in store.pending_events() if e['kind'] == 'delivery.submitted')
+    kwargs = dict(generation=req['generation'], decision=decision, summary='Independent decision',
+                  feedback=['Needs evidence'], evidence=_valid_evidence(store, req['id']), delivery_event_id=eid)
+    original = store._add_event
+    def fail_after_side_effect(db, kind, *args, **kw):
+        if kind.startswith('judge.'):
+            raise RuntimeError('simulated crash before verdict commit')
+        return original(db, kind, *args, **kw)
+    monkeypatch.setattr(store, '_add_event', fail_after_side_effect)
+    with pytest.raises(RuntimeError, match='simulated crash'):
+        gate.apply_verdict(req['id'], **kwargs)
+    assert store.get_request(req['id'])['status'] == 'active'
+    assert gate.list_verdicts(req['id']) == []
+    assert any(e['id'] == eid for e in store.pending_events())
+    monkeypatch.setattr(store, '_add_event', original)
+    first = gate.apply_verdict(req['id'], **kwargs)
+    second = gate.apply_verdict(req['id'], **kwargs)
+    assert first == second
+    assert len(gate.list_verdicts(req['id'])) == 1
+    assert not any(e['id'] == eid for e in store.pending_events())

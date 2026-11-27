@@ -11,6 +11,8 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import threading
 from pathlib import Path
 import time
 
@@ -39,10 +41,12 @@ def child_environment(environ=None):
 
 
 def _exec_role_command(role: str, exec_profile: str, prompt: str, model_args=()):
+    from .session_identity import launch_identity
     clean = child_environment()
     removed = sorted((set(os.environ) - set(clean)) | {'GOAL_ID', 'ANCOR_GOAL_ID'})
     return ['env', *[part for key in removed for part in ('-u', key)],
             f'ANCOR_ROLE={role}',
+            f'HERMES_EPHEMERAL_SYSTEM_PROMPT={launch_identity(role)}',
             'hermes', '-p', exec_profile, '--cli', 'chat', *model_args, '-q', prompt]
 
 
@@ -92,6 +96,7 @@ class Host:
         self.exec_profile = ctx.get_config('exec_profile', 'ancor-exec')
         self.store = store or Store(path)
         self.clock = clock
+        self._scan_lock = threading.Lock()
         self.state_path = path.parent / (path.name + '.host.json')
         cluster_path = ctx.get_config('cluster_state_path')
         self.cluster = cluster_backend or FileClusterBackend(
@@ -140,9 +145,13 @@ class Host:
         temporary.replace(self.state_path)
 
     def scan(self):
+        with self._scan_lock:
+            self._scan()
+
+    def _scan(self):
         """Deterministic scan: crash-safe startup reconcile + zero-LLM Watcher + stale notices."""
-        if self.startup:
-            self.last_reconcile = self.reconciler.reconcile()
+        self.last_reconcile = self.reconciler.reconcile(managed_goal_ids=tuple(self.runner.tasks))
+        self.goals.settle_stops(job_canceller=lambda h: self.cluster.cancel_handle(h['handle_id'], h.get('tags')))
         self.last_watch = self.watcher.poll()
         snapshot = self.store.snapshot()
         self.close_stale_notifications(snapshot)
@@ -151,7 +160,7 @@ class Host:
         prompt = (
             'You are the independent ANCOR delivery Judge. Review this delivery packet against the '
             'authoritative requirement (read it with ancor_request_read), then call ancor_judge_verdict '
-            'exactly once with accept, reject (with structured feedback), or escalate.\n'
+            'with the packet delivery_event_id and accept, reject (with structured feedback), or escalate.\n'
             + json.dumps(packet, ensure_ascii=False, separators=(',', ':')))
         return judge_command(self.exec_profile, prompt,
                              self.router.cli_args(self.router.role_category('judge')))
@@ -161,25 +170,78 @@ class Host:
             *self.judge_command_for(packet),
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
-        return await proc.wait()
+        try:
+            return await proc.wait()
+        except asyncio.CancelledError:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), 5)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+            raise
+
+    async def _renew_judge_claim(self, event_id):
+        while True:
+            await asyncio.sleep(20)
+            with self.store._transaction() as db:
+                db.execute('UPDATE judge_deliveries SET retry_at=? WHERE event_id=? AND result_json IS NULL',
+                           (float(self.clock()) + 60, event_id))
 
     async def dispatch_judges(self) -> list[int]:
-        """Deterministically hand each delivery.submitted event to a fresh Judge process."""
+        """Claim durable deliveries; only a committed verdict acknowledges them."""
         events = [e for e in self.store.pending_events() if e['kind'] == 'delivery.submitted']
-        if not events:
-            return []
-        self.store.ack_events([e['id'] for e in events])
         launched = []
         for event in events:
-            packet = (event.get('payload') or {}).get('judge_packet')
-            if not packet:
-                log.error('ANCOR delivery.submitted event %s has no judge_packet', event['id'])
-                continue
+            eid = event['id']
+            now = float(self.clock())
+            with self.store._transaction() as db:
+                db.execute('INSERT OR IGNORE INTO judge_deliveries(event_id) VALUES (?)', (eid,))
+                state = db.execute('SELECT * FROM judge_deliveries WHERE event_id=?', (eid,)).fetchone()
+                if not state['result_json'] and state['attempts'] >= 3 and state['retry_at'] <= now:
+                    self.store._add_event(db, 'judge.failed',
+                        {'delivery_event_id': eid, 'request_id': event['payload'].get('request_id'),
+                         'reason': state['error'] or 'Judge claim expired without verdict', 'attempts': state['attempts']},
+                        source_key=f'judge.failed:{eid}')
+                if state['result_json'] or state['attempts'] >= 3 or state['retry_at'] > now:
+                    continue
+                db.execute('UPDATE judge_deliveries SET attempts=attempts+1, retry_at=? WHERE event_id=?',
+                           (now + 60, eid))
+            renewal = asyncio.create_task(self._renew_judge_claim(eid))
+            error = 'Judge exited without recording a verdict'
             try:
-                await self.judge_launcher(packet)
-                launched.append(event['id'])
-            except Exception:
-                log.exception('ANCOR Judge launch failed for event %s', event['id'])
+                packet = (event.get('payload') or {}).get('judge_packet')
+                if not packet:
+                    raise ValueError('delivery has no judge_packet')
+                launched.append(eid)
+                rc = await self.judge_launcher({**packet, 'delivery_event_id': eid})
+                if rc:
+                    error = f'Judge exited with code {rc} without recording a verdict'
+            except asyncio.CancelledError:
+                error = 'Host interrupted Judge execution'
+                raise
+            except Exception as exc:
+                error = f'{type(exc).__name__}: {exc}'
+                log.exception('ANCOR Judge failed for event %s', eid)
+            finally:
+                renewal.cancel()
+                await asyncio.gather(renewal, return_exceptions=True)
+                with self.store._transaction() as db:
+                    state = db.execute('SELECT * FROM judge_deliveries WHERE event_id=?', (eid,)).fetchone()
+                    if not state['result_json']:
+                        db.execute('UPDATE judge_deliveries SET retry_at=?, error=? WHERE event_id=?',
+                                   (float(self.clock()) + 5 * 2 ** state['attempts'], error, eid))
+                        if state['attempts'] >= 3:
+                            self.store._add_event(db, 'judge.failed',
+                                {'delivery_event_id': eid, 'request_id': event['payload'].get('request_id'),
+                                 'reason': error, 'attempts': state['attempts']},
+                                source_key=f'judge.failed:{eid}')
         return launched
 
     def notification_outbox(self):
@@ -350,6 +412,7 @@ async def scan_runner(ctx, adapter):
         await asyncio.sleep(interval)
     host = Host(ctx)
     delivery = None
+    control_tasks = {}
     try:
         try:
             dispatcher = host.notification_dispatcher()
@@ -361,12 +424,24 @@ async def scan_runner(ctx, adapter):
         while adapter.is_connected:
             await asyncio.to_thread(host.scan)
             await host.runner.dispatch_ready()
-            await host.dispatch_judges()
-            outcome = await host.coordinator.tick()
-            if outcome == 'failed':
-                log.error('ANCOR Root Agent infrastructure failure: %s', host.coordinator.last_error)
+            for name, operation in (('judges', host.dispatch_judges), ('root', host.coordinator.tick)):
+                task = control_tasks.get(name)
+                if task is not None and task.done():
+                    try:
+                        outcome = task.result()
+                        if outcome == 'failed':
+                            log.error('ANCOR %s infrastructure failure: %s', name, host.coordinator.last_error)
+                    except Exception:
+                        log.exception('ANCOR %s task failed', name)
+                    task = None
+                if task is None:
+                    control_tasks[name] = asyncio.create_task(operation(), name=f'ancor:{name}')
             await asyncio.sleep(interval)
     finally:
+        for task in control_tasks.values():
+            task.cancel()
+        await asyncio.gather(*control_tasks.values(), return_exceptions=True)
+        await host.runner.close()
         if delivery is not None:
             delivery.cancel()
             try:

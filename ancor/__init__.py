@@ -103,13 +103,17 @@ def _resolve_role(ctx) -> str | None:
     """Resolve ANCOR role from 2-profile config (default vs ancor-exec + ANCOR_ROLE)."""
     interactor_profile = ctx.get_config('interactor_profile', 'default')
     exec_profile = ctx.get_config('exec_profile', 'ancor-exec')
-    env_role = (os.environ.get('ANCOR_ROLE') or '').strip().lower()
+    from .session_identity import identity
+    launch = identity()
+    env_role = (launch.get('role') or '').strip().lower()
 
     if ctx.profile_name == exec_profile:
         if env_role in {'root', 'goal', 'judge'}:
             return env_role
-        if os.environ.get('GOAL_ID') or os.environ.get('ANCOR_GOAL_ID'):
+        if launch.get('goal_id'):
             return 'goal'
+        if hasattr(ctx, '_manager'):
+            return None
         return 'root'
 
     if ctx.profile_name == interactor_profile:
@@ -151,6 +155,13 @@ def _observed_model_hook(sink: list, *, on_new=None):
 
 
 def register(ctx, *, scan_runner=None, judge_runner=None):
+    if ctx.profile_name == ctx.get_config('exec_profile', 'ancor-exec') and hasattr(ctx, '_manager'):
+        from .session_roles import register_session_roles
+        return register_session_roles(ctx, _register_role, _resolve_role, judge_runner=judge_runner)
+    return _register_role(ctx, scan_runner=scan_runner, judge_runner=judge_runner)
+
+
+def _register_role(ctx, *, scan_runner=None, judge_runner=None, role_override=None):
     if scan_runner is None:
         from .host import scan_runner
 
@@ -183,7 +194,7 @@ def register(ctx, *, scan_runner=None, judge_runner=None):
             setattr(adapter, '_ancor_scan_task', task)
         ctx.register_platform_handler('api_server', connected)
 
-    role = _resolve_role(ctx)
+    role = role_override or _resolve_role(ctx)
     if role is None:
         return
 
@@ -435,7 +446,8 @@ def register(ctx, *, scan_runner=None, judge_runner=None):
     def _caller_goal_id():
         if root_role:
             return 'root'
-        gid = (os.environ.get('GOAL_ID') or os.environ.get('ANCOR_GOAL_ID') or '').strip()
+        from .session_identity import identity
+        gid = (identity().get('goal_id') or '').strip()
         if not gid:
             raise PermissionError('GOAL_ID environment variable is required for non-root goal operations')
         return gid
@@ -551,6 +563,7 @@ def register(ctx, *, scan_runner=None, judge_runner=None):
     def judge_verdict(args, **_native):
         return service.judge_gate.apply_verdict(
             args['request_id'],
+            delivery_event_id=args.get('delivery_event_id'),
             generation=args['generation'],
             decision=args['decision'],
             summary=args['summary'],

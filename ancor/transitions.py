@@ -42,9 +42,20 @@ def advance_request(store, goal_store: GoalStore, request_id: str, *,
         return _result(store, request_id)
 
     l1_goals = goal_store.list_goals(
-        request_id=request_id, parent_goal_id='root', include_terminal=False)
+        request_id=request_id, parent_goal_id='root', include_terminal=target in {'cancelled', 'invalidated'})
+
+    def settle():
+        ids = [g['goal_id'] for g in goal_store.list_goals(request_id=request_id, include_terminal=True)]
+        result = goal_store.settle_stops(goal_ids=ids, process_killer=process_killer,
+                                        job_canceller=job_canceller)
+        if not result['stop_confirmed']:
+            return _blocked(store, request_id, [{'goal_id': gid, 'reason': 'execution_stop_unconfirmed'}
+                                               for gid in result['pending_stops']])
 
     if target == 'active':
+        blocked = settle()
+        if blocked:
+            return blocked
         if request['status'] == 'pending':
             blockers = []
             for base_id in Store._replacement_ids(request['replacement_of']):
@@ -75,6 +86,9 @@ def advance_request(store, goal_store: GoalStore, request_id: str, *,
                 paused.append(goal_store.pause_goal(
                     goal['goal_id'], mode=pause_mode, caller_goal_id='root',
                     process_killer=process_killer, job_canceller=job_canceller))
+        blocked = settle()
+        if blocked:
+            return blocked
         finalized = store.finalize_transition(request_id)
         return _result(store, request_id, finalized['activated'], cascade=paused)
 
@@ -85,6 +99,9 @@ def advance_request(store, goal_store: GoalStore, request_id: str, *,
             stopped.append(goal_store.stop_goal(
                 goal['goal_id'], reason=reason, caller_goal_id='root',
                 process_killer=process_killer, job_canceller=job_canceller))
+        blocked = settle()
+        if blocked:
+            return blocked
         finalized = store.finalize_transition(request_id)
         return _result(store, request_id, finalized['activated'], cascade=stopped)
 

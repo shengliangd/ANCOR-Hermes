@@ -16,10 +16,17 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ancor.store import Store
+from ancor.goals import GoalStore
+from ancor.watcher import GoalRunner, default_goal_command
+from ancor.model_routing import CategoryRouter
 
 
 def borrow_dependencies(root: Path, native: Path, runtime_home: Path) -> None:
@@ -69,6 +76,9 @@ def stop_private_gateway(root: Path) -> None:
 def run_probe(root: Path, native: Path, runtime_home: Path, hermes: str) -> dict:
     borrow_dependencies(root, native, runtime_home)
     requests = []
+    histories = []
+    slow = threading.Event()
+    entered = threading.Event()
 
     class ToyAPI(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -84,6 +94,10 @@ def run_probe(root: Path, native: Path, runtime_home: Path, hermes: str) -> dict
                 return
             requests.append({'path': self.path, 'model': body.get('model'),
                              'authorization': self.headers.get('Authorization')})
+            histories.append(body.get('messages', []))
+            if slow.is_set():
+                entered.set()
+                threading.Event().wait(3)
             model = body['model']
             self.send_response(200)
             if body.get('stream'):
@@ -140,11 +154,63 @@ def run_probe(root: Path, native: Path, runtime_home: Path, hermes: str) -> dict
             capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, (result.stdout + result.stderr)[-6000:]
         assert 'ANCOR_LOCAL_ROUTE_OK' in result.stdout
+        store = Store(root / 'requests.db')
+        proposal = store.propose_change(None, [{'op': 'create', 'title': 'Session probe',
+            'fields': {'outcome': ['Verify persistent conversation']}}], actor='default',
+            source={'kind': 'interactor_proposal', 'input': 'session probe'})
+        rid = store.commit_change(proposal['id'], 'probe-confirm')['request_id']
+        router = CategoryRouter(alias_names=lambda: {'research'})
+        goals = GoalStore(store, category_router=router)
+        goals.spawn_goal({'goal_id': 'probe', 'request_ref': {'id': rid, 'generation': 1},
+            'objective': 'Reply ANCOR_LOCAL_ROUTE_OK', 'done_criteria': 'Continuity verified',
+            'scope': {'readable_requests': [rid], 'can_ask_human': False}, 'budget': {},
+            'category': 'research'})
+        goals.register_resource_usage('probe', handle_id='probe-external-work')
+        def command(*args, **kwargs):
+            return [hermes, *default_goal_command(*args, **kwargs)[1:]]
+        runner = GoalRunner(goals, command_builder=command, env_builder=lambda: env, native_sessions=True)
+        assert runner.run_goal_sync('probe') == 0
+        sid = goals.get_goal('probe')['session_id']
+        assert sid and sid != 'goal-probe', sid
+        assert goals.get_goal('probe')['status'] == 'waiting_external'
+        reopened = GoalStore(Store(store.path), category_router=router)
+        reopened.signal_goal('probe', 'recovery', {'message': 'Continue the same conversation'})
+        runner = GoalRunner(reopened, command_builder=command, env_builder=lambda: env, native_sessions=True)
+        assert runner.run_goal_sync('probe') == 0
+        assert reopened.get_goal('probe')['session_id'] == sid
+        assert any(m.get('role') == 'assistant' and 'ANCOR_LOCAL_ROUTE_OK' in str(m.get('content'))
+                   for m in histories[-1]), 'resumed request lost previous assistant response'
+        slow.set()
+        reopened.signal_goal('probe', 'steer', {'message': 'Run another turn for interruption test'})
+        worker_errors = []
+        def running_goal():
+            try:
+                runner.run_goal_sync('probe')
+            except BaseException as exc:
+                worker_errors.append(repr(exc))
+        worker = threading.Thread(target=running_goal)
+        worker.start()
+        assert entered.wait(30), 'native execution did not reach the API'
+        private_python = next((root / 'installs').glob('*/environments/toy/venv/bin/python'))
+        def native_stop(session_id):
+            code = ('import sys; sys.path[:0]=' + repr([str(Path(__file__).resolve().parents[1]), str(native)]) +
+                    '; from ancor.session_control import confirm_session_stopped; '
+                    'sys.exit(0 if confirm_session_stopped(sys.argv[1]) else 1)')
+            stopped = subprocess.run([str(private_python), '-c', code, session_id], env=env,
+                                     capture_output=True, text=True, timeout=20)
+            assert stopped.returncode == 0, stopped.stderr[-3000:]
+            return True
+        pause = reopened.pause_goal('probe', session_stopper=native_stop)
+        worker.join(10)
+        assert not worker.is_alive() and not worker_errors, worker_errors
+        assert pause['stop_confirmed'], pause
+        assert reopened.get_goal('probe')['status'] == 'paused'
+        slow.clear()
         assert requests and all(r == {
             'path': '/v1/chat/completions', 'model': 'toy-routed-model',
             'authorization': 'Bearer toy-alias-key',
         } for r in requests), requests
-        return {'scenario': 'native_cli_alias_endpoint_and_key', 'status': 'PASS',
+        return {'scenario': 'native_cli_alias_session_resume_and_gateway_stop', 'status': 'PASS',
                 'api_requests': len(requests), 'external_model_calls': 0}
     finally:
         try:

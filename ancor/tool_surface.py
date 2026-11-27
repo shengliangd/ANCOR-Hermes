@@ -207,6 +207,7 @@ def build_surface(*, role: str, methods: dict, change_properties: dict):
             'Record the independent Judge Final Decision: accept (moves to awaiting_acceptance), '
             'reject (returns structured feedback to Root Agent), or escalate (asks human via Interactor).',
             {
+                'delivery_event_id': POSITIVE_INTEGER,
                 'request_id': TEXT,
                 'generation': POSITIVE_INTEGER,
                 'decision': {'type': 'string', 'enum': ['accept', 'reject', 'escalate']},
@@ -215,7 +216,7 @@ def build_surface(*, role: str, methods: dict, change_properties: dict):
                 'feedback': STRINGS,
                 'artifacts': {'type': 'array', 'items': ARTIFACT_SCHEMA},
             },
-            ['request_id', 'generation', 'decision', 'summary'],
+            ['request_id', 'generation', 'decision', 'summary', 'delivery_event_id'],
             methods['judge_verdict'],
         )
         return definitions, handlers

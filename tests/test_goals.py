@@ -245,3 +245,149 @@ def test_deterministic_tree_cascade_pause_resume_stop(tmp_path):
     )
     assert set(res_stop['cancelled_goals']) == {'l1', 'l2_active', 'l2_self_paused', 'l3_under_active'}
     assert goals.get_goal('l2_done')['status'] == 'completed'
+
+
+def _repair_spec(req, goal_id, limits=None):
+    return {
+        'goal_id': goal_id,
+        'request_ref': {'id': req['id'], 'generation': req['generation']},
+        'objective': 'Execute work', 'done_criteria': 'Evidence supplied',
+        'scope': {'readable_requests': [req['id']], 'can_ask_human': False},
+        'budget': {'limits': limits or {}},
+    }
+
+
+def test_global_limits_survive_unconfigured_worker_and_omitted_allocation(tmp_path):
+    from ancor.goals import QuotaExceededError
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    host = GoalStore(store, global_limits={'gpu': 1})
+    goal = host.spawn_goal(_repair_spec(req, 'no_allocation'))
+    assert goal['budget']['limits']['gpu'] == 0
+    worker = GoalStore(Store(store.path))
+    with pytest.raises(QuotaExceededError):
+        worker.register_resource_usage('no_allocation', handle_id='h', usage={'gpu': 1})
+    with pytest.raises(AttenuationError):
+        worker.spawn_goal(_repair_spec(req, 'too_large', {'gpu': 2}))
+
+
+def test_global_usage_counts_live_handles_on_completed_goals(tmp_path):
+    from ancor.goals import QuotaExceededError
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    goals = GoalStore(store, global_limits={'gpu': 1})
+    goals.spawn_goal(_repair_spec(req, 'old', {'gpu': 1}))
+    goals.register_resource_usage('old', handle_id='still_running', usage={'gpu': 1})
+    goals.report_result('old', {'request_generation': 1, 'status': 'completed', 'summary': 'done'})
+    goals.spawn_goal(_repair_spec(req, 'new', {'gpu': 1}))
+    with pytest.raises(QuotaExceededError, match='global'):
+        GoalStore(store).register_resource_usage('new', handle_id='new_job', usage={'gpu': 1})
+
+
+def test_stale_receipt_preserves_updated_goal_and_wakeup(tmp_path):
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    goals = GoalStore(store)
+    goals.spawn_goal(_repair_spec(req, 'updated'))
+    goals.signal_goal('updated', 'update_generation', {'generation': 2})
+    before = goals.get_goal('updated')
+    with pytest.raises(RuntimeError, match='generation'):
+        goals.report_result('updated', {'request_generation': 1, 'status': 'completed', 'summary': 'old work'})
+    after = goals.get_goal('updated')
+    assert after == before
+    assert after['status'] == 'running' and after['needs_wake']
+    assert after['result'] is None
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf')])
+def test_nonfinite_global_limits_and_usage_rejected(tmp_path, value):
+    store = Store(tmp_path / 'requests.db')
+    with pytest.raises(ValueError):
+        GoalStore(store, global_limits={'gpu': value})
+    req = _make_request(store)
+    goals = GoalStore(store)
+    goals.spawn_goal(_repair_spec(req, 'finite'))
+    with pytest.raises(ValueError):
+        goals.register_resource_usage('finite', handle_id='invalid', usage={'gpu': value})
+
+
+def test_pause_confirms_sigterm_ignoring_process_exit(tmp_path):
+    import subprocess
+    import sys
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    goals = GoalStore(store)
+    goals.spawn_goal(_repair_spec(req, 'stubborn'))
+    proc = subprocess.Popen([sys.executable, '-u', '-c',
+        'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print("ready"); time.sleep(60)'],
+        start_new_session=True, stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == 'ready'
+        goals.set_process('stubborn', proc.pid)
+        result = goals.pause_goal('stubborn')
+        assert result['stop_confirmed']
+        assert result['killed_pids'] == [proc.pid]
+        assert proc.wait(timeout=2) != 0
+        assert goals.get_goal('stubborn')['pid'] is None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        proc.stdout.close()
+
+
+def test_failed_stop_retains_handles_and_retries_after_restart(tmp_path):
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    goals = GoalStore(store)
+    goals.spawn_goal(_repair_spec(req, 'pending_stop'))
+    goals.set_process('pending_stop', 12345)
+    goals.register_resource_usage('pending_stop', handle_id='external', usage={'gpu': 1})
+    result = goals.pause_goal('pending_stop', mode='preempt', process_killer=lambda _: False,
+                              job_canceller=lambda _: False)
+    assert not result['stop_confirmed']
+    current = goals.get_goal('pending_stop')
+    assert current['status'] == 'paused' and current['pid'] == 12345
+    assert current['external_job_ids'][0]['status'] == 'running'
+    with pytest.raises(RuntimeError, match='unconfirmed'):
+        goals.resume_goal('pending_stop')
+    reopened = GoalStore(Store(store.path))
+    result = reopened.settle_stops(process_killer=lambda _: True, job_canceller=lambda _: True)
+    assert result['stop_confirmed'] and result['cancelled_jobs'] == ['external']
+    assert reopened.get_goal('pending_stop')['pid'] is None
+    reopened.resume_goal('pending_stop')
+    assert reopened.get_goal('pending_stop')['needs_wake']
+
+
+def test_native_stop_failure_remains_pending_after_cli_exit(tmp_path):
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    goals = GoalStore(store)
+    goals.spawn_goal(_repair_spec(req, 'native'))
+    goals.bind_session('native', 'actual-native-session')
+    result = goals.pause_goal('native', session_stopper=lambda _: False)
+    assert not result['stop_confirmed']
+    assert goals.get_goal('native')['session_id'] == 'actual-native-session'
+    with pytest.raises(RuntimeError, match='unconfirmed'):
+        goals.resume_goal('native')
+    reopened = GoalStore(Store(store.path))
+    assert reopened.settle_stops(session_stopper=lambda _: True)['stop_confirmed']
+    reopened.resume_goal('native')
+
+
+def test_concurrent_resource_reservations_are_atomic(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from ancor.goals import QuotaExceededError
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    goals = GoalStore(store, global_limits={'gpu': 1})
+    goals.spawn_goal(_repair_spec(req, 'limited', {'gpu': 1}))
+    def acquire(index):
+        try:
+            GoalStore(Store(store.path)).register_resource_usage('limited', handle_id=str(index), usage={'gpu': 1})
+            return True
+        except QuotaExceededError:
+            return False
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(acquire, (1, 2))) == [False, True]
+    assert goals.subtree_active_usage('limited') == {'gpu': 1}

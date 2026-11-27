@@ -195,3 +195,90 @@ def test_host_scan_visualizer_and_readonly_dashboard(tmp_path, monkeypatch):
     assert ov['requests']['count'] == 1
     g_detail = client.get('/api/plugins/ancor/goals/g_dash').json()
     assert g_detail['goal']['goal_id'] == 'g_dash'
+
+
+def test_shared_gateway_dispatches_by_session_identity_not_first_role(tmp_path, monkeypatch):
+    from ancor.session_identity import launch_identity
+    store = Store(tmp_path / 'requests.db')
+    from test_goals import _make_request, _repair_spec
+    req = _make_request(store)
+    goals = GoalStore(store)
+    goals.spawn_goal(_repair_spec(req, 'first'))
+    goals.spawn_goal(_repair_spec(req, 'second'))
+    ctx = FakeContext('ancor-exec', store.path)
+    ctx._manager = object()  # Native PluginContext is shared across sessions.
+    monkeypatch.setenv('HERMES_EPHEMERAL_SYSTEM_PROMPT', launch_identity('root'))
+    ancor.register(ctx)
+    assert json.loads(ctx.tools['ancor_goal_self']['handler']({}))['code'] == 'forbidden'
+    for gid in ('first', 'second'):
+        monkeypatch.setenv('HERMES_EPHEMERAL_SYSTEM_PROMPT', launch_identity('goal', gid))
+        result = json.loads(ctx.tools['ancor_goal_self']['handler']({}))
+        assert result['goal']['goal_id'] == gid
+        assert json.loads(ctx.tools['ancor_delivery_submit']['handler']({}))['code'] == 'forbidden'
+        ctx.hooks['post_api_request'](model='same-model', provider='custom')
+        assert goals.get_goal(gid)['observed_models'] == [{'model': 'same-model', 'provider': 'custom'}]
+    monkeypatch.setenv('HERMES_EPHEMERAL_SYSTEM_PROMPT', launch_identity('judge'))
+    assert json.loads(ctx.tools['ancor_goal_self']['handler']({}))['code'] == 'forbidden'
+    assert ctx.hooks['pre_tool_call']('terminal', {})['action'] == 'block'
+
+
+def test_host_keeps_scanning_while_goal_root_and_judge_are_running(tmp_path, monkeypatch):
+    import asyncio
+    import sys
+    from types import SimpleNamespace
+    import ancor.host as host_module
+    from ancor.watcher import GoalRunner
+    from test_goals import _make_request, _repair_spec
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    goals = GoalStore(store)
+    goals.spawn_goal(_repair_spec(req, 'long_goal'))
+    runner = GoalRunner(goals, command_builder=lambda *a, **kw: [sys.executable, '-c', 'import time; time.sleep(60)'])
+    adapter = SimpleNamespace(is_connected=True)
+    seen = {'scans': 0, 'root': False, 'judge': False, 'live_during_scan': False}
+    async def root():
+        seen['root'] = True
+        await asyncio.Event().wait()
+    async def judge():
+        seen['judge'] = True
+        await asyncio.Event().wait()
+    def scan():
+        seen['scans'] += 1
+        if seen['scans'] > 1 and goals.get_goal('long_goal')['pid']:
+            seen['live_during_scan'] = True
+        if seen['scans'] >= 3:
+            adapter.is_connected = False
+    def no_notifications():
+        raise ValueError('isolated test')
+    fake = SimpleNamespace(scan=scan, runner=runner, dispatch_judges=judge,
+                           coordinator=SimpleNamespace(tick=root), notification_dispatcher=no_notifications)
+    monkeypatch.setattr(host_module, 'Host', lambda ctx: fake)
+    sleep = asyncio.sleep
+    async def fast_sleep(delay):
+        await sleep(.05 if delay == 5 else delay)
+    monkeypatch.setattr(asyncio, 'sleep', fast_sleep)
+    monkeypatch.delenv('ANCOR_ROLE', raising=False)
+    monkeypatch.delenv('GOAL_ID', raising=False)
+    asyncio.run(asyncio.wait_for(host_module.scan_runner(
+        FakeContext('default', store.path, poll_interval=5), adapter), 5))
+    assert seen == {'scans': 3, 'root': True, 'judge': True, 'live_during_scan': True}
+    assert not runner.tasks and goals.get_goal('long_goal')['pid'] is None
+
+
+def test_request_transition_waits_for_confirmed_stop(tmp_path):
+    store = Store(tmp_path / 'requests.db')
+    req = _create_req(store)
+    goals = GoalStore(store)
+    from test_goals import _repair_spec
+    goals.spawn_goal(_repair_spec(req, 'pending'))
+    goals.set_process('pending', 98765)
+    proposal = store.propose_change(req['id'], [{'op': 'cancel', 'reason': 'stop'}],
+        actor='default', source={'kind': 'interactor_proposal', 'input': 'stop'},
+        base={'generation': req['generation'], 'control_version': req['control_version']})
+    store.commit_change(proposal['id'], 'cancel-confirm')
+    result = advance_request(store, goals, req['id'], process_killer=lambda _: False)
+    assert result['outcome'] == 'blocked'
+    assert result['target_status'] == 'cancelled' and result['status'] == 'active'
+    assert goals.get_goal('pending')['pid'] == 98765
+    result = advance_request(store, GoalStore(Store(store.path)), req['id'], process_killer=lambda _: True)
+    assert result['outcome'] == 'completed' and result['status'] == 'cancelled'
