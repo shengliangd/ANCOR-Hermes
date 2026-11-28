@@ -761,7 +761,8 @@ class GoalStore:
             if kind in {'steer', 'update_generation'}:
                 self._require_authority(db, caller_goal_id, goal_id)
             if goal['status'] in TERMINAL_GOAL_STATUSES:
-                raise RuntimeError(f"cannot signal terminal goal {goal_id} ({goal['status']})")
+                if not (goal['status'] == 'blocked' and kind in {'steer', 'update_generation'}):
+                    raise RuntimeError(f"cannot signal terminal goal {goal_id} ({goal['status']})")
             signals = list(goal['pending_signals'])
             signal_entry = {'kind': kind, 'payload': dict(payload), 'at': now}
             signals.append(signal_entry)
@@ -780,13 +781,21 @@ class GoalStore:
                     db.execute('UPDATE requests SET observed_generation=? WHERE id=?',
                                (new_gen, goal['request_id']))
             needs_wake = 0 if goal['status'] == 'paused' else 1
-            new_status = 'running' if (goal['status'] == 'waiting_external' and needs_wake) else goal['status']
+            unblocking = goal['status'] == 'blocked'
+            new_status = 'running' if ((goal['status'] == 'waiting_external' or unblocking) and needs_wake) else goal['status']
             if needs_wake:
                 db.execute('DELETE FROM goal_waits WHERE goal_id=?', (goal_id,))
-            db.execute(
-                'UPDATE active_goals SET generation=?, pending_signals=?, needs_wake=?, '
-                'status=?, updated_at=? WHERE goal_id=?',
-                (new_gen, json.dumps(signals, ensure_ascii=False), needs_wake, new_status, now, goal_id))
+            if unblocking:
+                db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
+                db.execute(
+                    'UPDATE active_goals SET generation=?, pending_signals=?, needs_wake=?, '
+                    'status=?, result_json=NULL, updated_at=? WHERE goal_id=?',
+                    (new_gen, json.dumps(signals, ensure_ascii=False), needs_wake, new_status, now, goal_id))
+            else:
+                db.execute(
+                    'UPDATE active_goals SET generation=?, pending_signals=?, needs_wake=?, '
+                    'status=?, updated_at=? WHERE goal_id=?',
+                    (new_gen, json.dumps(signals, ensure_ascii=False), needs_wake, new_status, now, goal_id))
             return self._get(db, goal_id)
 
     def wait_goal(self, goal_id: str, *, wake_after_seconds: float | None = None,
@@ -839,7 +848,7 @@ class GoalStore:
         with self.store._transaction() as db:
             self._require_authority(db, caller_goal_id, goal_id)
             goal = self._get(db, goal_id)
-            if goal['status'] in TERMINAL_GOAL_STATUSES:
+            if goal['status'] in TERMINAL_GOAL_STATUSES and goal['status'] != 'blocked':
                 raise RuntimeError(f"cannot update budget of terminal goal {goal_id} ({goal['status']})")
             if goal['parent_goal_id'] != 'root':
                 parent = self._get(db, goal['parent_goal_id'])
@@ -859,11 +868,18 @@ class GoalStore:
                     'payload': {'message': f'Budget updated: {reason}', 'budget': normalized},
                     'at': now,
                 })
-                new_status = 'running' if goal['status'] == 'waiting_external' else goal['status']
+                unblocking = goal['status'] == 'blocked'
+                new_status = 'running' if (goal['status'] == 'waiting_external' or unblocking) else goal['status']
                 db.execute('DELETE FROM goal_waits WHERE goal_id=?', (goal_id,))
-                db.execute(
-                    'UPDATE active_goals SET pending_signals=?, needs_wake=1, status=?, updated_at=? WHERE goal_id=?',
-                    (json.dumps(signals, ensure_ascii=False), new_status, now, goal_id))
+                if unblocking:
+                    db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
+                    db.execute(
+                        'UPDATE active_goals SET pending_signals=?, needs_wake=1, status=?, result_json=NULL, updated_at=? WHERE goal_id=?',
+                        (json.dumps(signals, ensure_ascii=False), new_status, now, goal_id))
+                else:
+                    db.execute(
+                        'UPDATE active_goals SET pending_signals=?, needs_wake=1, status=?, updated_at=? WHERE goal_id=?',
+                        (json.dumps(signals, ensure_ascii=False), new_status, now, goal_id))
             return self._get(db, goal_id)
 
     def report_result(self, goal_id: str, result: dict) -> dict:
@@ -911,7 +927,7 @@ class GoalStore:
                     'category': goal.get('category'),
                     'observed_models': goal.get('observed_models') or [],
                 },
-                source_key=f"goal.result:{goal_id}:{validated['status']}",
+                source_key=f"goal.result:{goal_id}:{validated['status']}:{int(now * 1000)}",
             )
         else:
             parent = self._get(db, parent_id)
@@ -986,8 +1002,20 @@ class GoalStore:
         with self.store._transaction() as db:
             self._require_authority(db, caller_goal_id, goal_id)
             target = self._get(db, goal_id)
+            if target['status'] == 'blocked':
+                if db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?', (goal_id,)).fetchone():
+                    raise RuntimeError('cannot resume while execution stop is unconfirmed')
+                signals = list(target['pending_signals'])
+                signals.append({'kind': 'steer', 'payload': {'message': 'Unblocked and resumed by parent.'}, 'at': now})
+                db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
+                db.execute('DELETE FROM goal_waits WHERE goal_id=?', (goal_id,))
+                db.execute(
+                    "UPDATE active_goals SET status='running', paused_by_ancestor=NULL, "
+                    'needs_wake=1, pending_signals=?, result_json=NULL, updated_at=? WHERE goal_id=?',
+                    (json.dumps(signals, ensure_ascii=False), now, goal_id))
+                return {'goal_id': goal_id, 'resumed_goals': [goal_id]}
             if target['status'] != 'paused':
-                raise RuntimeError(f"goal {goal_id} is {target['status']}, not paused")
+                raise RuntimeError(f"goal {goal_id} is {target['status']}, not paused or blocked")
             if target['paused_by_ancestor'] is not None:
                 ancestor = self._get(db, target['paused_by_ancestor'])
                 if ancestor['status'] == 'paused':
@@ -1031,7 +1059,8 @@ class GoalStore:
             for node in nodes:
                 nid = node['goal_id']
                 db.execute('INSERT OR REPLACE INTO goal_stop_intents(goal_id, mode) VALUES (?, ?)', (nid, 'preempt'))
-                if node['status'] in TERMINAL_GOAL_STATUSES:
+                db.execute('DELETE FROM goal_waits WHERE goal_id=?', (nid,))
+                if node['status'] in TERMINAL_GOAL_STATUSES and node['status'] != 'blocked':
                     continue
                 cancel_result = {'goal_id': nid, 'request_generation': node['generation'],
                     'status': 'cancelled', 'summary': reason, 'artifacts': [], 'metrics': {}, 'open_issues': []}

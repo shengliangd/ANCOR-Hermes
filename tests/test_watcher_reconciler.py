@@ -303,3 +303,45 @@ def test_update_goal_budget_dynamically(tmp_path):
     assert updated['budget']['limits']['gpu'] == 1
     assert updated['needs_wake'] is True
     assert any(s['kind'] == 'steer' for s in updated['pending_signals'])
+
+
+def test_blocked_goal_can_be_unblocked_in_place_by_parent(tmp_path):
+    import pytest
+    now = [1000.0]
+    _, goals, _, _ = _create_goal(tmp_path, now)
+    goals.bind_session('g_watch', 'sess-keep-context')
+    goals.report_result('g_watch', {
+        'goal_id': 'g_watch', 'request_generation': 1,
+        'status': 'blocked', 'summary': 'need new path', 'open_issues': ['missing path'],
+    })
+    assert goals.get_goal('g_watch')['status'] == 'blocked'
+
+    # 1. Unblock via signal(steer) — keeps session_id and resumes
+    revived = goals.signal_goal('g_watch', 'steer', {'message': 'use /data/v2'})
+    assert revived['status'] == 'running'
+    assert revived['needs_wake'] is True
+    assert revived['session_id'] == 'sess-keep-context'
+    assert revived['result'] is None
+
+    # 2. Block again and unblock via resume_goal (verify second goal.blocked event is emitted)
+    now[0] += 10.0
+    goals.report_result('g_watch', {
+        'goal_id': 'g_watch', 'request_generation': 1,
+        'status': 'blocked', 'summary': 'blocked again', 'open_issues': ['still blocked'],
+    })
+    res = goals.resume_goal('g_watch')
+    assert res['resumed_goals'] == ['g_watch']
+    assert goals.get_goal('g_watch')['status'] == 'running'
+    assert goals.get_goal('g_watch')['session_id'] == 'sess-keep-context'
+
+    # 3. Block again and abandon via stop_goal -> cancelled (truly terminal)
+    now[0] += 10.0
+    goals.report_result('g_watch', {
+        'goal_id': 'g_watch', 'request_generation': 1,
+        'status': 'blocked', 'summary': 'abandon me', 'open_issues': ['abort'],
+    })
+    stopped = goals.stop_goal('g_watch', reason='no longer needed')
+    assert 'g_watch' in stopped['cancelled_goals']
+    assert goals.get_goal('g_watch')['status'] == 'cancelled'
+    with pytest.raises(RuntimeError):
+        goals.signal_goal('g_watch', 'steer', {'message': 'too late'})

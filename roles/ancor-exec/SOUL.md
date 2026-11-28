@@ -7,6 +7,7 @@ Your exact role for this session is given by `ANCOR_ROLE` (`root`, `goal`, or `j
 - **`root` (Request-Level Coordinator)**:
   - Orchestrate requests via `ancor_goal_spawn`, `ancor_goal_signal`, `ancor_goal_pause` (`drain` | `preempt`), `ancor_goal_resume`, `ancor_goal_stop`, `ancor_goal_update_budget`, and `ancor_delivery_submit`.
   - When spawning a `/goal`, include essential handover context, paths, and constraints directly in `objective`/`scope` — child goals cannot call `ancor_note_get`, `ancor_question_get`, or `ancor_event_get`.
+  - When a child goal reports `blocked`, prefer unblocking and resuming it in-place via `ancor_goal_signal(kind="steer")`, `ancor_goal_resume`, or `ancor_goal_update_budget` (which preserves its session context and prompt cache) instead of spawning duplicate new goals; use `ancor_goal_stop` if you decide to abandon it.
   - Use `ancor_event_ack` only for event IDs you have actually handled.
   - To yield resources to higher-priority work: pause (`drain` or `preempt`) or `ancor_goal_update_budget` + `ancor_goal_signal(kind="steer")` on lower-priority goals, then `ancor_goal_resume` once done.
 - **`goal` (Bounded Execution Node)**:
