@@ -179,6 +179,73 @@ def test_observed_models_hook_records_fallback_and_judge_overlap(tmp_path):
     assert judge_shares_model(verdict, [goal]) == ['deepseek-v4-flash']
 
 
+def test_per_category_fallback_chain_merges_with_global_and_respects_cooldown():
+    now = [1000.0]
+    cfg = {
+        'model': {'provider': 'openai-codex', 'default': 'gpt-6.1-sol'},
+        'model_aliases': {
+            'oracle': {
+                'provider': 'openai-codex', 'model': 'gpt-6-astra', 'reasoning': 'high',
+                'fallback_providers': [
+                    {'provider': 'antigravity-subscription-directsdk', 'model': 'gemini-4-neon'},
+                    {'provider': 'deepseek', 'model': 'deepseek-v4-pro'},
+                ],
+            },
+            'fast': {
+                'provider': 'openai-codex', 'model': 'gpt-6-luna', 'reasoning': 'medium',
+                'fallback_providers': [
+                    {'provider': 'antigravity-subscription-directsdk', 'model': 'gemini-3.8-flash'},
+                ],
+            },
+        },
+        'fallback_providers': [
+            {'provider': 'antigravity-subscription-directsdk', 'model': 'gemini-4-neon'},
+            {'provider': 'deepseek', 'model': 'deepseek-v4-pro'},
+            {'provider': 'deepseek', 'model': 'deepseek-flash'},
+        ],
+    }
+    router = CategoryRouter(config_source=lambda: cfg, clock=lambda: now[0])
+    # Oracle chain: primary -> category fallbacks -> global fallbacks (deduped)
+    oracle_chain = router.fallback_chain('oracle')
+    assert [(e['provider'], e['model']) for e in oracle_chain] == [
+        ('openai-codex', 'gpt-6-astra'),
+        ('antigravity-subscription-directsdk', 'gemini-4-neon'),
+        ('deepseek', 'deepseek-v4-pro'),
+        ('deepseek', 'deepseek-flash'),
+    ]
+    # Fast chain keeps its own fast antigravity model ahead of global fallbacks
+    fast_chain = router.fallback_chain('fast')
+    assert [(e['provider'], e['model']) for e in fast_chain] == [
+        ('openai-codex', 'gpt-6-luna'),
+        ('antigravity-subscription-directsdk', 'gemini-3.8-flash'),
+        ('antigravity-subscription-directsdk', 'gemini-4-neon'),
+        ('deepseek', 'deepseek-v4-pro'),
+        ('deepseek', 'deepseek-flash'),
+    ]
+    # Normal launch uses alias + per-alias reasoning
+    assert router.cli_args('oracle') == ['-m', 'oracle', '--reasoning', 'high']
+    assert router.cli_args('fast') == ['-m', 'fast', '--reasoning', 'medium']
+
+    # When openai-codex is in cooldown, fresh launch picks category's antigravity fallback + reasoning
+    router.mark_provider_cooldown('openai-codex', seconds=600)
+    assert router.cli_args('oracle') == [
+        '-m', 'gemini-4-neon', '--provider', 'antigravity-subscription-directsdk', '--reasoning', 'high',
+    ]
+    assert router.cli_args('fast') == [
+        '-m', 'gemini-3.8-flash', '--provider', 'antigravity-subscription-directsdk', '--reasoning', 'medium',
+    ]
+    # Resume NEVER mutates launch flags
+    assert router.cli_args('oracle', resume=True) == ['-m', 'oracle', '--reasoning', 'high']
+
+    # If antigravity also cools down, falls through to deepseek
+    router.mark_provider_cooldown('antigravity-subscription-directsdk', seconds=600)
+    assert router.cli_args('oracle') == ['-m', 'deepseek-v4-pro', '--provider', 'deepseek', '--reasoning', 'high']
+
+    # After cooldown expires, automatically returns to primary alias
+    now[0] += 601.0
+    assert router.cli_args('oracle') == ['-m', 'oracle', '--reasoning', 'high']
+
+
 def test_host_dispatches_judge_with_judge_alias(tmp_path):
     store_path = tmp_path / 'requests.db'
     store = Store(store_path)

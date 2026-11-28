@@ -14,11 +14,13 @@ loudly at spawn time instead of silently falling back to the default model).
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 _CATEGORY_RE = re.compile(r'^[a-z0-9][a-z0-9_.-]{0,63}$')
 ROLE_DEFAULT_CATEGORY = {'root': 'root', 'judge': 'judge'}
 REASONING_LEVELS = frozenset({'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'})
+DEFAULT_PROVIDER_COOLDOWN_SECONDS = 600.0
 
 
 class CategoryError(ValueError):
@@ -79,24 +81,109 @@ def _load_yaml_dict(text: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def load_alias_names(path: Path | None) -> frozenset[str] | None:
-    """Read only alias names from a profile config. ``None`` means routing is unknown."""
+def _normalize_route_entry(entry: dict | None, *, default_provider: str = '') -> dict | None:
+    if not isinstance(entry, dict):
+        return None
+    model = str(entry.get('model') or '').strip()
+    if not model:
+        return None
+    provider = str(entry.get('provider') or default_provider or '').strip()
+    out = {'provider': provider, 'model': model}
+    if entry.get('base_url'):
+        out['base_url'] = str(entry['base_url']).strip()
+    if entry.get('reasoning'):
+        lvl = str(entry['reasoning']).strip().lower()
+        if lvl in REASONING_LEVELS:
+            out['reasoning'] = lvl
+    return out
+
+
+def alias_reasoning_from_config(config: dict | None) -> dict[str, str]:
+    """Read optional per-alias ``reasoning`` levels from ``model_aliases``."""
+    out: dict[str, str] = {}
+    if not isinstance(config, dict):
+        return out
+    aliases = config.get('model_aliases')
+    if not isinstance(aliases, dict):
+        return out
+    for raw_name, entry in aliases.items():
+        if not isinstance(entry, dict) or not entry.get('reasoning'):
+            continue
+        lvl = str(entry['reasoning']).strip().lower()
+        if lvl in REASONING_LEVELS:
+            out[str(raw_name).strip().lower()] = lvl
+    return out
+
+
+def category_fallback_chain_from_config(config: dict | None, category: str | None) -> list[dict]:
+    """Return ordered, deduplicated [primary, *category_fallbacks, *global_fallbacks]."""
+    if not isinstance(config, dict):
+        return []
+    default_provider = str((config.get('model') or {}).get('provider') or '').strip()
+    raw_entries: list[dict] = []
+
+    if category:
+        cat_key = category.strip().lower()
+        aliases = config.get('model_aliases')
+        if isinstance(aliases, dict):
+            for k, v in aliases.items():
+                if str(k).strip().lower() == cat_key and isinstance(v, dict):
+                    primary = _normalize_route_entry(v, default_provider=default_provider)
+                    if primary:
+                        raw_entries.append(primary)
+                    cat_fbs = v.get('fallback_providers')
+                    if isinstance(cat_fbs, list):
+                        for fb in cat_fbs:
+                            norm = _normalize_route_entry(fb, default_provider=default_provider)
+                            if norm:
+                                raw_entries.append(norm)
+                    break
+
+    global_fbs = config.get('fallback_providers')
+    if isinstance(global_fbs, list):
+        for fb in global_fbs:
+            norm = _normalize_route_entry(fb, default_provider=default_provider)
+            if norm:
+                raw_entries.append(norm)
+
+    deduped: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in raw_entries:
+        key = (entry['provider'].lower(), entry['model'].lower())
+        if key not in seen:
+            seen.add(key)
+            deduped.append(entry)
+    return deduped
+
+
+def load_exec_config(path: Path | None) -> dict | None:
     if path is None or not path.exists():
         return None
     try:
-        config = _load_yaml_dict(path.read_text(encoding='utf-8'))
+        return _load_yaml_dict(path.read_text(encoding='utf-8'))
     except Exception:
+        return None
+
+
+def load_alias_names(path: Path | None) -> frozenset[str] | None:
+    """Read only alias names from a profile config. ``None`` means routing is unknown."""
+    config = load_exec_config(path)
+    if config is None:
         return None
     return alias_names_from_config(config)
 
 
 class CategoryRouter:
-    """Resolves category -> Hermes CLI args; validates category names against exec aliases."""
+    """Resolves category -> Hermes CLI args; validates categories and merges per-category + global fallback chains."""
 
-    def __init__(self, *, alias_names=None, reasoning: dict | None = None):
+    def __init__(self, *, alias_names=None, reasoning: dict | None = None,
+                 config_source=None, clock=None):
         # alias_names: frozenset | None | callable returning either (re-read lazily so
         # editing ancor-exec/config.yaml needs no ANCOR restart).
         self._alias_source = alias_names
+        self._config_source = config_source
+        self._clock = clock or time.monotonic
+        self._provider_cooldowns: dict[str, float] = {}
         self.reasoning = {}
         for key, level in (reasoning or {}).items():
             cat = normalize_category(key)
@@ -112,12 +199,46 @@ class CategoryRouter:
         reasoning = (ctx.get_config('category_reasoning') if ctx else None) or {}
         if not isinstance(reasoning, dict):
             raise ValueError('category_reasoning must be a mapping of category -> reasoning level')
-        return cls(alias_names=lambda: load_alias_names(path), reasoning=reasoning)
+        return cls(
+            alias_names=lambda: load_alias_names(path),
+            reasoning=reasoning,
+            config_source=lambda: load_exec_config(path),
+        )
+
+    def _config(self) -> dict | None:
+        src = self._config_source
+        return src() if callable(src) else src
 
     def alias_names(self) -> frozenset[str] | None:
         source = self._alias_source
+        if source is None and self._config_source is not None:
+            cfg = self._config()
+            return None if cfg is None else alias_names_from_config(cfg)
         value = source() if callable(source) else source
         return None if value is None else frozenset(value)
+
+    def fallback_chain(self, category: str | None) -> list[dict]:
+        """Effective ordered fallback chain: [primary, *category_fallbacks, *global_fallbacks] (deduped)."""
+        return category_fallback_chain_from_config(self._config(), category)
+
+    def mark_provider_cooldown(self, provider: str, seconds: float = DEFAULT_PROVIDER_COOLDOWN_SECONDS) -> None:
+        if not provider:
+            return
+        self._provider_cooldowns[provider.strip().lower()] = float(self._clock()) + max(0.0, float(seconds))
+
+    def is_provider_in_cooldown(self, provider: str | None) -> bool:
+        if not provider:
+            return False
+        exp = self._provider_cooldowns.get(provider.strip().lower(), 0.0)
+        return float(self._clock()) < exp
+
+    def reasoning_level(self, category: str | None) -> str | None:
+        if not category:
+            return None
+        cat = category.strip().lower()
+        if cat in self.reasoning:
+            return self.reasoning[cat]
+        return alias_reasoning_from_config(self._config()).get(cat)
 
     def validate(self, category: str | None) -> str | None:
         category = normalize_category(category)
@@ -141,11 +262,23 @@ class CategoryRouter:
             return candidate
         return None
 
-    def cli_args(self, category: str | None) -> list[str]:
+    def cli_args(self, category: str | None, *, resume: bool = False) -> list[str]:
         if not category:
             return []
+        level = self.reasoning_level(category)
+        if not resume:
+            chain = self.fallback_chain(category)
+            if chain and self.is_provider_in_cooldown(chain[0].get('provider')):
+                for entry in chain[1:]:
+                    if not self.is_provider_in_cooldown(entry.get('provider')):
+                        args = ['-m', entry['model']]
+                        if entry.get('provider'):
+                            args.extend(['--provider', entry['provider']])
+                        eff_level = entry.get('reasoning') or level
+                        if eff_level:
+                            args.extend(['--reasoning', eff_level])
+                        return args
         args = ['-m', category]
-        level = self.reasoning.get(category)
         if level:
             args.extend(['--reasoning', level])
         return args

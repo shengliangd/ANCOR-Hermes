@@ -418,7 +418,8 @@ class GoalRunner:
             raise RuntimeError(
                 f"goal {goal['goal_id']} category {category!r} no longer exists in model_aliases "
                 'or the exec profile config is unavailable')
-        model_args = router.cli_args(category) if router is not None else (['-m', category] if category else [])
+        model_args = (router.cli_args(category, resume=resume)
+                      if router is not None else (['-m', category] if category else []))
         return self.command_builder(self.profile, goal['session_id'], prompt,
                                     resume=resume, model_args=model_args)
 
@@ -521,6 +522,17 @@ class GoalRunner:
                     self.goal_store.request_execution_stop(goal_id)
                     await asyncio.to_thread(self.goal_store.settle_stops, goal_ids=[goal_id])
                 self.goal_store.finish_run(goal_id, signals, error=error, interrupted=interrupted)
+                if self.category_router is not None:
+                    try:
+                        refreshed = self.goal_store.get_goal(goal_id)
+                        obs = refreshed.get('observed_models') or []
+                        if len(obs) >= 2:
+                            first_p = (obs[0].get('provider') or '').strip().lower()
+                            last_p = (obs[-1].get('provider') or '').strip().lower()
+                            if first_p and last_p and first_p != last_p:
+                                self.category_router.mark_provider_cooldown(first_p)
+                    except Exception:
+                        pass
 
     async def dispatch_ready(self) -> list[str]:
         # Keep ownership until the completed task has been inspected. A second
