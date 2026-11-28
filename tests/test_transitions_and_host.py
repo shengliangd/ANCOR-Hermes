@@ -184,7 +184,11 @@ def test_host_scan_visualizer_and_readonly_dashboard(tmp_path, monkeypatch):
     assert 'active_usage' in packet['resources']
 
     assert 'g_dash' in render_text_tree(store_path)
-    assert 'Low priority' in render_html(store_path)
+    html = render_html(store_path)
+    assert 'Low priority' in html
+    assert 'id="ancor-data"' in html
+    assert 'id="treeContainer"' in html
+    assert 'id="detailPane"' in html
 
     monkeypatch.setenv('ANCOR_STORE_PATH', str(store_path))
     app = FastAPI()
