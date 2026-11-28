@@ -245,3 +245,61 @@ def test_reconciler_discovers_later_exit_of_orphan_without_repeating_wakeup(tmp_
     assert reconciler.reconcile()['recovered_running'] == ['g_watch']
     assert reconciler.reconcile()['recovered_running'] == []
     assert len(goals.get_goal('g_watch')['pending_signals']) == 1
+
+
+def test_wait_goal_wakes_on_timer_and_watch_path(tmp_path):
+    now = [1000.0]
+    _, goals, backend, _ = _create_goal(tmp_path, now)
+    marker = tmp_path / 'done.flag'
+    res = goals.wait_goal('g_watch', wake_after_seconds=600, watch_path=str(marker), reason='wait for eval')
+    assert res['status'] == 'waiting_external'
+    assert goals.get_goal('g_watch')['status'] == 'waiting_external'
+    watcher = GoalWatcher(goals, backend, clock=lambda: now[0])
+    assert watcher.poll()['woken_goals'] == []
+    marker.write_text('ok')
+    polled = watcher.poll()
+    assert polled['woken_goals'] == ['g_watch']
+    assert any(t['event'] == 'watch_path_ready' for t in polled['transitions'])
+    assert goals.get_goal('g_watch')['status'] == 'running'
+    assert goals.get_goal('g_watch')['needs_wake'] is True
+
+    # Timer wake
+    goals.consume_signals('g_watch')
+    goals.wait_goal('g_watch', wake_after_seconds=300, reason='check again')
+    now[0] = 1301.0
+    polled2 = watcher.poll()
+    assert polled2['woken_goals'] == ['g_watch']
+    assert any(t['event'] == 'scheduled_wake' for t in polled2['transitions'])
+
+
+def test_resource_release_and_terminal_goal_auto_release(tmp_path):
+    now = [1000.0]
+    _, goals, _, _ = _create_goal(tmp_path, now)
+    goals.register_resource_usage('g_watch', handle_id='h1', usage={'gpu': 1})
+    goals.register_resource_usage('g_watch', handle_id='h2', usage={'gpu': 1})
+    assert goals.total_active_usage()['active_usage']['gpu'] == 2.0
+
+    rel = goals.release_resource_usage('g_watch', handle_id='h1', status='succeeded')
+    assert rel['released'] == ['h1']
+    assert goals.total_active_usage()['active_usage']['gpu'] == 1.0
+
+    goals.report_result('g_watch', {
+        'goal_id': 'g_watch', 'request_generation': 1,
+        'status': 'completed', 'summary': 'done',
+    })
+    # Unreleased live handle on completed goal stays accounted until explicitly released
+    assert goals.total_active_usage()['active_usage']['gpu'] == 1.0
+    rel2 = goals.release_resource_usage('g_watch', status='released', detail='confirmed stopped')
+    assert rel2['released'] == ['h2']
+    assert goals.total_active_usage()['active_usage'] == {}
+    assert goals.subtree_active_usage('g_watch') == {}
+
+
+def test_update_goal_budget_dynamically(tmp_path):
+    now = [1000.0]
+    _, goals, _, _ = _create_goal(tmp_path, now)
+    updated = goals.update_goal_budget(
+        'g_watch', {'limits': {'gpu': 1}, 'constraints': ['yield 1 GPU']}, reason='yield to high priority')
+    assert updated['budget']['limits']['gpu'] == 1
+    assert updated['needs_wake'] is True
+    assert any(s['kind'] == 'steer' for s in updated['pending_signals'])

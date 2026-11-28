@@ -60,6 +60,13 @@ def init_goal_tables(db) -> None:
             title TEXT NOT NULL,
             profile TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS goal_waits (
+            goal_id TEXT PRIMARY KEY,
+            wake_at REAL,
+            watch_path TEXT,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS judge_deliveries (
             event_id INTEGER PRIMARY KEY,
             attempts INTEGER NOT NULL DEFAULT 0,
@@ -774,10 +781,89 @@ class GoalStore:
                                (new_gen, goal['request_id']))
             needs_wake = 0 if goal['status'] == 'paused' else 1
             new_status = 'running' if (goal['status'] == 'waiting_external' and needs_wake) else goal['status']
+            if needs_wake:
+                db.execute('DELETE FROM goal_waits WHERE goal_id=?', (goal_id,))
             db.execute(
                 'UPDATE active_goals SET generation=?, pending_signals=?, needs_wake=?, '
                 'status=?, updated_at=? WHERE goal_id=?',
                 (new_gen, json.dumps(signals, ensure_ascii=False), needs_wake, new_status, now, goal_id))
+            return self._get(db, goal_id)
+
+    def wait_goal(self, goal_id: str, *, wake_after_seconds: float | None = None,
+                  wake_at: float | None = None, watch_path: str | None = None,
+                  reason: str = '') -> dict:
+        """Park a running goal in waiting_external until wake_at or watch_path exists (zero LLM cost)."""
+        now = float(self.clock())
+        target_wake = None
+        if wake_after_seconds is not None:
+            if isinstance(wake_after_seconds, bool) or not isinstance(wake_after_seconds, (int, float)) or not math.isfinite(wake_after_seconds) or wake_after_seconds <= 0:
+                raise ValueError('wake_after_seconds must be a positive number')
+            target_wake = now + float(wake_after_seconds)
+        if wake_at is not None:
+            if isinstance(wake_at, bool) or not isinstance(wake_at, (int, float)) or not math.isfinite(wake_at) or wake_at <= 0:
+                raise ValueError('wake_at must be a positive epoch timestamp')
+            target_wake = float(wake_at) if target_wake is None else min(target_wake, float(wake_at))
+        clean_path = None
+        if watch_path is not None and str(watch_path).strip():
+            clean_path = str(Path(str(watch_path).strip()).expanduser())
+        if target_wake is None and clean_path is None:
+            raise ValueError('wait_goal requires wake_after_seconds, wake_at, or watch_path')
+        clean_reason = str(reason or '').strip()
+        with self.store._transaction() as db:
+            goal = self._get(db, goal_id)
+            if goal['status'] != 'running':
+                raise RuntimeError(f"goal {goal_id} is {goal['status']}, not running")
+            if db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?', (goal_id,)).fetchone():
+                raise RuntimeError('execution stop is unconfirmed; wait rejected')
+            db.execute(
+                'INSERT OR REPLACE INTO goal_waits(goal_id, wake_at, watch_path, reason, created_at) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (goal_id, target_wake, clean_path, clean_reason, now))
+            db.execute(
+                "UPDATE active_goals SET status='waiting_external', needs_wake=0, updated_at=? WHERE goal_id=?",
+                (now, goal_id))
+            db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
+            return {
+                'goal_id': goal_id,
+                'status': 'waiting_external',
+                'wake_at': target_wake,
+                'watch_path': clean_path,
+                'reason': clean_reason,
+            }
+
+    def update_goal_budget(self, goal_id: str, budget: dict, *, caller_goal_id: str = 'root',
+                           reason: str | None = None) -> dict:
+        """Dynamically update a non-terminal goal's 3-layer budget (e.g. to yield resources to higher-priority work)."""
+        normalized = _parse_budget(budget)
+        now = float(self.clock())
+        with self.store._transaction() as db:
+            self._require_authority(db, caller_goal_id, goal_id)
+            goal = self._get(db, goal_id)
+            if goal['status'] in TERMINAL_GOAL_STATUSES:
+                raise RuntimeError(f"cannot update budget of terminal goal {goal_id} ({goal['status']})")
+            if goal['parent_goal_id'] != 'root':
+                parent = self._get(db, goal['parent_goal_id'])
+                _check_attenuation(parent['budget'], normalized)
+            if self.global_limits:
+                for key, limit_val in normalized.get('limits', {}).items():
+                    if key in self.global_limits and float(limit_val) > float(self.global_limits[key]):
+                        raise QuotaExceededError(
+                            f"budget limit {key}={limit_val} exceeds global limit {self.global_limits[key]}")
+            db.execute(
+                'UPDATE active_goals SET budget=?, updated_at=? WHERE goal_id=?',
+                (json.dumps(normalized, ensure_ascii=False), now, goal_id))
+            if reason and goal['status'] != 'paused':
+                signals = list(goal['pending_signals'])
+                signals.append({
+                    'kind': 'steer',
+                    'payload': {'message': f'Budget updated: {reason}', 'budget': normalized},
+                    'at': now,
+                })
+                new_status = 'running' if goal['status'] == 'waiting_external' else goal['status']
+                db.execute('DELETE FROM goal_waits WHERE goal_id=?', (goal_id,))
+                db.execute(
+                    'UPDATE active_goals SET pending_signals=?, needs_wake=1, status=?, updated_at=? WHERE goal_id=?',
+                    (json.dumps(signals, ensure_ascii=False), new_status, now, goal_id))
             return self._get(db, goal_id)
 
     def report_result(self, goal_id: str, result: dict) -> dict:
@@ -803,6 +889,7 @@ class GoalStore:
         # Execution metadata comes from Hermes hooks, never from the reporting agent.
         validated.update(category=goal.get('category'),
                          observed_models=goal.get('observed_models') or [])
+        db.execute('DELETE FROM goal_waits WHERE goal_id=?', (goal_id,))
         db.execute(
             'UPDATE active_goals SET status=?, paused_by_ancestor=NULL, '
             'needs_wake=0, result_json=?, updated_at=? WHERE goal_id=?',
@@ -1029,6 +1116,38 @@ class GoalStore:
                         totals[key] = totals.get(key, 0.0) + float(amt)
         return totals
 
+    def release_resource_usage(self, goal_id: str, *, handle_id: str | None = None,
+                               status: str = 'released', detail: str | None = None) -> dict:
+        """Release one or all active external resource handles owned by a goal."""
+        if status not in {'released', 'succeeded', 'failed', 'cancelled'}:
+            raise ValueError(f'invalid release status {status!r}')
+        now = float(self.clock())
+        released: list[str] = []
+        with self.store._transaction() as db:
+            goal = self._get(db, goal_id)
+            updated = []
+            for h in goal['external_job_ids']:
+                is_active = h.get('status', 'running') in ACTIVE_HANDLE_STATUSES
+                matches = handle_id is None or h.get('handle_id') == handle_id
+                if is_active and matches:
+                    released.append(h['handle_id'])
+                    updated.append({
+                        **h,
+                        'status': status,
+                        'detail': detail if detail is not None else h.get('detail'),
+                        'finished_at': now,
+                    })
+                else:
+                    updated.append(h)
+            if handle_id is not None and not released:
+                found = any(h.get('handle_id') == handle_id for h in goal['external_job_ids'])
+                if not found:
+                    raise KeyError(f'unknown handle_id {handle_id!r} on goal {goal_id}')
+            db.execute(
+                'UPDATE active_goals SET external_job_ids=?, updated_at=? WHERE goal_id=?',
+                (json.dumps(updated, ensure_ascii=False), now, goal_id))
+            return {'goal_id': goal_id, 'released': released, 'status': status}
+
     def subtree_active_usage(self, goal_id: str) -> dict[str, float]:
         """Compute active resource usage map across goal_id and its entire subtree."""
         with self.store._transaction() as db:
@@ -1189,6 +1308,8 @@ class GoalStore:
             goal = self._get(db, goal_id)
             db.execute('UPDATE active_goals SET pid=NULL WHERE goal_id=?', (goal_id,))
             if goal['status'] != 'running':
+                if goal['status'] == 'waiting_external' and error is None and not interrupted:
+                    db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
                 if goal['status'] == 'paused' and signals:
                     db.execute('UPDATE active_goals SET pending_signals=? WHERE goal_id=?',
                                (json.dumps([*signals, *goal['pending_signals']], ensure_ascii=False), goal_id))

@@ -98,6 +98,7 @@ ROOT_MUTATION_TOOLS = frozenset({
     'ancor_completion_send',
     'ancor_goal_spawn', 'ancor_goal_signal',
     'ancor_goal_pause', 'ancor_goal_resume', 'ancor_goal_stop',
+    'ancor_goal_update_budget',
     'ancor_delivery_submit',
 })
 
@@ -181,6 +182,30 @@ def build_surface(*, role: str, methods: dict, change_properties: dict):
             methods['goal_report'],
         )
         add(
+            'ancor_goal_wait',
+            'Park this running /goal in waiting_external until wake_after_seconds, wake_at, or watch_path exists (zero LLM cost). '
+            'Use this instead of sleeping inside a session for long-running external jobs.',
+            {
+                'wake_after_seconds': {'type': 'number', 'exclusiveMinimum': 0},
+                'wake_at': {'type': 'number', 'exclusiveMinimum': 0},
+                'watch_path': OPTIONAL_TEXT,
+                'reason': OPTIONAL_TEXT,
+            },
+            [],
+            methods['goal_wait'],
+        )
+        add(
+            'ancor_goal_update_budget',
+            'Update the 3-layer budget of a non-terminal child /goal within your own budget limits.',
+            {
+                'goal_id': TEXT,
+                'budget': GENERIC_BUDGET_SCHEMA,
+                'reason': OPTIONAL_TEXT,
+            },
+            ['goal_id', 'budget'],
+            methods['goal_update_budget'],
+        )
+        add(
             'ancor_resource_acquire',
             'Acquire tracked external resources/jobs through the generic GOAL_ID QuotaGuard (checks limits & allowed).',
             {
@@ -192,6 +217,17 @@ def build_surface(*, role: str, methods: dict, change_properties: dict):
             },
             [],
             methods['resource_acquire'],
+        )
+        add(
+            'ancor_resource_release',
+            'Release one (or all, when handle_id is omitted) tracked external resource handles owned by this /goal.',
+            {
+                'handle_id': OPTIONAL_TEXT,
+                'status': {'type': 'string', 'enum': ['released', 'succeeded', 'failed', 'cancelled']},
+                'detail': OPTIONAL_TEXT,
+            },
+            [],
+            methods['resource_release'],
         )
         return definitions, handlers
 
@@ -434,6 +470,25 @@ def build_surface(*, role: str, methods: dict, change_properties: dict):
         'Deterministically cancel a goal subtree, terminating local PIDs and cancelling external handles.',
         {'goal_id': TEXT, 'reason': OPTIONAL_TEXT}, ['goal_id'],
         methods['goal_stop'],
+    )
+    add(
+        'ancor_goal_update_budget',
+        'Dynamically update a non-terminal goal budget (e.g. tighten lower-priority limits so higher-priority work can proceed).',
+        {'goal_id': TEXT, 'budget': GENERIC_BUDGET_SCHEMA, 'reason': OPTIONAL_TEXT},
+        ['goal_id', 'budget'],
+        methods['goal_update_budget'],
+    )
+    add(
+        'ancor_resource_release',
+        'Release one (or all, when handle_id is omitted) tracked external resource handles on any goal (including terminal goals whose external jobs have stopped).',
+        {
+            'goal_id': TEXT,
+            'handle_id': OPTIONAL_TEXT,
+            'status': {'type': 'string', 'enum': ['released', 'succeeded', 'failed', 'cancelled']},
+            'detail': OPTIONAL_TEXT,
+        },
+        ['goal_id'],
+        methods['resource_release'],
     )
     add(
         'ancor_delivery_submit',

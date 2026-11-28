@@ -82,32 +82,22 @@ def test_all_installs_and_restart_use_explicit_root(installer, tmp_path, monkeyp
     assert installer.main() == 0
 
     calls = [json.loads(line) for line in (tmp_path / 'calls.jsonl').read_text().splitlines()]
-    assert [call['args'][1] for call in calls] == [
-        owner, 'ancor-interactor', 'ancor-coordinator', 'ancor-worker', owner]
-    assert all(call['args'][2:4] == ['plugins', 'install'] for call in calls[:4])
+    assert [call['args'][1] for call in calls] == [owner, 'ancor-exec', owner]
+    assert all(call['args'][2:4] == ['plugins', 'install'] for call in calls[:2])
     assert calls[-1]['args'][2:] == ['gateway', 'restart']
     assert all(call['root'] == str(target) for call in calls)
     assert all(call['sentinel'] == 'preserved' for call in calls)
     assert os.environ['HERMES_HOME'] == ambient
     assert not Path(ambient).exists()
-    for profile in [owner, 'ancor-interactor', 'ancor-coordinator', 'ancor-worker']:
+    for profile in [owner, 'ancor-exec']:
         home = target if profile == 'default' else target / 'profiles' / profile
         assert (home / 'plugins/ancor/installed').is_file()
     repo = Path(installer.__file__).parents[1]
-    for role, skill in installer.ROLES.items():
-        home = target / 'profiles' / f'ancor-{role}'
-        assert (home / 'SOUL.md').read_bytes() == (repo / 'roles' / f'ancor-{role}' / 'SOUL.md').read_bytes()
-        assert (home / 'skills' / skill / 'SKILL.md').read_bytes() == (repo / 'skills' / skill / 'SKILL.md').read_bytes()
-    command_home = target / 'profiles' / 'ancor-interactor'
-    assert not (command_home / 'skills/ancor-interactor').exists()
-    backups = list((target / 'backups').glob('ancor-install-*'))
-    assert any((path / 'prompts/ancor-interactor/skills/ancor-interactor/SKILL.md').is_file()
-               for path in backups)
+    owner_home = target if owner == 'default' else target / 'profiles' / owner
     for relative in ('SKILL.md', 'references/REQUEST_STANDARD.md'):
-        assert ((command_home / 'skills/ancor' / relative).read_bytes()
+        assert ((owner_home / 'skills/ancor' / relative).read_bytes()
                 == (repo / 'skills/ancor' / relative).read_bytes())
-    for profile in ('ancor-coordinator', 'ancor-worker'):
-        assert not (target / 'profiles' / profile / 'skills/ancor').exists()
+    assert not (target / 'profiles/ancor-exec/skills/ancor').exists()
 
 
 def test_dry_run_shows_root_without_installing(installer, tmp_path, monkeypatch, capsys):
@@ -119,7 +109,7 @@ def test_dry_run_shows_root_without_installing(installer, tmp_path, monkeypatch,
 
     commands = [shlex.split(line[2:]) for line in capsys.readouterr().out.splitlines()
                 if line.startswith('+ ')]
-    assert len(commands) == 5
+    assert len(commands) == 3
     assert all(command[:2] == ['env', f'HERMES_HOME={tmp_path / "chosen instance"}']
                for command in commands)
     assert not (tmp_path / 'calls.jsonl').exists()

@@ -515,7 +515,35 @@ def _register_role(ctx, *, scan_runner=None, judge_runner=None, role_override=No
 
     def goal_report(args, **_native):
         gid = _caller_goal_id()
-        return service.goal_store.report_result(gid, {'goal_id': gid, **args})
+        try:
+            return service.goal_store.report_result(gid, {'goal_id': gid, **args})
+        except RuntimeError as exc:
+            if 'is already terminal' in str(exc):
+                existing = service.goal_store.get_goal(gid)
+                log.info('ANCOR goal_report ignored for already-terminal goal %s (%s)', gid, existing['status'])
+                return {
+                    'goal_id': gid,
+                    'already_terminal': True,
+                    'status': existing['status'],
+                    'result': existing.get('result'),
+                }
+            raise
+
+    def goal_wait(args, **_native):
+        gid = _caller_goal_id()
+        return service.goal_store.wait_goal(
+            gid,
+            wake_after_seconds=args.get('wake_after_seconds'),
+            wake_at=args.get('wake_at'),
+            watch_path=args.get('watch_path'),
+            reason=args.get('reason', ''),
+        )
+
+    def goal_update_budget(args, **_native):
+        caller = _caller_goal_id()
+        return service.goal_store.update_goal_budget(
+            args['goal_id'], args['budget'],
+            caller_goal_id=caller, reason=args.get('reason'))
 
     def resource_acquire(args, **_native):
         gid = _caller_goal_id()
@@ -524,6 +552,21 @@ def _register_role(ctx, *, scan_runner=None, judge_runner=None, role_override=No
             usage=args.get('usage'), tags=args.get('tags'),
             handle_id=args.get('handle_id'), command=args.get('command'),
             goal_id=gid, metadata=args.get('metadata'))
+
+    def resource_release(args, **_native):
+        gid = args['goal_id'] if (root_role and args.get('goal_id')) else _caller_goal_id()
+        status = args.get('status', 'released')
+        res = service.goal_store.release_resource_usage(
+            gid, handle_id=args.get('handle_id'), status=status, detail=args.get('detail'))
+        backend = service.cluster_backend
+        if hasattr(backend, 'set_status'):
+            backend_status = 'cancelled' if status == 'released' else status
+            for hid in res.get('released', []):
+                try:
+                    backend.set_status(hid, backend_status, detail=args.get('detail'))
+                except KeyError:
+                    pass
+        return res
 
     def cluster_status(_args, **_native):
         return {
@@ -591,8 +634,11 @@ def _register_role(ctx, *, scan_runner=None, judge_runner=None, role_override=No
         'goal_pause': goal_pause,
         'goal_resume': goal_resume,
         'goal_stop': goal_stop,
+        'goal_wait': goal_wait,
+        'goal_update_budget': goal_update_budget,
         'goal_report': goal_report,
         'resource_acquire': resource_acquire,
+        'resource_release': resource_release,
         'cluster_status': cluster_status,
         'delivery_submit': delivery_submit,
         'judge_read_request': judge_read_request,

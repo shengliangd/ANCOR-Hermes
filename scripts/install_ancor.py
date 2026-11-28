@@ -77,18 +77,19 @@ def main() -> int:
         raise SystemExit(f"ref is not an exact commit: {ref}")
 
     source = f"file://{repo}#ancor"
-    profiles = [args.owner_profile, "ancor-interactor", "ancor-coordinator", "ancor-worker"]
+    profiles = [args.owner_profile, "ancor-exec"]
     if len(set(profiles)) != len(profiles):
-        raise SystemExit("owner profile must be distinct from role profiles")
+        raise SystemExit("owner profile must be distinct from exec profile")
     prompt_sources: dict[str, Path] = {}
-    for role, skill in ROLES.items():
-        prompt_sources[f"ancor-{role}/SOUL.md"] = repo / "roles" / f"ancor-{role}" / "SOUL.md"
-        skill_dir = repo / "skills" / skill
-        for source_path in sorted(skill_dir.rglob("*")):
-            if not source_path.is_file() or "__pycache__" in source_path.parts:
-                continue
-            relative = source_path.relative_to(repo / "skills").as_posix()
-            prompt_sources[f"ancor-{role}/skills/{relative}"] = source_path
+    exec_soul = repo / "roles" / "ancor-exec" / "SOUL.md"
+    if exec_soul.is_file():
+        prompt_sources["ancor-exec/SOUL.md"] = exec_soul
+    skill_dir = repo / "skills" / "ancor"
+    for source_path in sorted(skill_dir.rglob("*")):
+        if not source_path.is_file() or "__pycache__" in source_path.parts:
+            continue
+        relative = source_path.relative_to(repo / "skills").as_posix()
+        prompt_sources[f"{args.owner_profile}/skills/{relative}"] = source_path
     missing = [str(path) for path in prompt_sources.values() if not path.is_file()]
     if missing:
         raise SystemExit("missing release files: " + ", ".join(missing))

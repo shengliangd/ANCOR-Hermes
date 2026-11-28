@@ -39,8 +39,11 @@ provides_tools:
   - ancor_goal_pause
   - ancor_goal_resume
   - ancor_goal_stop
+  - ancor_goal_wait
+  - ancor_goal_update_budget
   - ancor_goal_report
   - ancor_resource_acquire
+  - ancor_resource_release
   - ancor_cluster_status
   - ancor_delivery_submit
   - ancor_judge_verdict

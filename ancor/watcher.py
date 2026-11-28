@@ -204,11 +204,39 @@ class GoalWatcher:
                 timeouts.append(timeout_payload)
                 signals.append({'kind': 'watcher_event', 'payload': timeout_payload, 'at': now})
 
+            wait_cleared = False
+            if goal['status'] != 'paused':
+                with self.goal_store.store._transaction() as db:
+                    wait_row = db.execute(
+                        'SELECT wake_at, watch_path, reason FROM goal_waits WHERE goal_id=?',
+                        (gid,)).fetchone()
+                if wait_row is not None:
+                    w_at = wait_row['wake_at']
+                    w_path = wait_row['watch_path']
+                    w_reason = wait_row['reason'] or ''
+                    path_ready = bool(w_path and Path(w_path).exists())
+                    time_ready = w_at is not None and now >= float(w_at)
+                    if path_ready or time_ready:
+                        changed = True
+                        wake_this = True
+                        wait_cleared = True
+                        ev_name = 'watch_path_ready' if path_ready else 'scheduled_wake'
+                        wake_payload = {
+                            'event': ev_name,
+                            'goal_id': gid,
+                            'reason': w_reason,
+                            **({'watch_path': w_path} if path_ready else {'wake_at': w_at}),
+                        }
+                        transitions.append(wake_payload)
+                        signals.append({'kind': 'watcher_event', 'payload': wake_payload, 'at': now})
+
             if changed:
                 with self.goal_store.store._transaction() as db:
                     current = self.goal_store._get(db, gid)
                     if current['status'] not in {'running', 'waiting_external', 'paused'}:
                         continue
+                    if wait_cleared:
+                        db.execute('DELETE FROM goal_waits WHERE goal_id=?', (gid,))
                     patches = {h['handle_id']: h for h in handles
                                if h.get('status') in TERMINAL_HANDLE_STATUSES}
                     handles = [patches.get(h['handle_id'], h)
@@ -345,8 +373,9 @@ def build_goal_prompt(goal: dict, signals: list[dict], *, model_categories=None)
         'Execute or continue this ANCOR /goal within your authorized scope and budget '
         '(limits, allowed, and natural-language constraints). '
         'Read authoritative requirement text directly with ancor_request_read when needed. '
-        'Use ancor_resource_acquire for tracked external resources/jobs, ancor_goal_spawn '
-        'only when parallel/nested sub-goals are needed, and ancor_goal_report when done/blocked/infeasible.\n'
+        'Use ancor_resource_acquire / ancor_resource_release for tracked resource accounting, '
+        'ancor_goal_wait(wake_after_seconds=..., watch_path=...) to park and resume across long external jobs instead of sleeping in-session, '
+        'ancor_goal_spawn only when parallel/nested sub-goals are needed, and ancor_goal_report when done/blocked/infeasible.\n'
         + json.dumps(packet, ensure_ascii=False, separators=(',', ':'))
     )
 
