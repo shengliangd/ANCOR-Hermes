@@ -461,9 +461,9 @@ details.fold[open] summary { margin-bottom: 8px; }
   <div class="spacer"></div>
   <input id="searchBox" class="search" type="search" placeholder="搜索需求 / Goal / 摘要…">
   <div class="seg" id="scopeFilter">
-    <button data-scope="open" class="active">进行中</button>
+    <button data-scope="open" class="active">未关闭</button>
+    <button data-scope="attention">需介入</button>
     <button data-scope="all">全部</button>
-    <button data-scope="questions">待回答</button>
   </div>
   <button id="toggleTerminalBtn" class="icon-btn" title="隐藏/显示已终态 Goal">隐藏终态 Goal</button>
   <button id="themeBtn" class="icon-btn" title="切换明暗主题">☀/☾</button>
@@ -574,15 +574,18 @@ details.fold[open] summary { margin-bottom: 8px; }
 
   // Top stats
   function renderTopStats() {
-    const openReqs = (DATA.requests || []).filter(r => !TERMINAL_REQ.has(r.status)).length;
+    const openReqs = (DATA.requests || []).filter(r => !TERMINAL_REQ.has(r.status));
+    const attentionReqs = openReqs.filter(r =>
+      r.status === 'awaiting_acceptance' ||
+      (questionsByReq.get(r.id) || []).some(q => q.state === 'open')
+    ).length;
     const runningGoals = (DATA.goals || []).filter(g => g.status === 'running' || g.status === 'waiting_external').length;
-    const openQs = (DATA.questions || []).filter(q => q.state === 'open').length;
     let totalGpu = 0;
     for (const g of DATA.goals || []) totalGpu += activeGpu(g);
     document.getElementById('topStats').innerHTML = [
-      `<span class="stat-pill ok">活跃需求 ${openReqs}</span>`,
+      `<span class="stat-pill ok">未关闭 ${openReqs.length}</span>`,
+      attentionReqs ? `<span class="stat-pill warn">需介入 ${attentionReqs}</span>` : `<span class="stat-pill">需介入 0</span>`,
       `<span class="stat-pill info">运行/等待 Goal ${runningGoals}</span>`,
-      openQs ? `<span class="stat-pill warn">待答问题 ${openQs}</span>` : `<span class="stat-pill">待答问题 0</span>`,
       `<span class="stat-pill">账面 GPU ${totalGpu}</span>`,
     ].join('');
   }
@@ -608,8 +611,9 @@ details.fold[open] summary { margin-bottom: 8px; }
 
     for (const r of reqs) {
       const openQs = (questionsByReq.get(r.id) || []).filter(x => x.state === 'open');
+      const needsAttention = !TERMINAL_REQ.has(r.status) && (openQs.length > 0 || r.status === 'awaiting_acceptance');
       if (state.scope === 'open' && TERMINAL_REQ.has(r.status)) continue;
-      if (state.scope === 'questions' && openQs.length === 0) continue;
+      if (state.scope === 'attention' && !needsAttention) continue;
 
       const allReqGoals = goalsByReq.get(r.id) || [];
       const selfMatch = reqMatchesQuery(r, q);
