@@ -757,6 +757,11 @@ class GoalStore:
             raise ValueError(f'unsupported signal kind {kind!r}')
         now = float(self.clock())
         with self.store._transaction() as db:
+            if goal_id == 'root':
+                raise PermissionError(
+                    "ancor_goal_signal is parent->child only and cannot target 'root'; "
+                    "to report upward to parent/root, use ancor_goal_report"
+                )
             goal = self._get(db, goal_id)
             if kind in {'steer', 'update_generation'}:
                 self._require_authority(db, caller_goal_id, goal_id)
@@ -820,8 +825,8 @@ class GoalStore:
         clean_reason = str(reason or '').strip()
         with self.store._transaction() as db:
             goal = self._get(db, goal_id)
-            if goal['status'] != 'running':
-                raise RuntimeError(f"goal {goal_id} is {goal['status']}, not running")
+            if goal['status'] not in {'running', 'waiting_external'}:
+                raise RuntimeError(f"goal {goal_id} is {goal['status']}, not running or waiting_external")
             if db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?', (goal_id,)).fetchone():
                 raise RuntimeError('execution stop is unconfirmed; wait rejected')
             db.execute(
@@ -838,6 +843,10 @@ class GoalStore:
                 'wake_at': target_wake,
                 'watch_path': clean_path,
                 'reason': clean_reason,
+                'hint': (
+                    'Goal is now parked in waiting_external; end this turn now without further '
+                    'tool calls so the watcher can resume you when ready.'
+                ),
             }
 
     def update_goal_budget(self, goal_id: str, budget: dict, *, caller_goal_id: str = 'root',

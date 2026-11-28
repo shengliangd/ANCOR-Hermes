@@ -391,3 +391,24 @@ def test_concurrent_resource_reservations_are_atomic(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(acquire, (1, 2))) == [False, True]
     assert goals.subtree_active_usage('limited') == {'gpu': 1}
+
+
+def test_wait_goal_idempotent_while_waiting_and_signal_root_guidance(tmp_path):
+    store = Store(tmp_path / 'requests.db')
+    req = _make_request(store)
+    goals = GoalStore(store)
+    goals.spawn_goal(_repair_spec(req, 'g_wait'))
+
+    first = goals.wait_goal('g_wait', wake_after_seconds=60, reason='first')
+    assert first['status'] == 'waiting_external'
+    assert 'end this turn now' in first['hint']
+
+    # Calling wait_goal again in the same turn while already waiting_external updates cleanly
+    second = goals.wait_goal('g_wait', wake_after_seconds=120, watch_path='/tmp/done.json', reason='updated')
+    assert second['status'] == 'waiting_external'
+    assert second['watch_path'] == '/tmp/done.json'
+    assert second['reason'] == 'updated'
+
+    # Signaling 'root' from a child goal returns clear guidance to use ancor_goal_report
+    with pytest.raises(PermissionError, match='ancor_goal_report'):
+        goals.signal_goal('root', 'steer', {'message': 'hi'}, caller_goal_id='g_wait')
