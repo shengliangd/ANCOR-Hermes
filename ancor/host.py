@@ -29,6 +29,40 @@ from .watcher import FileClusterBackend, GoalReconciler, GoalRunner, GoalWatcher
 log = logging.getLogger(__name__)
 
 CONDITION_BACKOFF_SECONDS = 3600
+STALLED_COOLDOWN_SECONDS = 900
+
+
+def find_stalled_active_requests(store, goal_store, snapshot=None) -> list[dict]:
+    """Return stably active requests that have 0 active goals, 0 open questions, and 0 pending events."""
+    snapshot = snapshot or store.snapshot()
+    active_reqs = [
+        r for r in snapshot['requests']
+        if r['status'] == 'active' and r.get('target_status') is None
+    ]
+    if not active_reqs:
+        return []
+    active_goal_reqs = {
+        g['request_id'] for g in goal_store.list_goals(include_terminal=False)
+    }
+    open_question_reqs = {
+        q['request_id'] for q in store.questions() if q.get('state') == 'open'
+    }
+    pending_event_reqs = {
+        (e.get('payload') or {}).get('request_id')
+        for e in store.pending_events()
+        if isinstance(e.get('payload'), dict) and (e.get('payload') or {}).get('request_id')
+    }
+    stalled = []
+    for req in active_reqs:
+        rid = req['id']
+        if rid in active_goal_reqs or rid in open_question_reqs or rid in pending_event_reqs:
+            continue
+        stalled.append({
+            'request_id': rid,
+            'title': req.get('title', ''),
+            'generation': req['generation'],
+        })
+    return stalled
 
 
 def child_environment(environ=None):
@@ -149,12 +183,49 @@ class Host:
             self._scan()
 
     def _scan(self):
-        """Deterministic scan: crash-safe startup reconcile + zero-LLM Watcher + stale notices."""
+        """Deterministic scan: crash-safe startup reconcile + zero-LLM Watcher + stale notices + liveness."""
         self.last_reconcile = self.reconciler.reconcile(managed_goal_ids=tuple(self.runner.tasks))
         self.goals.settle_stops(job_canceller=lambda h: self.cluster.cancel_handle(h['handle_id'], h.get('tags')))
         self.last_watch = self.watcher.poll()
         snapshot = self.store.snapshot()
         self.close_stale_notifications(snapshot)
+        self.last_stalled = self._reconcile_stalled_requests(snapshot)
+
+    def _reconcile_stalled_requests(self, snapshot=None) -> list[str]:
+        """Emit a cooldown-bounded request.stalled event for any active request dropped without goals/questions."""
+        stalled = find_stalled_active_requests(self.store, self.goals, snapshot=snapshot)
+        state = self.state()
+        cooldowns = state.setdefault('stalled_last_emitted', {})
+        stalled_ids = {item['request_id'] for item in stalled}
+        dirty = False
+        for rid in list(cooldowns):
+            if rid not in stalled_ids:
+                del cooldowns[rid]
+                dirty = True
+        now = float(self.clock())
+        emitted: list[str] = []
+        for item in stalled:
+            rid = item['request_id']
+            last_at = float(cooldowns.get(rid, 0.0) or 0.0)
+            if last_at and (now - last_at) < STALLED_COOLDOWN_SECONDS:
+                continue
+            bucket = int(now // STALLED_COOLDOWN_SECONDS)
+            self.store.add_event(
+                'request.stalled',
+                {
+                    'request_id': rid,
+                    'generation': item['generation'],
+                    'reason': 'active_request_without_goals_or_open_questions',
+                    'instruction': 'Active request has 0 active goals and 0 open questions; spawn next /goal, ask a question, or submit delivery.',
+                },
+                source_key=f'stalled:{rid}:gen{item["generation"]}:b{bucket}',
+            )
+            cooldowns[rid] = now
+            dirty = True
+            emitted.append(rid)
+        if dirty:
+            self.save(state)
+        return emitted
 
     def judge_command_for(self, packet: dict) -> list[str]:
         prompt = (

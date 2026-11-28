@@ -266,6 +266,17 @@ def _register_role(ctx, *, scan_runner=None, judge_runner=None, role_override=No
                   'remaining_pending': len(service.store.pending_events())}
         if args.get('reason') is not None:
             result['reason'] = args['reason']
+        if acked:
+            from .host import find_stalled_active_requests
+            stalled = find_stalled_active_requests(service.store, service.goal_store)
+            if stalled:
+                result['stalled_requests'] = [
+                    {
+                        **item,
+                        'warning': 'Active request now has 0 active goals, 0 open questions, and 0 pending events; spawn next /goal, create a question, or submit delivery.',
+                    }
+                    for item in stalled
+                ]
         return result
 
     def get_context(args, **_native):

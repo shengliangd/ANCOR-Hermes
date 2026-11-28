@@ -282,3 +282,39 @@ def test_request_transition_waits_for_confirmed_stop(tmp_path):
     assert goals.get_goal('pending')['pid'] == 98765
     result = advance_request(store, GoalStore(Store(store.path)), req['id'], process_killer=lambda _: True)
     assert result['outcome'] == 'completed' and result['status'] == 'cancelled'
+
+
+def test_stalled_active_request_warns_on_ack_and_emits_stalled_event_with_cooldown(tmp_path, monkeypatch):
+    from ancor.host import Host, STALLED_COOLDOWN_SECONDS
+    now = [10000.0]
+    store = Store(tmp_path / 'requests.db')
+    req = _create_req(store)
+    ctx_root = FakeContext('ancor-exec', store.path)
+    monkeypatch.setenv('ANCOR_ROLE', 'root')
+    monkeypatch.delenv('GOAL_ID', raising=False)
+    ancor.register(ctx_root)
+
+    # Ack initial request.created event without spawning any goal -> immediate warning
+    pending_ids = [e['id'] for e in store.pending_events()]
+    ack_res = json.loads(ctx_root.tools['ancor_event_ack']['handler']({'event_ids': pending_ids}))
+    assert ack_res['acked'] == pending_ids
+    assert len(ack_res.get('stalled_requests', [])) == 1
+    assert ack_res['stalled_requests'][0]['request_id'] == req['id']
+
+    # Host.scan() emits request.stalled once and respects cooldown
+    host = Host(FakeContext('default', store.path), store=store, clock=lambda: now[0])
+    host.scan()
+    assert host.last_stalled == [req['id']]
+    stalled_events = [e for e in store.pending_events() if e['kind'] == 'request.stalled']
+    assert len(stalled_events) == 1
+
+    # Ack stalled event without spawning -> within cooldown, scan does not spam
+    store.ack_events([e['id'] for e in stalled_events])
+    now[0] += 60.0
+    host.scan()
+    assert host.last_stalled == []
+
+    # After cooldown expires, scan re-emits request.stalled
+    now[0] += STALLED_COOLDOWN_SECONDS
+    host.scan()
+    assert host.last_stalled == [req['id']]
