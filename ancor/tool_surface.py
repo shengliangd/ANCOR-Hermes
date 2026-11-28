@@ -220,8 +220,9 @@ def build_surface(*, role: str, methods: dict, change_properties: dict):
         )
         add(
             'ancor_resource_release',
-            'Release one (or all, when handle_id is omitted) tracked external resource handles owned by this /goal.',
+            'Release one (or all, when handle_id is omitted) tracked external resource handles owned by this /goal (goal_id optional for goal role, required for root).',
             {
+                'goal_id': OPTIONAL_TEXT,
                 'handle_id': OPTIONAL_TEXT,
                 'status': {'type': 'string', 'enum': ['released', 'succeeded', 'failed', 'cancelled']},
                 'detail': OPTIONAL_TEXT,
@@ -480,14 +481,14 @@ def build_surface(*, role: str, methods: dict, change_properties: dict):
     )
     add(
         'ancor_resource_release',
-        'Release one (or all, when handle_id is omitted) tracked external resource handles on any goal (including terminal goals whose external jobs have stopped).',
+        'Release one (or all, when handle_id is omitted) tracked external resource handles on a goal (goal_id required for root, optional for goal role).',
         {
-            'goal_id': TEXT,
+            'goal_id': OPTIONAL_TEXT,
             'handle_id': OPTIONAL_TEXT,
             'status': {'type': 'string', 'enum': ['released', 'succeeded', 'failed', 'cancelled']},
             'detail': OPTIONAL_TEXT,
         },
-        ['goal_id'],
+        [],
         methods['resource_release'],
     )
     add(

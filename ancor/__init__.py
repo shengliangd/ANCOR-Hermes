@@ -565,7 +565,14 @@ def _register_role(ctx, *, scan_runner=None, judge_runner=None, role_override=No
             goal_id=gid, metadata=args.get('metadata'))
 
     def resource_release(args, **_native):
-        gid = args['goal_id'] if (root_role and args.get('goal_id')) else _caller_goal_id()
+        if root_role:
+            gid = args.get('goal_id')
+            if not gid:
+                raise ValueError('goal_id is required when releasing resources as root')
+        else:
+            gid = _caller_goal_id()
+            if args.get('goal_id') and args['goal_id'] != gid:
+                raise PermissionError(f"goal {gid} cannot release resources owned by {args['goal_id']}")
         status = args.get('status', 'released')
         res = service.goal_store.release_resource_usage(
             gid, handle_id=args.get('handle_id'), status=status, detail=args.get('detail'))

@@ -346,3 +346,22 @@ def test_session_role_check_fn_expires_shared_tool_defs_memo(tmp_path, monkeypat
     assert ctx.tools['ancor_goal_wait']['check_fn']() is True
     assert ctx.tools['ancor_event_ack']['check_fn']() is False
     assert len(expired) >= 7
+
+
+def test_shared_ancor_exec_tools_have_matching_schemas():
+    from collections import defaultdict
+    from ancor.tool_surface import build_surface
+
+    class _Dummy(dict):
+        def __getitem__(self, k):
+            return lambda args: None
+
+    by_name = defaultdict(dict)
+    for role in ('root', 'goal', 'judge'):
+        defs, _ = build_surface(role=role, methods=_Dummy(), change_properties={})
+        for name, (_desc, props, req) in defs.items():
+            by_name[name][role] = (sorted(props.keys()), sorted(req))
+    for name, role_schemas in by_name.items():
+        if len(role_schemas) > 1:
+            unique = {tuple(tuple(x) for x in v) for v in role_schemas.values()}
+            assert len(unique) == 1, f'Schema mismatch across roles for {name}: {role_schemas}'
