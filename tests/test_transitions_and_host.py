@@ -365,3 +365,50 @@ def test_shared_ancor_exec_tools_have_matching_schemas():
         if len(role_schemas) > 1:
             unique = {tuple(tuple(x) for x in v) for v in role_schemas.values()}
             assert len(unique) == 1, f'Schema mismatch across roles for {name}: {role_schemas}'
+
+
+def test_stalled_detection_handles_early_vs_blocking_open_questions(tmp_path):
+    from ancor.host import Host, STALLED_COOLDOWN_SECONDS
+    from test_goals import _repair_spec
+    now = [20000.0]
+    store = Store(tmp_path / 'requests.db')
+    req = _create_req(store)
+    store.ack_events([e['id'] for e in store.pending_events()])
+    host = Host(FakeContext('default', store.path), store=store, clock=lambda: now[0])
+
+    # Case 1: Early open question created BEFORE a parallel goal stops -> one-shot request.stalled
+    store.create_question(req['id'], identifier='q-early', body='Early check?', reason='early', actor='ancor-exec')
+    host.goals.spawn_goal(_repair_spec(req, 'g_early'))
+    # Ensure goal terminal update timestamp is strictly newer than question created_at
+    with store._transaction() as db:
+        q_ts = db.execute('SELECT created_at FROM questions WHERE id=?', ('q-early',)).fetchone()['created_at']
+    host.goals.report_result('g_early', {'request_generation': 1, 'status': 'blocked', 'summary': 'hit issue', 'open_issues': ['transient']})
+    with store._transaction() as db:
+        db.execute('UPDATE active_goals SET updated_at=? WHERE goal_id=?', (q_ts + 10.0, 'g_early'))
+    store.ack_events([e['id'] for e in store.pending_events()])
+
+    host.scan()
+    assert host.last_stalled == [req['id']]
+    stalled_evs = [e for e in store.pending_events() if e['kind'] == 'request.stalled']
+    assert len(stalled_evs) == 1
+    assert stalled_evs[0]['payload']['reason'] == 'active_request_goals_stopped_with_earlier_open_question'
+
+    # Root inspects and acks without spawning -> stays quiet even after cooldown
+    store.ack_events([e['id'] for e in stalled_evs])
+    now[0] += STALLED_COOLDOWN_SECONDS * 2
+    host.scan()
+    assert host.last_stalled == []
+
+    # Case 2: Blocking question created AFTER the goal stopped -> never emits request.stalled
+    req2 = _create_req(store)
+    store.ack_events([e['id'] for e in store.pending_events()])
+    host.goals.spawn_goal(_repair_spec(req2, 'g_blk'))
+    host.goals.report_result('g_blk', {'request_generation': 1, 'status': 'blocked', 'summary': 'blocked', 'open_issues': ['need human']})
+    store.ack_events([e['id'] for e in store.pending_events()])
+    store.create_question(req2['id'], identifier='q-after', body='Need input', reason='blocked', actor='ancor-exec')
+    with store._transaction() as db:
+        g_ts = db.execute('SELECT updated_at FROM active_goals WHERE goal_id=?', ('g_blk',)).fetchone()['updated_at']
+        db.execute('UPDATE questions SET created_at=? WHERE id=?', (g_ts + 10.0, 'q-after'))
+
+    host.scan()
+    assert host.last_stalled == []

@@ -33,7 +33,13 @@ STALLED_COOLDOWN_SECONDS = 900
 
 
 def find_stalled_active_requests(store, goal_store, snapshot=None) -> list[dict]:
-    """Return stably active requests that have 0 active goals, 0 open questions, and 0 pending events."""
+    """Return stably active requests with 0 active goals and 0 pending events that need Root attention.
+
+    Includes:
+    - Requests with 0 open questions (periodic watchdog).
+    - Requests with open question(s) where the latest goal updated *after* the latest open question
+      was created (early/non-blocking question whose parallel goal later stopped; checked once).
+    """
     snapshot = snapshot or store.snapshot()
     active_reqs = [
         r for r in snapshot['requests']
@@ -44,9 +50,22 @@ def find_stalled_active_requests(store, goal_store, snapshot=None) -> list[dict]
     active_goal_reqs = {
         g['request_id'] for g in goal_store.list_goals(include_terminal=False)
     }
-    open_question_reqs = {
-        q['request_id'] for q in store.questions() if q.get('state') == 'open'
-    }
+    latest_goal_updated: dict[str, float] = {}
+    for g in goal_store.list_goals(include_terminal=True):
+        rid = g['request_id']
+        ts = float(g.get('updated_at') or g.get('created_at') or 0.0)
+        if ts > latest_goal_updated.get(rid, 0.0):
+            latest_goal_updated[rid] = ts
+
+    latest_open_q_created: dict[str, float] = {}
+    for q in store.questions():
+        if q.get('state') != 'open':
+            continue
+        rid = q['request_id']
+        ts = float(q.get('created_at') or 0.0)
+        if ts >= latest_open_q_created.get(rid, -1.0):
+            latest_open_q_created[rid] = ts
+
     pending_event_reqs = {
         (e.get('payload') or {}).get('request_id')
         for e in store.pending_events()
@@ -55,12 +74,18 @@ def find_stalled_active_requests(store, goal_store, snapshot=None) -> list[dict]
     stalled = []
     for req in active_reqs:
         rid = req['id']
-        if rid in active_goal_reqs or rid in open_question_reqs or rid in pending_event_reqs:
+        if rid in active_goal_reqs or rid in pending_event_reqs:
+            continue
+        has_open_q = rid in latest_open_q_created
+        g_ts = latest_goal_updated.get(rid, 0.0)
+        if has_open_q and g_ts <= latest_open_q_created[rid]:
             continue
         stalled.append({
             'request_id': rid,
             'title': req.get('title', ''),
             'generation': req['generation'],
+            'has_open_questions': has_open_q,
+            'latest_goal_updated_at': g_ts,
         })
     return stalled
 
@@ -192,20 +217,50 @@ class Host:
         self.last_stalled = self._reconcile_stalled_requests(snapshot)
 
     def _reconcile_stalled_requests(self, snapshot=None) -> list[str]:
-        """Emit a cooldown-bounded request.stalled event for any active request dropped without goals/questions."""
+        """Emit request.stalled for dropped active requests (periodic without open questions, one-shot with earlier open questions)."""
+        snapshot = snapshot or self.store.snapshot()
         stalled = find_stalled_active_requests(self.store, self.goals, snapshot=snapshot)
         state = self.state()
         cooldowns = state.setdefault('stalled_last_emitted', {})
-        stalled_ids = {item['request_id'] for item in stalled}
+        seen_open_q = state.setdefault('stalled_open_q_seen', {})
+        stalled_no_q_ids = {item['request_id'] for item in stalled if not item.get('has_open_questions')}
+        active_req_ids = {r['id'] for r in snapshot['requests'] if r['status'] == 'active'}
         dirty = False
         for rid in list(cooldowns):
-            if rid not in stalled_ids:
+            if rid not in stalled_no_q_ids:
                 del cooldowns[rid]
+                dirty = True
+        for rid in list(seen_open_q):
+            if rid not in active_req_ids:
+                del seen_open_q[rid]
                 dirty = True
         now = float(self.clock())
         emitted: list[str] = []
         for item in stalled:
             rid = item['request_id']
+            if item.get('has_open_questions'):
+                stamp = f"gen{item['generation']}:{item['latest_goal_updated_at']:.6f}"
+                if seen_open_q.get(rid) == stamp:
+                    continue
+                self.store.add_event(
+                    'request.stalled',
+                    {
+                        'request_id': rid,
+                        'generation': item['generation'],
+                        'reason': 'active_request_goals_stopped_with_earlier_open_question',
+                        'instruction': (
+                            'Active request has 0 active goals after a goal finished/blocked later than '
+                            'its open question(s). Verify whether parallel work can continue; if truly '
+                            'blocked on the open question(s), ack without spawning.'
+                        ),
+                    },
+                    source_key=f'stalled_openq:{rid}:gen{item["generation"]}:{int(item["latest_goal_updated_at"] * 1000)}',
+                )
+                seen_open_q[rid] = stamp
+                dirty = True
+                emitted.append(rid)
+                continue
+
             last_at = float(cooldowns.get(rid, 0.0) or 0.0)
             if last_at and (now - last_at) < STALLED_COOLDOWN_SECONDS:
                 continue
