@@ -121,6 +121,9 @@ class AncorConfig:
     notifiers: list[NotifierConfig] = field(default_factory=list)
     memory_dir: Path | None = None
     memory_stale_days: int = 30
+    session_reuse_ttl_seconds: float = 300.0
+    max_wakes_per_session: int = 3
+    max_shifts_per_goal: int = 20
     daemon_pid_path: Path | None = None
     daemon_state_path: Path | None = None
 
@@ -334,6 +337,7 @@ def load_config(path: str | Path | None = None, *, store_path_override: str | Pa
 
     raw_store = (
         store_path_override
+        or (raw.get('store_path') if path is not None else None)
         or os.environ.get('ANCOR_STORE_PATH')
         or os.environ.get('ANCOR_DB_PATH')
         or raw.get('store_path')
@@ -368,6 +372,9 @@ def load_config(path: str | Path | None = None, *, store_path_override: str | Pa
     raw_memory_dir = os.environ.get('ANCOR_MEMORY_DIR') or raw.get('memory_dir')
     memory_dir = Path(str(raw_memory_dir)).expanduser().resolve() if raw_memory_dir else None
     memory_stale_days = max(1, int(raw.get('memory_stale_days', 30)))
+    session_reuse_ttl_seconds = max(0.0, float(raw.get('session_reuse_ttl_seconds', 300.0)))
+    max_wakes_per_session = max(1, int(raw.get('max_wakes_per_session', 3)))
+    max_shifts_per_goal = max(1, int(raw.get('max_shifts_per_goal', 20)))
 
     return AncorConfig(
         config_path=resolved,
@@ -384,6 +391,9 @@ def load_config(path: str | Path | None = None, *, store_path_override: str | Pa
         notifiers=_parse_notifiers(raw.get('notifiers')),
         memory_dir=memory_dir,
         memory_stale_days=memory_stale_days,
+        session_reuse_ttl_seconds=session_reuse_ttl_seconds,
+        max_wakes_per_session=max_wakes_per_session,
+        max_shifts_per_goal=max_shifts_per_goal,
     )
 
 

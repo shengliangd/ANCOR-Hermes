@@ -153,6 +153,14 @@ def register_core_parser(subparsers) -> None:
     g_wait.add_argument('--wake-at', type=float, default=None)
     g_wait.add_argument('--watch-path', default=None)
     g_wait.add_argument('--reason', default='')
+    g_wait.add_argument('--json', dest='json_payload', default=None)
+
+    g_ho = g_sub.add_parser('handoff')
+    g_ho.add_argument('goal_id')
+    g_ho.add_argument('--json', dest='json_payload', required=True)
+
+    g_sh = g_sub.add_parser('shifts')
+    g_sh.add_argument('goal_id')
 
     g_rep = g_sub.add_parser('report')
     g_rep.add_argument('goal_id')
@@ -380,13 +388,25 @@ def handle_core(args: argparse.Namespace) -> int:
             if action == 'stop':
                 return _emit(core.goal_stop(args.goal_id, reason=args.reason, caller_goal_id=args.caller))
             if action == 'wait':
+                payload = _read_json_arg(args.json_payload)
                 return _emit(core.goal_wait(
                     args.goal_id,
-                    wake_after_seconds=args.wake_after_seconds,
-                    wake_at=args.wake_at,
-                    watch_path=args.watch_path,
-                    reason=args.reason,
+                    wake_after_seconds=payload.get('wake_after_seconds', args.wake_after_seconds),
+                    wake_at=payload.get('wake_at', args.wake_at),
+                    watch_path=payload.get('watch_path', args.watch_path),
+                    reason=payload.get('reason', args.reason),
+                    handoff=payload.get('handoff'),
+                    checklist=payload.get('checklist'),
                 ))
+            if action == 'handoff':
+                payload = _read_json_arg(args.json_payload)
+                return _emit(core.goal_handoff(
+                    args.goal_id,
+                    handoff=payload['handoff'],
+                    checklist=payload.get('checklist'),
+                ))
+            if action == 'shifts':
+                return _emit(core.goal_shifts(args.goal_id))
             if action == 'report':
                 payload = _read_json_arg(args.json_payload)
                 return _emit(core.goal_report(args.goal_id, payload))

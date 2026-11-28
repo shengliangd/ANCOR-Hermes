@@ -109,12 +109,33 @@ def _safe_event(row: dict) -> dict:
 
 def _decode_goal_row(row: dict) -> dict:
     out = dict(row)
-    for field in ("scope", "budget", "external_job_ids", "pending_signals", "observed_models"):
+    for field in ("scope", "budget", "external_job_ids", "pending_signals", "observed_models", "backend_args"):
         if isinstance(out.get(field), str):
             out[field] = json.loads(out[field])
     if isinstance(out.get("result_json"), str):
         out["result"] = json.loads(out["result_json"])
     out.pop("result_json", None)
+    if isinstance(out.get("handoff_json"), str):
+        out["handoff"] = json.loads(out["handoff_json"])
+    else:
+        out["handoff"] = None
+    out.pop("handoff_json", None)
+    if isinstance(out.get("checklist_json"), str):
+        out["checklist"] = json.loads(out["checklist_json"])
+    else:
+        out["checklist"] = []
+    out.pop("checklist_json", None)
+    return _redact(out)
+
+
+def _decode_shift_row(row: dict) -> dict:
+    out = dict(row)
+    for field in ("backend_args", "observed_models"):
+        if isinstance(out.get(field), str):
+            out[field] = json.loads(out[field])
+    out["reused_session"] = bool(out.get("reused_session"))
+    if isinstance(out.get("handoff_snapshot"), str):
+        out["handoff_snapshot"] = json.loads(out["handoff_snapshot"])
     return _redact(out)
 
 
@@ -207,7 +228,19 @@ def goal(goal_id: str):
         raise HTTPException(status_code=404, detail="goal not found")
     try:
         row = _one(conn, "SELECT * FROM active_goals WHERE goal_id=?", (goal_id,), "goal")
-        return {"goal": _decode_goal_row(row)}
+        decoded = _decode_goal_row(row)
+        shifts = []
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='goal_shifts'").fetchone():
+            shifts = [
+                _decode_shift_row(s)
+                for s in _rows(conn, "SELECT * FROM goal_shifts WHERE goal_id=? ORDER BY shift_seq, id", (goal_id,))
+            ]
+        return {
+            "goal": decoded,
+            "handoff": decoded.get("handoff"),
+            "checklist": decoded.get("checklist") or [],
+            "shifts": shifts,
+        }
     finally:
         conn.close()
 

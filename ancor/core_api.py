@@ -700,6 +700,8 @@ class AncorCore:
         wake_at: float | None = None,
         watch_path: str | None = None,
         reason: str = '',
+        handoff: dict | None = None,
+        checklist: list[dict] | None = None,
     ) -> dict:
         return self.goal_store.wait_goal(
             goal_id,
@@ -707,7 +709,27 @@ class AncorCore:
             wake_at=wake_at,
             watch_path=watch_path,
             reason=reason,
+            handoff=handoff,
+            checklist=checklist,
         )
+
+    def goal_handoff(
+        self,
+        goal_id: str,
+        *,
+        handoff: dict,
+        checklist: list[dict] | None = None,
+    ) -> dict:
+        return self.goal_store.handoff_goal(
+            goal_id,
+            handoff=handoff,
+            checklist=checklist,
+            max_shifts_per_goal=self.config.max_shifts_per_goal,
+        )
+
+    def goal_shifts(self, goal_id: str) -> dict:
+        shifts = self.goal_store.list_shifts(goal_id)
+        return collection(shifts)
 
     def goal_update_budget(
         self,

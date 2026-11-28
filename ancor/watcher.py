@@ -12,6 +12,7 @@ Replaces the legacy ``wake.due`` LLM polling loop and Hermes built-in
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -353,8 +354,54 @@ class GoalReconciler:
         }
 
 
-def build_goal_prompt(goal: dict, signals: list[dict], *, model_categories=None) -> str:
-    """Build the structured prompt passed to an independent persistent goal session."""
+@dataclass(frozen=True)
+class SessionRotationPolicy:
+    """Deterministic policy governing when a goal session is reused vs rotated cleanly."""
+
+    session_reuse_ttl_seconds: float = 300.0
+    max_wakes_per_session: int = 3
+    max_shifts_per_goal: int = 20
+
+
+def decide_session_reuse(
+    goal: dict,
+    signals: list[dict],
+    policy: SessionRotationPolicy,
+    now: float,
+    *,
+    selected_backend: str | None = None,
+) -> tuple[bool, str | None]:
+    """Pure deterministic check: returns ``(reused_session, rotation_reason)``."""
+    if goal.get('handoff_requested'):
+        return False, 'agent_handoff'
+    if not goal.get('session_id'):
+        return False, 'first_run'
+    if selected_backend and goal.get('backend') and selected_backend != goal['backend']:
+        return False, 'backend_fallback'
+    sig_kinds = {s.get('kind') for s in signals if isinstance(s, dict)}
+    if 'update_generation' in sig_kinds:
+        return False, 'generation_changed'
+    if 'steer' in sig_kinds:
+        return False, 'steered'
+    if 'recovery' in sig_kinds:
+        return False, 'recovery'
+    last_fin = goal.get('last_run_finished_at')
+    if last_fin is not None and (float(now) - float(last_fin)) > float(policy.session_reuse_ttl_seconds):
+        return False, 'ttl_expired'
+    if int(goal.get('session_wakes') or 0) >= int(policy.max_wakes_per_session):
+        return False, 'max_wakes'
+    return True, None
+
+
+def build_goal_prompt(
+    goal: dict,
+    signals: list[dict],
+    *,
+    model_categories=None,
+    shift_seq: int | None = None,
+    rotation_reason: str | None = None,
+) -> str:
+    """Build the structured prompt passed to an ephemeral/shift-based goal session."""
     packet = {
         'goal_id': goal['goal_id'],
         'session_title': f"ancor-{goal['request_id']}-{goal['goal_id']}",
@@ -369,10 +416,26 @@ def build_goal_prompt(goal: dict, signals: list[dict], *, model_categories=None)
         'external_handles': goal['external_job_ids'],
         'signals': signals,
     }
+    if goal.get('handoff') is not None:
+        packet['handoff'] = goal['handoff']
+    if goal.get('checklist'):
+        packet['checklist'] = goal['checklist']
+    if shift_seq is not None:
+        packet['shift_seq'] = shift_seq
+    if rotation_reason is not None:
+        packet['rotation_reason'] = rotation_reason
+
+    handoff_guidance = (
+        'If handoff or checklist is present (especially after a session rotation), verify workspace state and '
+        'external_handles against handoff first, do NOT repeat listed dead_ends, and continue from next_step. '
+        'Use ancor_goal_handoff(handoff=..., checklist=...) to cleanly rotate into a fresh session when context grows '
+        'or between phases; you may also pass handoff/checklist to ancor_goal_wait. '
+    )
     return (
         'Execute or continue this ANCOR /goal within your authorized scope and budget '
         '(limits, allowed, and natural-language constraints). '
-        'Read authoritative requirement text directly with ancor_request_read when needed. '
+        + handoff_guidance
+        + 'Read authoritative requirement text directly with ancor_request_read when needed. '
         'Use ancor_resource_acquire / ancor_resource_release for tracked resource accounting, '
         'ancor_goal_wait(wake_after_seconds=..., watch_path=...) to park and resume across long external jobs instead of sleeping in-session, '
         'ancor_goal_spawn only when parallel/nested sub-goals are needed, and ancor_goal_report when done/blocked/infeasible.\n'
@@ -399,7 +462,8 @@ class GoalRunner:
 
     def __init__(self, goal_store: GoalStore, *, profile: str = 'ancor-exec',
                  command_builder=None, env_builder=None, category_router=None, native_sessions=None,
-                 backend_router=None, mcp_command_builder=None, system_prompt: str = ''):
+                 backend_router=None, mcp_command_builder=None, system_prompt: str = '',
+                 rotation_policy: SessionRotationPolicy | None = None):
         self.goal_store = goal_store
         self.profile = profile
         self.command_builder = command_builder or default_goal_command
@@ -408,16 +472,24 @@ class GoalRunner:
         self.backend_router = backend_router
         self.mcp_command_builder = mcp_command_builder
         self.system_prompt = system_prompt
+        self.rotation_policy = (
+            rotation_policy if rotation_policy is not None
+            else (SessionRotationPolicy() if backend_router is not None else None)
+        )
         self.tasks: dict[str, asyncio.Task] = {}
         self.native_sessions = (
             (command_builder is None and backend_router is None)
             if native_sessions is None else native_sessions
         )
 
-    def _launch(self, goal: dict, signals: list[dict], *, resume: bool) -> list[str]:
+    def _launch(self, goal: dict, signals: list[dict], *, resume: bool,
+                shift_seq: int | None = None, rotation_reason: str | None = None) -> list[str]:
         router = self.category_router
         names = router.alias_names() if router is not None else None
-        prompt = build_goal_prompt(goal, signals, model_categories=names)
+        prompt = build_goal_prompt(
+            goal, signals, model_categories=names,
+            shift_seq=shift_seq, rotation_reason=rotation_reason,
+        )
         category = goal.get('category')
         if category and router is not None and (names is None or category not in names):
             # Alias was removed from ancor-exec/config.yaml after spawn: fail loud via a
@@ -427,7 +499,7 @@ class GoalRunner:
                 'or the exec profile config is unavailable')
         model_args = (router.cli_args(category, resume=resume)
                       if router is not None else (['-m', category] if category else []))
-        return self.command_builder(self.profile, goal['session_id'], prompt,
+        return self.command_builder(self.profile, goal['session_id'] if resume else '', prompt,
                                     resume=resume, model_args=model_args)
 
     def _child_env(self, goal: dict) -> dict:
@@ -483,19 +555,27 @@ class GoalRunner:
     def _build_backend_launch(self, goal: dict, signals: list[dict]):
         from .backends.base import LaunchSpec
         router = self.backend_router
+        policy = self.rotation_policy or SessionRotationPolicy()
+        now = float(self.goal_store.clock())
         bound_backend = goal.get('backend')
         bound_args = goal.get('backend_args') or []
+
+        # First peek if we're rotating for non-backend reasons; if so, resolve fresh route!
+        pre_reuse, pre_reason = decide_session_reuse(goal, signals, policy, now)
         route = router.resolve(
             role='goal',
             category=goal.get('category'),
-            bound_backend=bound_backend,
-            bound_args=bound_args,
+            bound_backend=(bound_backend if pre_reuse else None),
+            bound_args=(bound_args if pre_reuse else None),
         )
-        session_id = goal['session_id'] or None
-        if bound_backend and route.backend.name != bound_backend:
-            # Original backend disappeared; cold-start on fallback backend with recovery context.
+        reused_session, rotation_reason = decide_session_reuse(
+            goal, signals, policy, now, selected_backend=route.backend.name,
+        )
+        if not route.backend.capabilities.supports_resume and reused_session:
+            reused_session, rotation_reason = False, 'first_run'
+
+        if bound_backend and route.backend.name != bound_backend and rotation_reason == 'backend_fallback':
             self.goal_store.clear_session_for_fallback(goal['goal_id'])
-            session_id = None
             signals = [
                 *signals,
                 {
@@ -504,33 +584,50 @@ class GoalRunner:
                         'reason': f'backend {bound_backend!r} unavailable; switched to {route.backend.name!r}',
                         'instruction': 'Inspect workspace and external_handles before acting; do not duplicate work.',
                     },
-                    'at': float(self.goal_store.clock()),
+                    'at': now,
                 },
             ]
-        if not bound_backend or route.backend.name != bound_backend:
+        if not bound_backend or route.backend.name != bound_backend or not reused_session:
             self.goal_store.bind_backend(goal['goal_id'], route.backend.name, route.args)
 
+        shift = self.goal_store.start_shift(
+            goal['goal_id'],
+            backend=route.backend.name,
+            backend_args=route.args,
+            session_id=(goal['session_id'] if reused_session else ''),
+            reused_session=reused_session,
+            rotation_reason=rotation_reason,
+        )
+        session_id = goal['session_id'] if reused_session else None
         names = router.alias_names()
-        prompt = build_goal_prompt(goal, signals, model_categories=names)
+        prompt = build_goal_prompt(
+            goal, signals, model_categories=names,
+            shift_seq=shift['shift_seq'], rotation_reason=rotation_reason,
+        )
         mcp_cmd = self.mcp_command_builder('goal', goal['goal_id']) if self.mcp_command_builder else []
         spec = LaunchSpec(
             role='goal',
             prompt=prompt,
             system_prompt=self.system_prompt,
             goal_id=goal['goal_id'],
-            session_id=session_id if route.backend.capabilities.supports_resume else None,
+            session_id=session_id,
             session_title=f"ancor-{goal['request_id']}-{goal['goal_id']}",
             extra_args=route.args,
             mcp_command=mcp_cmd,
             env={'ANCOR_STORE_PATH': self.goal_store.store.path},
         )
         cmd, env, temp_files = route.backend.build_command(spec)
-        return route.backend, cmd, env, temp_files
+        return route.backend, cmd, env, temp_files, shift
 
     async def run_goal(self, goal_id: str) -> int:
         goal = self.goal_store.get_goal(goal_id)
         if goal['status'] != 'running':
             return 0
+        if self.rotation_policy is not None:
+            blocked = self.goal_store.enforce_shift_limit(
+                goal_id, max_shifts_per_goal=self.rotation_policy.max_shifts_per_goal)
+            if blocked is not None:
+                return 0
         signals = self.goal_store.consume_signals(goal_id)
         proc = None
         spawn = None
@@ -539,12 +636,35 @@ class GoalRunner:
         readers = []
         active_backend = None
         temp_files: list[Path] = []
+        active_shift: dict | None = None
+        rc: int | None = None
         try:
             if self.backend_router is not None:
-                active_backend, cmd, env, temp_files = self._build_backend_launch(goal, signals)
+                active_backend, cmd, env, temp_files, active_shift = self._build_backend_launch(goal, signals)
+                launch_sid = active_shift['session_id']
             else:
-                resume = bool(goal['session_id'])
-                cmd = self._launch(goal, signals, resume=resume)
+                if self.rotation_policy is not None:
+                    now = float(self.goal_store.clock())
+                    reused_session, rotation_reason = decide_session_reuse(
+                        goal, signals, self.rotation_policy, now)
+                    active_shift = self.goal_store.start_shift(
+                        goal_id,
+                        backend='hermes',
+                        backend_args=[],
+                        session_id=(goal['session_id'] if reused_session else ''),
+                        reused_session=reused_session,
+                        rotation_reason=rotation_reason,
+                    )
+                    resume = reused_session
+                    launch_sid = active_shift['session_id']
+                    cmd = self._launch(
+                        goal, signals, resume=resume,
+                        shift_seq=active_shift['shift_seq'], rotation_reason=rotation_reason,
+                    )
+                else:
+                    resume = bool(goal['session_id'])
+                    launch_sid = goal['session_id']
+                    cmd = self._launch(goal, signals, resume=resume)
                 env = self._child_env(goal)
                 if self.native_sessions:
                     self.goal_store.prepare_native_session(goal_id, self.profile)
@@ -554,7 +674,7 @@ class GoalRunner:
                 limit=8 * 1024 * 1024,
                 start_new_session=True))
             proc = await asyncio.shield(spawn)
-            registered = self.goal_store.set_process(goal_id, proc.pid, goal['session_id'])
+            registered = self.goal_store.set_process(goal_id, proc.pid, launch_sid)
             readers = [
                 asyncio.create_task(self._read_session_output(goal_id, proc.stdout, backend=active_backend)),
                 asyncio.create_task(self._read_session_output(goal_id, proc.stderr, stderr=True, backend=active_backend)),
@@ -607,7 +727,20 @@ class GoalRunner:
                 if self.native_sessions and (interrupted or error):
                     self.goal_store.request_execution_stop(goal_id)
                     await asyncio.to_thread(self.goal_store.settle_stops, goal_ids=[goal_id])
-                self.goal_store.finish_run(goal_id, signals, error=error, interrupted=interrupted)
+                final_goal = self.goal_store.finish_run(goal_id, signals, error=error, interrupted=interrupted)
+                if active_shift is not None:
+                    outcome = (
+                        'interrupted' if interrupted else
+                        'error' if error else
+                        'handoff' if final_goal.get('handoff_requested') else
+                        final_goal['status']
+                    )
+                    self.goal_store.finish_shift(
+                        active_shift['id'],
+                        goal_id=goal_id,
+                        exit_code=(proc.returncode if proc is not None else rc),
+                        outcome=outcome,
+                    )
                 if active_backend is not None and error and not interrupted and self.backend_router is not None:
                     self.backend_router.mark_backend_cooldown(active_backend.name)
                 elif self.category_router is not None and hasattr(self.category_router, 'mark_provider_cooldown'):

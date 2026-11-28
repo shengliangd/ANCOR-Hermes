@@ -223,6 +223,13 @@ def build_role_tools(
             wake_at=args.get('wake_at'),
             watch_path=args.get('watch_path'),
             reason=args.get('reason', ''),
+            handoff=args.get('handoff'),
+            checklist=args.get('checklist'),
+        ),
+        'goal_handoff': lambda args: core.goal_handoff(
+            caller_id,
+            handoff=args['handoff'],
+            checklist=args.get('checklist'),
         ),
         'goal_update_budget': lambda args: core.goal_update_budget(
             args['goal_id'], args['budget'], reason=args.get('reason'), caller_goal_id=caller_id),
@@ -264,6 +271,55 @@ def build_role_tools(
         change_properties = atomic_defs['ancor_change'][1]
 
     definitions, handlers = build_surface(role=role, methods=methods, change_properties=change_properties)
+
+    # Shift-based ephemeral execution schemas for goal role (handoff + checklist on wait & handoff).
+    if role == 'goal':
+        handoff_schema = {
+            'type': 'object',
+            'description': 'Bounded (<= 3KB) shift handoff ledger entry for the next fresh session.',
+            'properties': {
+                'verified_progress': {
+                    'oneOf': [
+                        {'type': 'string', 'minLength': 1},
+                        {'type': 'array', 'items': {'type': 'string', 'minLength': 1}},
+                    ]
+                },
+                'dead_ends': {'type': 'array', 'items': {'type': 'string', 'minLength': 1}},
+                'next_step': {'type': 'string', 'minLength': 1},
+                'artifact_refs': {'type': 'array', 'items': {'type': 'string', 'minLength': 1}},
+            },
+            'required': ['verified_progress', 'next_step'],
+            'additionalProperties': False,
+        }
+        checklist_schema = {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'id': {'type': 'string', 'minLength': 1},
+                    'item': {'type': 'string', 'minLength': 1},
+                    'status': {'type': 'string', 'enum': ['pending', 'in_progress', 'done', 'skipped']},
+                    'verify_hint': {'type': 'string'},
+                    'evidence': {'type': 'string'},
+                },
+                'required': ['id', 'item', 'status'],
+                'additionalProperties': False,
+            },
+        }
+        if 'ancor_goal_wait' in definitions:
+            w_desc, w_props, w_req = definitions['ancor_goal_wait']
+            definitions['ancor_goal_wait'] = (
+                w_desc + ' Optionally persist handoff and checklist atomically in the same transaction.',
+                {**w_props, 'handoff': handoff_schema, 'checklist': checklist_schema},
+                w_req,
+            )
+        definitions['ancor_goal_handoff'] = (
+            'Persist a concise shift handoff (<= 3KB) and optional checklist, discard the current session_id, '
+            'and schedule a fresh shift to prevent context rot. End this turn immediately after calling.',
+            {'handoff': handoff_schema, 'checklist': checklist_schema},
+            ['handoff'],
+        )
+        handlers['goal_handoff'] = methods['goal_handoff']
 
     # Cross-backend ANCOR Memory tools (role-scoped read/write; judge is read-only & cannot see episodes).
     definitions['ancor_memory_index'] = (

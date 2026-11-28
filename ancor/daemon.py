@@ -40,7 +40,7 @@ from .views import (
     notification_summary,
     request_ref,
 )
-from .watcher import FileClusterBackend, GoalReconciler, GoalRunner, GoalWatcher
+from .watcher import FileClusterBackend, GoalReconciler, GoalRunner, GoalWatcher, SessionRotationPolicy
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +106,11 @@ class AncorDaemon:
             backend_router=self.router,
             mcp_command_builder=lambda role, gid=None: _default_mcp_command(self.config, role, gid),
             system_prompt=self._role_system_prompt('goal'),
+            rotation_policy=SessionRotationPolicy(
+                session_reuse_ttl_seconds=self.config.session_reuse_ttl_seconds,
+                max_wakes_per_session=self.config.max_wakes_per_session,
+                max_shifts_per_goal=self.config.max_shifts_per_goal,
+            ),
         )
         self.judge = JudgeGate(
             self.store,

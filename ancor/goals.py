@@ -97,11 +97,35 @@ def init_goal_tables(db) -> None:
             category TEXT,
             observed_models TEXT NOT NULL DEFAULT '[]',
             backend TEXT,
-            backend_args TEXT NOT NULL DEFAULT '[]'
+            backend_args TEXT NOT NULL DEFAULT '[]',
+            handoff_json TEXT,
+            checklist_json TEXT NOT NULL DEFAULT '[]',
+            session_wakes INTEGER NOT NULL DEFAULT 0,
+            session_started_at REAL,
+            last_run_finished_at REAL,
+            handoff_requested INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS active_goals_parent ON active_goals(parent_goal_id);
         CREATE INDEX IF NOT EXISTS active_goals_request ON active_goals(request_id, status);
         CREATE INDEX IF NOT EXISTS active_goals_status ON active_goals(status, needs_wake);
+
+        CREATE TABLE IF NOT EXISTS goal_shifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal_id TEXT NOT NULL,
+            shift_seq INTEGER NOT NULL,
+            backend TEXT,
+            backend_args TEXT NOT NULL DEFAULT '[]',
+            session_id TEXT NOT NULL DEFAULT '',
+            reused_session INTEGER NOT NULL DEFAULT 0,
+            rotation_reason TEXT,
+            started_at REAL NOT NULL,
+            finished_at REAL,
+            exit_code INTEGER,
+            outcome TEXT,
+            handoff_snapshot TEXT,
+            observed_models TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE INDEX IF NOT EXISTS goal_shifts_goal ON goal_shifts(goal_id, shift_seq);
 
         CREATE TABLE IF NOT EXISTS judge_verdicts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,10 +144,19 @@ def init_goal_tables(db) -> None:
             ON judge_verdicts(request_id, generation, id);
     ''')
     existing_cols = {row[1] for row in db.execute('PRAGMA table_info(active_goals)')}
-    if 'backend' not in existing_cols:
-        db.execute('ALTER TABLE active_goals ADD COLUMN backend TEXT')
-    if 'backend_args' not in existing_cols:
-        db.execute("ALTER TABLE active_goals ADD COLUMN backend_args TEXT NOT NULL DEFAULT '[]'")
+    migrations = (
+        ('backend', 'TEXT'),
+        ('backend_args', "TEXT NOT NULL DEFAULT '[]'"),
+        ('handoff_json', 'TEXT'),
+        ('checklist_json', "TEXT NOT NULL DEFAULT '[]'"),
+        ('session_wakes', 'INTEGER NOT NULL DEFAULT 0'),
+        ('session_started_at', 'REAL'),
+        ('last_run_finished_at', 'REAL'),
+        ('handoff_requested', 'INTEGER NOT NULL DEFAULT 0'),
+    )
+    for col, col_def in migrations:
+        if col not in existing_cols:
+            db.execute(f'ALTER TABLE active_goals ADD COLUMN {col} {col_def}')
 
 
 def default_process_killer(pid: int) -> bool:
@@ -501,6 +534,100 @@ def validate_goal_result(result: dict, *, expected_goal_id: str | None = None) -
     }
 
 
+HANDOFF_MAX_BYTES = 3072
+CHECKLIST_STATUSES = frozenset({'pending', 'in_progress', 'done', 'skipped'})
+ROTATION_REASONS = frozenset({
+    'first_run',
+    'agent_handoff',
+    'steered',
+    'generation_changed',
+    'ttl_expired',
+    'max_wakes',
+    'backend_fallback',
+    'recovery',
+})
+
+
+def validate_handoff(raw: dict, *, now: float, shift_seq: int = 0) -> dict:
+    """Validate and normalize a bounded (<= 3KB) shift handoff ledger entry."""
+    if not isinstance(raw, dict):
+        raise ValueError('handoff must be an object')
+    allowed_keys = {'verified_progress', 'dead_ends', 'next_step', 'artifact_refs', 'updated_at', 'shift_seq'}
+    unknown = set(raw) - allowed_keys
+    if unknown:
+        raise ValueError('unsupported handoff fields: ' + ', '.join(sorted(unknown)))
+
+    vp_raw = raw.get('verified_progress')
+    if isinstance(vp_raw, str):
+        verified_progress = [_nonempty_str(vp_raw, 'handoff.verified_progress')]
+    elif isinstance(vp_raw, list):
+        verified_progress = [_nonempty_str(item, 'handoff.verified_progress[]') for item in vp_raw]
+    else:
+        raise ValueError('handoff.verified_progress must be a non-empty string or list of strings')
+
+    next_step = _nonempty_str(raw.get('next_step'), 'handoff.next_step')
+
+    de_raw = raw.get('dead_ends', [])
+    if not isinstance(de_raw, list):
+        raise ValueError('handoff.dead_ends must be a list of strings')
+    dead_ends = [_nonempty_str(item, 'handoff.dead_ends[]') for item in de_raw]
+
+    ar_raw = raw.get('artifact_refs', [])
+    if not isinstance(ar_raw, list):
+        raise ValueError('handoff.artifact_refs must be a list of strings')
+    artifact_refs = [_nonempty_str(item, 'handoff.artifact_refs[]') for item in ar_raw]
+
+    normalized = {
+        'verified_progress': verified_progress,
+        'dead_ends': dead_ends,
+        'next_step': next_step,
+        'artifact_refs': artifact_refs,
+        'updated_at': float(now),
+        'shift_seq': int(shift_seq),
+    }
+    encoded_size = len(json.dumps(normalized, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
+    if encoded_size > HANDOFF_MAX_BYTES:
+        raise ValueError(
+            f'handoff exceeds {HANDOFF_MAX_BYTES} byte limit ({encoded_size} bytes); keep it concise and store bulk logs on disk'
+        )
+    return normalized
+
+
+def validate_checklist(raw: list) -> list[dict]:
+    """Validate optional structured goal checklist items."""
+    if not isinstance(raw, list):
+        raise ValueError('checklist must be a list of item objects')
+    seen_ids: set[str] = set()
+    items: list[dict] = []
+    for idx, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f'checklist[{idx}] must be an object')
+        item_id = _nonempty_str(entry.get('id'), f'checklist[{idx}].id')
+        if item_id in seen_ids:
+            raise ValueError(f'duplicate checklist item id {item_id!r}')
+        seen_ids.add(item_id)
+        text = _nonempty_str(entry.get('item'), f'checklist[{idx}].item')
+        status = str(entry.get('status') or 'pending').strip().lower()
+        if status not in CHECKLIST_STATUSES:
+            raise ValueError(f'checklist[{idx}].status must be one of {sorted(CHECKLIST_STATUSES)}')
+        out = {'id': item_id, 'item': text, 'status': status}
+        if entry.get('verify_hint') is not None and str(entry['verify_hint']).strip():
+            out['verify_hint'] = str(entry['verify_hint']).strip()
+        if entry.get('evidence') is not None and str(entry['evidence']).strip():
+            out['evidence'] = str(entry['evidence']).strip()
+        items.append(out)
+    return items
+
+
+def _decode_shift(row) -> dict:
+    item = dict(row)
+    item['backend_args'] = json.loads(item.get('backend_args') or '[]')
+    item['reused_session'] = bool(item.get('reused_session'))
+    item['handoff_snapshot'] = json.loads(item['handoff_snapshot']) if item.get('handoff_snapshot') else None
+    item['observed_models'] = json.loads(item.get('observed_models') or '[]')
+    return item
+
+
 def _decode_goal(row) -> dict:
     item = dict(row)
     item['scope'] = json.loads(item['scope'])
@@ -512,6 +639,12 @@ def _decode_goal(row) -> dict:
     item['observed_models'] = json.loads(item.get('observed_models') or '[]')
     item['backend'] = item.get('backend')
     item['backend_args'] = json.loads(item.get('backend_args') or '[]')
+    item['handoff'] = json.loads(item['handoff_json']) if item.get('handoff_json') else None
+    item['checklist'] = json.loads(item.get('checklist_json') or '[]')
+    item['session_wakes'] = int(item.get('session_wakes') or 0)
+    item['session_started_at'] = item.get('session_started_at')
+    item['last_run_finished_at'] = item.get('last_run_finished_at')
+    item['handoff_requested'] = bool(item.get('handoff_requested'))
     item['request_ref'] = {'id': item['request_id'], 'generation': item['generation']}
     return item
 
@@ -814,8 +947,12 @@ class GoalStore:
 
     def wait_goal(self, goal_id: str, *, wake_after_seconds: float | None = None,
                   wake_at: float | None = None, watch_path: str | None = None,
-                  reason: str = '') -> dict:
-        """Park a running goal in waiting_external until wake_at or watch_path exists (zero LLM cost)."""
+                  reason: str = '', handoff: dict | None = None,
+                  checklist: list[dict] | None = None) -> dict:
+        """Park a running goal in waiting_external until wake_at or watch_path exists (zero LLM cost).
+
+        Optionally updates the shift handoff ledger and structured checklist atomically in the same transaction.
+        """
         now = float(self.clock())
         target_wake = None
         if wake_after_seconds is not None:
@@ -832,19 +969,33 @@ class GoalStore:
         if target_wake is None and clean_path is None:
             raise ValueError('wait_goal requires wake_after_seconds, wake_at, or watch_path')
         clean_reason = str(reason or '').strip()
+        validated_checklist = validate_checklist(checklist) if checklist is not None else None
         with self.store._transaction() as db:
             goal = self._get(db, goal_id)
             if goal['status'] not in {'running', 'waiting_external'}:
                 raise RuntimeError(f"goal {goal_id} is {goal['status']}, not running or waiting_external")
             if db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?', (goal_id,)).fetchone():
                 raise RuntimeError('execution stop is unconfirmed; wait rejected')
+            shift_seq = int(db.execute(
+                'SELECT COALESCE(MAX(shift_seq), 0) FROM goal_shifts WHERE goal_id=?', (goal_id,)
+            ).fetchone()[0])
+            validated_handoff = (
+                validate_handoff(handoff, now=now, shift_seq=shift_seq) if handoff is not None else None
+            )
             db.execute(
                 'INSERT OR REPLACE INTO goal_waits(goal_id, wake_at, watch_path, reason, created_at) '
                 'VALUES (?, ?, ?, ?, ?)',
                 (goal_id, target_wake, clean_path, clean_reason, now))
-            db.execute(
-                "UPDATE active_goals SET status='waiting_external', needs_wake=0, updated_at=? WHERE goal_id=?",
-                (now, goal_id))
+            set_clauses = ["status='waiting_external'", 'needs_wake=0', 'updated_at=?']
+            params: list = [now]
+            if validated_handoff is not None:
+                set_clauses.append('handoff_json=?')
+                params.append(json.dumps(validated_handoff, ensure_ascii=False))
+            if validated_checklist is not None:
+                set_clauses.append('checklist_json=?')
+                params.append(json.dumps(validated_checklist, ensure_ascii=False))
+            params.append(goal_id)
+            db.execute(f"UPDATE active_goals SET {', '.join(set_clauses)} WHERE goal_id=?", params)
             db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
             return {
                 'goal_id': goal_id,
@@ -852,11 +1003,234 @@ class GoalStore:
                 'wake_at': target_wake,
                 'watch_path': clean_path,
                 'reason': clean_reason,
+                **({'handoff': validated_handoff} if validated_handoff is not None else {}),
+                **({'checklist': validated_checklist} if validated_checklist is not None else {}),
                 'hint': (
                     'Goal is now parked in waiting_external; end this turn now without further '
                     'tool calls so the watcher can resume you when ready.'
                 ),
             }
+
+    def handoff_goal(
+        self,
+        goal_id: str,
+        *,
+        handoff: dict,
+        checklist: list[dict] | None = None,
+        max_shifts_per_goal: int = 20,
+    ) -> dict:
+        """Persist shift handoff, discard current session_id, and schedule a fresh shift.
+
+        Anti-loop guard: transitions to ``blocked`` if total shifts reach ``max_shifts_per_goal``
+        or 3 consecutive agent_handoffs make no progress on verified_progress/checklist.
+        """
+        now = float(self.clock())
+        validated_checklist = validate_checklist(checklist) if checklist is not None else None
+        with self.store._transaction() as db:
+            goal = self._get(db, goal_id)
+            if goal['status'] != 'running':
+                raise RuntimeError(f"goal {goal_id} is {goal['status']}, not running")
+            if db.execute('SELECT 1 FROM goal_stop_intents WHERE goal_id=?', (goal_id,)).fetchone():
+                raise RuntimeError('execution stop is unconfirmed; handoff rejected')
+            shift_seq = int(db.execute(
+                'SELECT COALESCE(MAX(shift_seq), 0) FROM goal_shifts WHERE goal_id=?', (goal_id,)
+            ).fetchone()[0])
+            validated_handoff = validate_handoff(handoff, now=now, shift_seq=shift_seq)
+            effective_checklist = validated_checklist if validated_checklist is not None else goal['checklist']
+
+            # Anti-loop check 1: max shifts reached
+            if shift_seq >= max_shifts_per_goal:
+                db.execute(
+                    'UPDATE active_goals SET handoff_json=?, checklist_json=?, updated_at=? WHERE goal_id=?',
+                    (
+                        json.dumps(validated_handoff, ensure_ascii=False),
+                        json.dumps(effective_checklist, ensure_ascii=False),
+                        now,
+                        goal_id,
+                    ),
+                )
+                result = validate_goal_result({
+                    'goal_id': goal_id,
+                    'request_generation': goal['generation'],
+                    'status': 'blocked',
+                    'summary': f'Reached max_shifts_per_goal ({max_shifts_per_goal}) during handoff; escalating to parent.',
+                    'open_issues': [f'shift_limit_exceeded: {shift_seq} >= {max_shifts_per_goal}'],
+                })
+                return {**self._report_result_db(db, goal, result, now), 'blocked_by_guard': 'max_shifts_per_goal'}
+
+            # Anti-loop check 2: 3 consecutive agent_handoff shifts with identical verified_progress & checklist
+            recent = db.execute(
+                'SELECT rotation_reason, handoff_snapshot FROM goal_shifts '
+                'WHERE goal_id=? ORDER BY shift_seq DESC LIMIT 3',
+                (goal_id,),
+            ).fetchall()
+            prev_handoff = goal.get('handoff')
+            stagnant = False
+            if (
+                prev_handoff is not None
+                and prev_handoff.get('verified_progress') == validated_handoff['verified_progress']
+                and effective_checklist == goal['checklist']
+                and len(recent) >= 2
+                and all(r['rotation_reason'] == 'agent_handoff' for r in recent[:2])
+            ):
+                prior_snaps = [json.loads(r['handoff_snapshot']) for r in recent[:2] if r['handoff_snapshot']]
+                if len(prior_snaps) == 2 and all(
+                    s.get('verified_progress') == validated_handoff['verified_progress'] for s in prior_snaps
+                ):
+                    stagnant = True
+
+            if stagnant:
+                db.execute(
+                    'UPDATE active_goals SET handoff_json=?, checklist_json=?, updated_at=? WHERE goal_id=?',
+                    (
+                        json.dumps(validated_handoff, ensure_ascii=False),
+                        json.dumps(effective_checklist, ensure_ascii=False),
+                        now,
+                        goal_id,
+                    ),
+                )
+                result = validate_goal_result({
+                    'goal_id': goal_id,
+                    'request_generation': goal['generation'],
+                    'status': 'blocked',
+                    'summary': 'Detected 3 consecutive handoffs without verified progress; escalating to parent.',
+                    'open_issues': ['stagnant_handoff_loop: verified_progress and checklist unchanged across 3 handoffs'],
+                })
+                return {**self._report_result_db(db, goal, result, now), 'blocked_by_guard': 'stagnant_handoff_loop'}
+
+            db.execute(
+                "UPDATE active_goals SET handoff_json=?, checklist_json=?, session_id='', "
+                'session_wakes=0, session_started_at=NULL, handoff_requested=1, needs_wake=1, updated_at=? '
+                'WHERE goal_id=?',
+                (
+                    json.dumps(validated_handoff, ensure_ascii=False),
+                    json.dumps(effective_checklist, ensure_ascii=False),
+                    now,
+                    goal_id,
+                ),
+            )
+            db.execute('DELETE FROM goal_waits WHERE goal_id=?', (goal_id,))
+            db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
+            return {
+                'goal_id': goal_id,
+                'status': 'running',
+                'needs_wake': True,
+                'session_discarded': True,
+                'handoff': validated_handoff,
+                'checklist': effective_checklist,
+                'hint': (
+                    'Handoff saved and session discarded; end this turn now without further tool calls '
+                    'so ANCOR can start the next shift with a fresh context.'
+                ),
+            }
+
+    def list_shifts(self, goal_id: str) -> list[dict]:
+        with self.store._transaction() as db:
+            rows = db.execute(
+                'SELECT * FROM goal_shifts WHERE goal_id=? ORDER BY shift_seq, id', (goal_id,)
+            ).fetchall()
+            return [_decode_shift(r) for r in rows]
+
+    def enforce_shift_limit(self, goal_id: str, *, max_shifts_per_goal: int) -> dict | None:
+        """If goal has already reached max_shifts_per_goal, deterministically block it and return result."""
+        now = float(self.clock())
+        with self.store._transaction() as db:
+            goal = self._get(db, goal_id)
+            if goal['status'] != 'running':
+                return None
+            count = int(db.execute(
+                'SELECT COUNT(*) FROM goal_shifts WHERE goal_id=?', (goal_id,)
+            ).fetchone()[0])
+            if count < max_shifts_per_goal:
+                return None
+            result = validate_goal_result({
+                'goal_id': goal_id,
+                'request_generation': goal['generation'],
+                'status': 'blocked',
+                'summary': f'Goal reached max_shifts_per_goal ({max_shifts_per_goal}); escalating to parent.',
+                'open_issues': [f'shift_limit_exceeded: {count} >= {max_shifts_per_goal}'],
+            })
+            return self._report_result_db(db, goal, result, now)
+
+    def start_shift(
+        self,
+        goal_id: str,
+        *,
+        backend: str | None,
+        backend_args: list[str] | None,
+        session_id: str,
+        reused_session: bool,
+        rotation_reason: str | None,
+    ) -> dict:
+        if rotation_reason is not None and rotation_reason not in ROTATION_REASONS:
+            raise ValueError(f'invalid rotation_reason {rotation_reason!r}')
+        now = float(self.clock())
+        with self.store._transaction() as db:
+            goal = self._get(db, goal_id)
+            shift_seq = int(db.execute(
+                'SELECT COALESCE(MAX(shift_seq), 0) FROM goal_shifts WHERE goal_id=?', (goal_id,)
+            ).fetchone()[0]) + 1
+            if reused_session:
+                new_wakes = int(goal['session_wakes']) + 1
+                sess_started = goal['session_started_at'] or now
+                new_sid = session_id or goal['session_id']
+            else:
+                new_wakes = 1
+                sess_started = now
+                new_sid = ''
+            db.execute(
+                'UPDATE active_goals SET session_id=?, session_wakes=?, session_started_at=?, '
+                'handoff_requested=0, updated_at=? WHERE goal_id=?',
+                (new_sid, new_wakes, sess_started, now, goal_id),
+            )
+            cur = db.execute(
+                'INSERT INTO goal_shifts('
+                'goal_id, shift_seq, backend, backend_args, session_id, reused_session, '
+                'rotation_reason, started_at, handoff_snapshot) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    goal_id,
+                    shift_seq,
+                    backend,
+                    json.dumps(list(backend_args or []), ensure_ascii=False),
+                    new_sid,
+                    int(bool(reused_session)),
+                    rotation_reason,
+                    now,
+                    json.dumps(goal['handoff'], ensure_ascii=False) if goal.get('handoff') else None,
+                ),
+            )
+            row = db.execute('SELECT * FROM goal_shifts WHERE id=?', (cur.lastrowid,)).fetchone()
+            return _decode_shift(row)
+
+    def finish_shift(
+        self,
+        shift_id: int,
+        *,
+        goal_id: str,
+        exit_code: int | None,
+        outcome: str,
+    ) -> None:
+        now = float(self.clock())
+        with self.store._transaction() as db:
+            goal = self._get(db, goal_id)
+            db.execute(
+                'UPDATE goal_shifts SET finished_at=?, exit_code=?, outcome=?, session_id=?, '
+                'handoff_snapshot=?, observed_models=? WHERE id=?',
+                (
+                    now,
+                    exit_code,
+                    outcome,
+                    goal['session_id'],
+                    json.dumps(goal['handoff'], ensure_ascii=False) if goal.get('handoff') else None,
+                    json.dumps(goal.get('observed_models') or [], ensure_ascii=False),
+                    shift_id,
+                ),
+            )
+            db.execute(
+                'UPDATE active_goals SET last_run_finished_at=? WHERE goal_id=?',
+                (now, goal_id),
+            )
 
     def update_goal_budget(self, goal_id: str, budget: dict, *, caller_goal_id: str = 'root',
                            reason: str | None = None) -> dict:
@@ -1313,8 +1687,10 @@ class GoalStore:
     def bind_session(self, goal_id: str, session_id: str) -> None:
         session_id = _nonempty_str(session_id, 'session_id')
         with self.store._transaction() as db:
-            db.execute('UPDATE active_goals SET session_id=? WHERE goal_id=?', (session_id, goal_id))
             goal = self._get(db, goal_id)
+            if goal.get('handoff_requested'):
+                return
+            db.execute('UPDATE active_goals SET session_id=? WHERE goal_id=?', (session_id, goal_id))
             if goal['status'] == 'paused' or goal['status'] in TERMINAL_GOAL_STATUSES:
                 db.execute('INSERT INTO goal_stop_intents(goal_id, mode) VALUES (?, ?) '
                            'ON CONFLICT(goal_id) DO UPDATE SET mode=goal_stop_intents.mode',
@@ -1368,13 +1744,17 @@ class GoalStore:
         now = float(self.clock())
         with self.store._transaction() as db:
             goal = self._get(db, goal_id)
-            db.execute('UPDATE active_goals SET pid=NULL WHERE goal_id=?', (goal_id,))
+            db.execute('UPDATE active_goals SET pid=NULL, last_run_finished_at=? WHERE goal_id=?', (now, goal_id))
             if goal['status'] != 'running':
                 if goal['status'] == 'waiting_external' and error is None and not interrupted:
                     db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
                 if goal['status'] == 'paused' and signals:
                     db.execute('UPDATE active_goals SET pending_signals=? WHERE goal_id=?',
                                (json.dumps([*signals, *goal['pending_signals']], ensure_ascii=False), goal_id))
+                return self._get(db, goal_id)
+            if goal.get('handoff_requested') and error is None and not interrupted:
+                db.execute("UPDATE active_goals SET session_id='' WHERE goal_id=?", (goal_id,))
+                db.execute('DELETE FROM goal_run_failures WHERE goal_id=?', (goal_id,))
                 return self._get(db, goal_id)
             pending = goal['pending_signals']
             has_active = any(h.get('status', 'running') in ACTIVE_HANDLE_STATUSES
