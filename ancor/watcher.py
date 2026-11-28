@@ -395,17 +395,24 @@ def default_goal_command(profile: str, session_id: str, prompt: str, *, resume: 
 
 
 class GoalRunner:
-    """Launches independent persistent Hermes processes under ancor-exec with ANCOR_ROLE=goal."""
+    """Launches independent persistent goal sessions via a pluggable ExecutionBackend or legacy Hermes CLI."""
 
     def __init__(self, goal_store: GoalStore, *, profile: str = 'ancor-exec',
-                 command_builder=None, env_builder=None, category_router=None, native_sessions=None):
+                 command_builder=None, env_builder=None, category_router=None, native_sessions=None,
+                 backend_router=None, mcp_command_builder=None, system_prompt: str = ''):
         self.goal_store = goal_store
         self.profile = profile
         self.command_builder = command_builder or default_goal_command
         self.env_builder = env_builder
         self.category_router = category_router if category_router is not None else goal_store.category_router
+        self.backend_router = backend_router
+        self.mcp_command_builder = mcp_command_builder
+        self.system_prompt = system_prompt
         self.tasks: dict[str, asyncio.Task] = {}
-        self.native_sessions = command_builder is None if native_sessions is None else native_sessions
+        self.native_sessions = (
+            (command_builder is None and backend_router is None)
+            if native_sessions is None else native_sessions
+        )
 
     def _launch(self, goal: dict, signals: list[dict], *, resume: bool) -> list[str]:
         router = self.category_router
@@ -442,9 +449,21 @@ class GoalRunner:
     def run_goal_sync(self, goal_id: str) -> int:
         return asyncio.run(self.run_goal(goal_id))
 
-    async def _read_session_output(self, goal_id, stream, *, stderr=False):
+    async def _read_session_output(self, goal_id, stream, *, stderr=False, backend=None):
         while line := await stream.readline():
             text = line.decode('utf-8', errors='replace').strip()
+            if backend is not None:
+                ev = backend.parse_output_line(text, is_stderr=stderr)
+                if ev is None:
+                    continue
+                if ev.kind == 'session' and ev.session_id:
+                    self.goal_store.bind_session(goal_id, ev.session_id)
+                elif ev.kind == 'model' and ev.model:
+                    try:
+                        self.goal_store.record_observed_model(goal_id, ev.model, ev.provider)
+                    except Exception:
+                        pass
+                continue
             session_id = None
             if stderr:
                 # Native CLI emits this as soon as session.create/resume returns,
@@ -461,6 +480,53 @@ class GoalRunner:
             if isinstance(session_id, str) and session_id.strip():
                 self.goal_store.bind_session(goal_id, session_id)
 
+    def _build_backend_launch(self, goal: dict, signals: list[dict]):
+        from .backends.base import LaunchSpec
+        router = self.backend_router
+        bound_backend = goal.get('backend')
+        bound_args = goal.get('backend_args') or []
+        route = router.resolve(
+            role='goal',
+            category=goal.get('category'),
+            bound_backend=bound_backend,
+            bound_args=bound_args,
+        )
+        session_id = goal['session_id'] or None
+        if bound_backend and route.backend.name != bound_backend:
+            # Original backend disappeared; cold-start on fallback backend with recovery context.
+            self.goal_store.clear_session_for_fallback(goal['goal_id'])
+            session_id = None
+            signals = [
+                *signals,
+                {
+                    'kind': 'recovery',
+                    'payload': {
+                        'reason': f'backend {bound_backend!r} unavailable; switched to {route.backend.name!r}',
+                        'instruction': 'Inspect workspace and external_handles before acting; do not duplicate work.',
+                    },
+                    'at': float(self.goal_store.clock()),
+                },
+            ]
+        if not bound_backend or route.backend.name != bound_backend:
+            self.goal_store.bind_backend(goal['goal_id'], route.backend.name, route.args)
+
+        names = router.alias_names()
+        prompt = build_goal_prompt(goal, signals, model_categories=names)
+        mcp_cmd = self.mcp_command_builder('goal', goal['goal_id']) if self.mcp_command_builder else []
+        spec = LaunchSpec(
+            role='goal',
+            prompt=prompt,
+            system_prompt=self.system_prompt,
+            goal_id=goal['goal_id'],
+            session_id=session_id if route.backend.capabilities.supports_resume else None,
+            session_title=f"ancor-{goal['request_id']}-{goal['goal_id']}",
+            extra_args=route.args,
+            mcp_command=mcp_cmd,
+            env={'ANCOR_STORE_PATH': self.goal_store.store.path},
+        )
+        cmd, env, temp_files = route.backend.build_command(spec)
+        return route.backend, cmd, env, temp_files
+
     async def run_goal(self, goal_id: str) -> int:
         goal = self.goal_store.get_goal(goal_id)
         if goal['status'] != 'running':
@@ -471,20 +537,28 @@ class GoalRunner:
         error = None
         interrupted = False
         readers = []
+        active_backend = None
+        temp_files: list[Path] = []
         try:
-            resume = bool(goal['session_id'])
-            cmd = self._launch(goal, signals, resume=resume)
-            if self.native_sessions:
-                self.goal_store.prepare_native_session(goal_id, self.profile)
+            if self.backend_router is not None:
+                active_backend, cmd, env, temp_files = self._build_backend_launch(goal, signals)
+            else:
+                resume = bool(goal['session_id'])
+                cmd = self._launch(goal, signals, resume=resume)
+                env = self._child_env(goal)
+                if self.native_sessions:
+                    self.goal_store.prepare_native_session(goal_id, self.profile)
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-                *cmd, env=self._child_env(goal), stdin=asyncio.subprocess.DEVNULL,
+                *cmd, env=env, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 limit=8 * 1024 * 1024,
                 start_new_session=True))
             proc = await asyncio.shield(spawn)
             registered = self.goal_store.set_process(goal_id, proc.pid, goal['session_id'])
-            readers = [asyncio.create_task(self._read_session_output(goal_id, proc.stdout)),
-                       asyncio.create_task(self._read_session_output(goal_id, proc.stderr, stderr=True))]
+            readers = [
+                asyncio.create_task(self._read_session_output(goal_id, proc.stdout, backend=active_backend)),
+                asyncio.create_task(self._read_session_output(goal_id, proc.stderr, stderr=True, backend=active_backend)),
+            ]
             if registered['status'] != 'running':
                 raise asyncio.CancelledError
             rc = await proc.wait()
@@ -498,23 +572,35 @@ class GoalRunner:
                 proc = await asyncio.shield(spawn)
                 self.goal_store.set_process(goal_id, proc.pid, goal['session_id'])
             if proc is not None:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except asyncio.TimeoutError:
+                if active_backend is not None:
+                    await active_backend.stop_session(proc.pid, goal.get('session_id'))
                     try:
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        await asyncio.wait_for(proc.wait(), timeout=3)
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
-                    await proc.wait()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        await proc.wait()
             raise
         except Exception as exc:
             error = f'{type(exc).__name__}: {exc}'
             raise
         finally:
+            for path in temp_files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if readers:
                 await asyncio.gather(*readers, return_exceptions=True)
             if proc is None or proc.returncode is not None:
@@ -522,7 +608,9 @@ class GoalRunner:
                     self.goal_store.request_execution_stop(goal_id)
                     await asyncio.to_thread(self.goal_store.settle_stops, goal_ids=[goal_id])
                 self.goal_store.finish_run(goal_id, signals, error=error, interrupted=interrupted)
-                if self.category_router is not None:
+                if active_backend is not None and error and not interrupted and self.backend_router is not None:
+                    self.backend_router.mark_backend_cooldown(active_backend.name)
+                elif self.category_router is not None and hasattr(self.category_router, 'mark_provider_cooldown'):
                     try:
                         refreshed = self.goal_store.get_goal(goal_id)
                         obs = refreshed.get('observed_models') or []

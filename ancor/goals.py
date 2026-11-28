@@ -95,7 +95,9 @@ def init_goal_tables(db) -> None:
             updated_at REAL NOT NULL,
             deadline_at REAL,
             category TEXT,
-            observed_models TEXT NOT NULL DEFAULT '[]'
+            observed_models TEXT NOT NULL DEFAULT '[]',
+            backend TEXT,
+            backend_args TEXT NOT NULL DEFAULT '[]'
         );
         CREATE INDEX IF NOT EXISTS active_goals_parent ON active_goals(parent_goal_id);
         CREATE INDEX IF NOT EXISTS active_goals_request ON active_goals(request_id, status);
@@ -117,6 +119,11 @@ def init_goal_tables(db) -> None:
         CREATE INDEX IF NOT EXISTS judge_verdicts_request
             ON judge_verdicts(request_id, generation, id);
     ''')
+    existing_cols = {row[1] for row in db.execute('PRAGMA table_info(active_goals)')}
+    if 'backend' not in existing_cols:
+        db.execute('ALTER TABLE active_goals ADD COLUMN backend TEXT')
+    if 'backend_args' not in existing_cols:
+        db.execute("ALTER TABLE active_goals ADD COLUMN backend_args TEXT NOT NULL DEFAULT '[]'")
 
 
 def default_process_killer(pid: int) -> bool:
@@ -503,6 +510,8 @@ def _decode_goal(row) -> dict:
     item['result'] = json.loads(item['result_json']) if item.get('result_json') else None
     item['needs_wake'] = bool(item['needs_wake'])
     item['observed_models'] = json.loads(item.get('observed_models') or '[]')
+    item['backend'] = item.get('backend')
+    item['backend_args'] = json.loads(item.get('backend_args') or '[]')
     item['request_ref'] = {'id': item['request_id'], 'generation': item['generation']}
     return item
 
@@ -1310,6 +1319,21 @@ class GoalStore:
                 db.execute('INSERT INTO goal_stop_intents(goal_id, mode) VALUES (?, ?) '
                            'ON CONFLICT(goal_id) DO UPDATE SET mode=goal_stop_intents.mode',
                            (goal_id, 'preempt' if goal['status'] == 'cancelled' else 'drain'))
+
+    def bind_backend(self, goal_id: str, backend: str, backend_args: list[str] | None = None) -> None:
+        backend = _nonempty_str(backend, 'backend')
+        with self.store._transaction() as db:
+            db.execute(
+                'UPDATE active_goals SET backend=?, backend_args=?, updated_at=? WHERE goal_id=?',
+                (backend, json.dumps(list(backend_args or []), ensure_ascii=False), float(self.clock()), goal_id),
+            )
+
+    def clear_session_for_fallback(self, goal_id: str) -> None:
+        with self.store._transaction() as db:
+            db.execute(
+                "UPDATE active_goals SET session_id='', backend=NULL, backend_args='[]', updated_at=? WHERE goal_id=?",
+                (float(self.clock()), goal_id),
+            )
 
     def prepare_native_session(self, goal_id: str, profile: str) -> None:
         with self.store._transaction() as db:
