@@ -30,6 +30,15 @@ def _uncached_check(fn):
         return fn
 
 
+def _expire_tool_defs_memo():
+    """Prevent model_tools._tool_defs_cache from reusing one role's tool list for another role."""
+    try:
+        from tools.registry import _note_verdict_expiry
+        _note_verdict_expiry(0.0)
+    except Exception:
+        pass
+
+
 def register_session_roles(ctx, register_role, resolve_role, *, judge_runner=None):
     def collect(role):
         collected = _CollectedContext(ctx)
@@ -55,8 +64,8 @@ def register_session_roles(ctx, register_role, resolve_role, *, judge_runner=Non
             return sessions[key]
 
     definitions = {}
-    for template in templates.values():
-        definitions.update(template.tools)
+    for role_name in ('judge', 'goal', 'root'):
+        definitions.update(templates[role_name].tools)
     for name, definition in definitions.items():
         def dispatch(args, _name=name, **kwargs):
             selected = current()
@@ -65,6 +74,7 @@ def register_session_roles(ctx, register_role, resolve_role, *, judge_runner=Non
             return selected.tools[_name]['handler'](args, **kwargs)
 
         def check_allowed(_name=name):
+            _expire_tool_defs_memo()
             role = resolve_role(ctx)
             if role not in templates:
                 # If session identity is not bound yet during tool-schema assembly

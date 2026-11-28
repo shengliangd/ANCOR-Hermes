@@ -322,3 +322,27 @@ def test_stalled_active_request_warns_on_ack_and_emits_stalled_event_with_cooldo
     now[0] += STALLED_COOLDOWN_SECONDS
     host.scan()
     assert host.last_stalled == [req['id']]
+
+
+def test_session_role_check_fn_expires_shared_tool_defs_memo(tmp_path, monkeypatch):
+    import ancor.session_roles as sr
+    from ancor.session_identity import launch_identity
+
+    expired = []
+    monkeypatch.setattr(sr, '_expire_tool_defs_memo', lambda: expired.append(0.0))
+    store = Store(tmp_path / 'requests.db')
+    ctx = FakeContext('ancor-exec', store.path)
+    ctx._manager = object()
+    ancor.register(ctx)
+
+    monkeypatch.setenv('HERMES_EPHEMERAL_SYSTEM_PROMPT', launch_identity('root'))
+    assert ctx.tools['ancor_event_ack']['check_fn']() is True
+    assert ctx.tools['ancor_goal_self']['check_fn']() is False
+
+    monkeypatch.setenv('HERMES_EPHEMERAL_SYSTEM_PROMPT', launch_identity('goal', 'g1'))
+    assert ctx.tools['ancor_goal_self']['check_fn']() is True
+    assert ctx.tools['ancor_request_read']['check_fn']() is True
+    assert ctx.tools['ancor_resource_acquire']['check_fn']() is True
+    assert ctx.tools['ancor_goal_wait']['check_fn']() is True
+    assert ctx.tools['ancor_event_ack']['check_fn']() is False
+    assert len(expired) >= 7
